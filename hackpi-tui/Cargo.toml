@@ -3,6 +3,10 @@ name = "hackpi-tui"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "hackpi"
+path = "src/main.rs"
+
 [dependencies]
 tokio.workspace = true
 serde.workspace = true
@@ -11,5 +15,7 @@ anyhow.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 futures.workspace = true
 hackpi-core = { path = "../hackpi-core" }
+hackpi-tools = { path = "../hackpi-tools" }
