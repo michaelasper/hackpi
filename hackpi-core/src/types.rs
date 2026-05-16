@@ -82,6 +82,21 @@ impl Default for ApiConfig {
     }
 }
 
+impl ApiConfig {
+    pub fn from_env() -> Self {
+        Self {
+            endpoint: std::env::var("HACKPI_ENDPOINT")
+                .unwrap_or_else(|_| "http://127.0.0.1:8000/v1/messages".into()),
+            model: std::env::var("HACKPI_MODEL").unwrap_or_else(|_| "ds4".into()),
+            max_tokens: std::env::var("HACKPI_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8192),
+            temperature: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
@@ -132,4 +147,38 @@ pub struct ToolSchema {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_api_config_from_env_overrides_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("HACKPI_ENDPOINT", "http://localhost:8080/v1/messages");
+        std::env::set_var("HACKPI_MODEL", "gpt-4");
+        std::env::set_var("HACKPI_MAX_TOKENS", "4096");
+
+        let config = ApiConfig::from_env();
+
+        assert_eq!(config.endpoint, "http://localhost:8080/v1/messages");
+        assert_eq!(config.model, "gpt-4");
+        assert_eq!(config.max_tokens, 4096);
+        assert_eq!(config.temperature, 0.0);
+    }
+
+    #[test]
+    fn test_api_config_from_env_falls_back_to_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let config = ApiConfig::from_env();
+
+        assert_eq!(config.endpoint, "http://127.0.0.1:8000/v1/messages");
+        assert_eq!(config.model, "ds4");
+        assert_eq!(config.max_tokens, 8192);
+    }
 }

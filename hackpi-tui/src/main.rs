@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::new();
     let mut input = InputHandler::new();
 
-    let _api = ApiClient::new(ApiConfig::default());
+    let api_config = ApiConfig::from_env();
     let workspace_root = std::env::current_dir()?;
 
     let mut tool_registry = ToolRegistry::new();
@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
                                 let agent_tx_clone = agent_tx.clone();
 
                                 let agent_instance = Agent::new(
-                                    ApiClient::new(ApiConfig::default()),
+                                    ApiClient::new(api_config.clone()),
                                     tools.clone(),
                                     SYSTEM_PROMPT.to_string(),
                                     workspace_root.clone(),
