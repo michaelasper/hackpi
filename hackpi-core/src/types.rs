@@ -169,11 +169,19 @@ mod tests {
         assert_eq!(config.model, "gpt-4");
         assert_eq!(config.max_tokens, 4096);
         assert_eq!(config.temperature, 0.0);
+
+        std::env::remove_var("HACKPI_ENDPOINT");
+        std::env::remove_var("HACKPI_MODEL");
+        std::env::remove_var("HACKPI_MAX_TOKENS");
     }
 
     #[test]
     fn test_api_config_from_env_falls_back_to_defaults() {
         let _lock = ENV_LOCK.lock().unwrap();
+
+        std::env::remove_var("HACKPI_ENDPOINT");
+        std::env::remove_var("HACKPI_MODEL");
+        std::env::remove_var("HACKPI_MAX_TOKENS");
 
         let config = ApiConfig::from_env();
 
