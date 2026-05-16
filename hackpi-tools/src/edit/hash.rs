@@ -1,11 +1,11 @@
 use xxhash_rust::xxh32::xxh32;
 
-const HASH_CHARS: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
+pub(crate) const HASH_CHARS: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
 
-pub(crate) fn line_hash(line: &str) -> String {
+pub(crate) fn line_hash(line: &str, line_num: usize) -> String {
     let trimmed = line.trim();
     let seed = if trimmed.chars().all(|c| !c.is_alphanumeric()) {
-        line.len() as u32
+        line_num as u32
     } else {
         0
     };

@@ -1,20 +1,36 @@
 use std::fmt::Write;
 
-use super::hash::line_hash;
+use super::hash::{line_hash, HASH_CHARS};
+
+fn looks_like_read_prefix(s: &str) -> bool {
+    // Matches read output prefix like "8#VR:" or "  8#VR:"
+    let s = s.trim();
+    let (num_part, rest) = match s.split_once('#') {
+        Some((n, r)) => (n, r),
+        None => return false,
+    };
+    if num_part.parse::<usize>().is_err() {
+        return false;
+    }
+    if rest.len() < 3 {
+        return false;
+    }
+    let hash_chars = &rest.as_bytes()[..2];
+    let colon = rest.as_bytes()[2];
+    if colon != b':' {
+        return false;
+    }
+    hash_chars.iter().all(|c| HASH_CHARS.contains(c))
+}
 
 pub(crate) fn contains_patch_markers(lines: &[String]) -> bool {
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with("LINE#HASH:") || trimmed.starts_with("+") || trimmed.starts_with("-")
-        {
-            if let Some((num_str, _)) = trimmed.split_once('#') {
-                if num_str.parse::<usize>().is_ok() {
-                    return true;
-                }
-            }
-            if trimmed.starts_with("+ ") || trimmed.starts_with("- ") {
-                return true;
-            }
+        if looks_like_read_prefix(trimmed) {
+            return true;
+        }
+        if trimmed.starts_with("+ ") || trimmed.starts_with("- ") {
+            return true;
         }
     }
     false
@@ -27,7 +43,7 @@ pub(crate) fn resolve_anchor(anchor: &str, lines: &[String]) -> Option<usize> {
         return None;
     }
     let actual = &lines[lineno - 1];
-    let expected_hash = line_hash(actual);
+    let expected_hash = line_hash(actual, lineno);
     if expected_hash == hash {
         Some(lineno - 1)
     } else {
@@ -44,9 +60,9 @@ pub(crate) fn resolve_anchor_range(anchor: &str, lines: &[String]) -> Option<(us
         return None;
     }
     let actual_start = &lines[start - 1];
-    let start_hash = line_hash(actual_start);
+    let start_hash = line_hash(actual_start, start);
     let actual_end = &lines[end - 1];
-    let end_hash = line_hash(actual_end);
+    let end_hash = line_hash(actual_end, end);
     let computed = format!("{start_hash}{end_hash}");
     if computed.as_str() != hash.chars().take(4).collect::<String>() {
         return None;
@@ -59,7 +75,7 @@ pub(crate) fn make_updated_anchors(lines: &[String], start_line: usize, end_line
     writeln!(block, "--- Updated anchors ---").ok();
     for i in start_line..end_line.min(lines.len()) {
         if let Some(line) = lines.get(i) {
-            writeln!(block, "{}#{}:{}", i + 1, line_hash(line), line).ok();
+            writeln!(block, "{}#{}:{}", i + 1, line_hash(line, i + 1), line).ok();
         }
     }
     block
@@ -75,7 +91,7 @@ pub(crate) fn generate_anchor_hint(lines: &[String], failed_anchor: &str) -> Str
     for i in start..=end {
         let idx = i - 1;
         if let Some(line) = lines.get(idx) {
-            writeln!(hint, "{}#{}:{}", i, line_hash(line), line).ok();
+            writeln!(hint, "{}#{}:{}", i, line_hash(line, i), line).ok();
         }
     }
     hint

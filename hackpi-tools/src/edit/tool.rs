@@ -8,7 +8,7 @@ use super::anchor::{
     resolve_anchor_range,
 };
 use super::hash::line_hash;
-use super::ops::{op_anchor_line, deserialize_edit_ops, AppliedEdit, EditOp};
+use super::ops::{deserialize_edit_ops, op_anchor_line, AppliedEdit, EditOp};
 
 pub struct EditTool {
     workspace_root: std::path::PathBuf,
@@ -85,7 +85,7 @@ impl Tool for EditTool {
             Some(p) => p,
             None => {
                 return ToolResult::SystemError {
-                    message: "Missing 'filePath' parameter.".into(),
+                    message: "Missing 'path' parameter.".into(),
                 }
             }
         };
@@ -229,6 +229,23 @@ impl Tool for EditTool {
                             message: "replace_text: oldText must not be empty.".into(),
                         };
                     }
+                    let haystack = lines.join("\n");
+                    let count = haystack.matches(old_text.as_str()).count();
+                    if count == 0 {
+                        return ToolResult::SystemError {
+                            message: format!(
+                                "[E_TEXT_NOT_FOUND] replace_text: '{old_text}' not found in {file_path}."
+                            ),
+                        };
+                    }
+                    if count > 1 {
+                        return ToolResult::SystemError {
+                            message: format!(
+                                "[E_TEXT_NOT_UNIQUE] replace_text: '{old_text}' matches {count} times in {file_path}. \
+                                 Use a more specific string to match exactly one occurrence."
+                            ),
+                        };
+                    }
                 }
             }
         }
@@ -354,10 +371,16 @@ impl Tool for EditTool {
             .unwrap_or("file");
         let tmp_path = canonical.with_file_name(format!(".{file_name}.tmp"));
 
+        let original_perms = std::fs::metadata(&canonical).ok().map(|m| m.permissions());
+
         if let Err(e) = std::fs::write(&tmp_path, result.as_bytes()) {
             return ToolResult::SystemError {
                 message: format!("IO error writing {file_path}: {e}"),
             };
+        }
+
+        if let Some(perms) = &original_perms {
+            let _ = std::fs::set_permissions(&tmp_path, perms.clone());
         }
 
         if let Err(e) = std::fs::rename(&tmp_path, &canonical) {
@@ -383,7 +406,7 @@ impl Tool for EditTool {
                     writeln!(diff, "- {line}").ok();
                 }
                 for line in &ae.new_snippet {
-                    writeln!(diff, "+ {line}  #{}", line_hash(line)).ok();
+                    writeln!(diff, "+ {line}  #{}", line_hash(line, 0)).ok();
                 }
                 output.push_str(&diff);
             }

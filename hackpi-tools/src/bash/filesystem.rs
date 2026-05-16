@@ -125,7 +125,10 @@ impl Default for InMemoryFs {
     }
 }
 
-pub(crate) fn resolve_path_mut<'a>(node: &'a mut FileNode, path: &Path) -> Option<&'a mut FileNode> {
+pub(crate) fn resolve_path_mut<'a>(
+    node: &'a mut FileNode,
+    path: &Path,
+) -> Option<&'a mut FileNode> {
     let components: Vec<_> = path.components().collect();
     let mut segments: Vec<&str> = Vec::new();
     for comp in components {

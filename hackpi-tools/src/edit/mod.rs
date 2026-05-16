@@ -4,3 +4,6 @@ pub(crate) mod ops;
 pub mod tool;
 
 pub use tool::EditTool;
+
+#[cfg(test)]
+mod tests;

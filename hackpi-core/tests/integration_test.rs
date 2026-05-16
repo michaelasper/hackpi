@@ -6,14 +6,11 @@ use tokio::sync::{mpsc, watch};
 use hackpi_core::agent::{Agent, AgentEvent};
 use hackpi_core::api::ApiClient;
 use hackpi_core::tools::ToolRegistry;
-use hackpi_core::types::{ApiConfig, Message, Role, ContentBlock};
+use hackpi_core::types::{ApiConfig, ContentBlock, Message, Role};
 
 fn is_ds4_running() -> bool {
-    std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:8000".parse().unwrap(),
-        Duration::from_secs(2),
-    )
-    .is_ok()
+    std::net::TcpStream::connect_timeout(&"127.0.0.1:8000".parse().unwrap(), Duration::from_secs(2))
+        .is_ok()
 }
 
 #[tokio::test]
@@ -46,7 +43,9 @@ async fn test_agent_basic_conversation() {
     let (_cancel_tx, signal) = watch::channel(false);
 
     tokio::time::timeout(Duration::from_secs(30), async {
-        agent.run("Say hello in one word.", &mut conversation, tx, signal).await;
+        agent
+            .run("Say hello in one word.", &mut conversation, tx, signal)
+            .await;
     })
     .await
     .expect("Agent timed out");
@@ -66,5 +65,8 @@ async fn test_agent_basic_conversation() {
         .iter()
         .filter(|m| matches!(m.role, Role::Assistant))
         .collect();
-    assert!(!assistant_messages.is_empty(), "Agent should add assistant messages");
+    assert!(
+        !assistant_messages.is_empty(),
+        "Agent should add assistant messages"
+    );
 }

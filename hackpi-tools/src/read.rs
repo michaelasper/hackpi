@@ -6,10 +6,10 @@ use xxhash_rust::xxh32::xxh32;
 
 const HASH_CHARS: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
 
-fn line_hash(line: &str) -> String {
+fn line_hash(line: &str, line_num: usize) -> String {
     let trimmed = line.trim();
     let seed = if trimmed.chars().all(|c| !c.is_alphanumeric()) {
-        line.len() as u32
+        line_num as u32
     } else {
         0
     };
@@ -68,7 +68,7 @@ impl Tool for ReadTool {
             Some(p) => p,
             None => {
                 return ToolResult::SystemError {
-                    message: "Missing 'filePath' parameter.".into(),
+                    message: "Missing 'path' parameter.".into(),
                 }
             }
         };
@@ -136,7 +136,7 @@ impl Tool for ReadTool {
             let truncated_lines = &lines[..shown];
             for (i, line) in truncated_lines.iter().enumerate() {
                 let lnum = i + 1;
-                let hash = line_hash(line);
+                let hash = line_hash(line, lnum);
                 writeln!(
                     output,
                     "{:>width$}#{hash}:{line}",
@@ -145,13 +145,15 @@ impl Tool for ReadTool {
                 )
                 .ok();
             }
+            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let language = detect_language(&path);
             output.push_str(&format!(
-                "... [truncated: {total_lines} total lines, showing {shown}] ..."
+                "... [truncated: {total_lines} lines, {file_size} bytes, {language}] ..."
             ));
         } else {
             for (i, line) in display_lines.iter().enumerate() {
                 let lnum = start + i + 1;
-                let hash = line_hash(line);
+                let hash = line_hash(line, lnum);
                 writeln!(
                     output,
                     "{:>width$}#{hash}:{line}",
@@ -167,6 +169,30 @@ impl Tool for ReadTool {
 }
 
 use std::fmt::Write;
+
+fn detect_language(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => "Rust",
+        Some("py") => "Python",
+        Some("js" | "jsx") => "JavaScript",
+        Some("ts" | "tsx") => "TypeScript",
+        Some("go") => "Go",
+        Some("java") => "Java",
+        Some("rb") => "Ruby",
+        Some("c" | "h") => "C",
+        Some("cpp" | "hpp" | "cc" | "cxx") => "C++",
+        Some("css") => "CSS",
+        Some("html") => "HTML",
+        Some("json") => "JSON",
+        Some("yaml" | "yml") => "YAML",
+        Some("md") => "Markdown",
+        Some("toml") => "TOML",
+        Some("sql") => "SQL",
+        Some("sh") => "Shell",
+        Some("zig") => "Zig",
+        _ => "Unknown",
+    }
+}
 
 fn read_directory(path: &Path, display_path: &str) -> ToolResult {
     let mut entries: Vec<_> = match std::fs::read_dir(path) {
@@ -200,4 +226,96 @@ fn read_directory(path: &Path, display_path: &str) -> ToolResult {
     }
 
     ToolResult::Success { content: output }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::OnceLock;
+
+    fn temp_dir() -> std::path::PathBuf {
+        static COUNTER: OnceLock<std::sync::atomic::AtomicU32> = OnceLock::new();
+        let c = COUNTER.get_or_init(|| std::sync::atomic::AtomicU32::new(0));
+        let id = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("hackpi_read_test_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn create_large_file(dir: &std::path::Path, name: &str, lines: usize) {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..lines {
+            writeln!(f, "line {i}").unwrap();
+        }
+    }
+
+    async fn read_via_tool(workspace_root: &std::path::Path, path: &str) -> String {
+        let tool = ReadTool::new(workspace_root.to_path_buf());
+        let params = serde_json::json!({ "path": path });
+        let ctx = ToolContext {
+            workspace_root: workspace_root.to_path_buf(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        match result {
+            ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_large_file_includes_size_and_language() {
+        let dir = temp_dir();
+        create_large_file(&dir, "test.rs", 1001);
+
+        let content = read_via_tool(&dir, "test.rs").await;
+
+        // Spec §139-141: must include file size, line count, and detected language
+        assert!(
+            content.contains("bytes"),
+            "large file output should include file size, got: {content}"
+        );
+        assert!(
+            content.contains("1001 lines"),
+            "large file output should include line count, got: {content}"
+        );
+        assert!(
+            content.contains("Rust"),
+            "large file output should include detected language, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_small_file_no_truncation_summary() {
+        let dir = temp_dir();
+        create_large_file(&dir, "test.py", 10);
+
+        let content = read_via_tool(&dir, "test.py").await;
+        assert!(
+            !content.contains("truncated"),
+            "small file should not be truncated: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_directory_listing_format() {
+        let dir = temp_dir();
+        std::fs::create_dir(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join("file.txt"), b"content").unwrap();
+        // The tool uses workspace_root.join(path), so
+        // if workspace_root = dir and path = "" it reads dir
+        let content = read_via_tool(&dir, "").await;
+        assert!(
+            content.contains("dir") && content.contains("subdir"),
+            "directory listing should show subdir, got: {content}"
+        );
+        assert!(
+            content.contains("file") && content.contains("file.txt"),
+            "directory listing should show file.txt, got: {content}"
+        );
+    }
 }

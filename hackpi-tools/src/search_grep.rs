@@ -232,7 +232,7 @@ fn walkdir(
         if name.starts_with('.') && name != "." {
             return false;
         }
-        if name == "node_modules" || name == "target" {
+        if name == "node_modules" || name == "target" || name == "dist" || name == "build" {
             return false;
         }
         if is_ignored_by_gitignore(e.path(), &gitignore_patterns) {
@@ -246,4 +246,163 @@ fn walkdir(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn temp_dir() -> std::path::PathBuf {
+        static COUNTER: std::sync::OnceLock<std::sync::atomic::AtomicU32> =
+            std::sync::OnceLock::new();
+        let c = COUNTER.get_or_init(|| std::sync::atomic::AtomicU32::new(0));
+        let id = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("hackpi_search_test_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn create_file(dir: &std::path::Path, path: &str, content: &str) {
+        let full = dir.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::File::create(&full).unwrap();
+        write!(f, "{content}").unwrap();
+    }
+
+    #[test]
+    fn test_walkdir_skips_dist() {
+        let dir = temp_dir();
+        create_file(&dir, "src/lib.rs", "fn foo() {}");
+        create_file(&dir, "dist/bundle.js", "var x = 1;");
+
+        let mut results = Vec::new();
+        let glob = globset::Glob::new("*").unwrap().compile_matcher();
+        walkdir(&dir, &mut results, &glob).unwrap();
+
+        let has_dist = results.iter().any(|p| p.to_string_lossy().contains("dist"));
+        assert!(
+            !has_dist,
+            "walkdir should skip dist/ directory, found: {results:?}"
+        );
+    }
+
+    #[test]
+    fn test_walkdir_skips_build() {
+        let dir = temp_dir();
+        create_file(&dir, "src/lib.rs", "fn foo() {}");
+        create_file(&dir, "build/out.o", "binary");
+
+        let mut results = Vec::new();
+        let glob = globset::Glob::new("*").unwrap().compile_matcher();
+        walkdir(&dir, &mut results, &glob).unwrap();
+
+        let has_build = results
+            .iter()
+            .any(|p| p.to_string_lossy().contains("build"));
+        assert!(
+            !has_build,
+            "walkdir should skip build/ directory, found: {results:?}"
+        );
+    }
+
+    #[test]
+    fn test_walkdir_includes_src() {
+        let dir = temp_dir();
+        create_file(&dir, "src/lib.rs", "fn foo() {}");
+        create_file(&dir, "src/main.rs", "fn main() {}");
+
+        let mut results = Vec::new();
+        let glob = globset::Glob::new("*").unwrap().compile_matcher();
+        walkdir(&dir, &mut results, &glob).unwrap();
+
+        assert!(
+            results.len() >= 2,
+            "walkdir should include src files, found: {results:?}"
+        );
+    }
+
+    #[test]
+    fn test_walkdir_skips_node_modules() {
+        let dir = temp_dir();
+        create_file(&dir, "src/lib.rs", "fn foo() {}");
+        create_file(&dir, "node_modules/pkg/index.js", "module.exports = 1;");
+
+        let mut results = Vec::new();
+        let glob = globset::Glob::new("*").unwrap().compile_matcher();
+        walkdir(&dir, &mut results, &glob).unwrap();
+
+        let has_nm = results
+            .iter()
+            .any(|p| p.to_string_lossy().contains("node_modules"));
+        assert!(
+            !has_nm,
+            "walkdir should skip node_modules/, found: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_hard_ignores_dist_and_build() {
+        let dir = temp_dir();
+        create_file(&dir, "src/lib.rs", "fn foo() {}");
+        create_file(&dir, "dist/bundle.js", "var x = 1; var y = 2;");
+        create_file(&dir, "build/out.o", "binary data here");
+
+        let tool = SearchGrepTool::new(dir.clone());
+        let params = serde_json::json!({ "pattern": "var" });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        let content = match result {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+        assert!(
+            !content.contains("dist/"),
+            "search should not return results from dist/, got: {content}"
+        );
+        assert!(
+            !content.contains("build/"),
+            "search should not return results from build/, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_output_format() {
+        let dir = temp_dir();
+        create_file(&dir, "src/auth.rs", "pub fn handle_auth(token: &str) {}");
+        create_file(&dir, "src/db.rs", "use crate::auth::AuthStrategy;");
+
+        let tool = SearchGrepTool::new(dir.clone());
+        let params = serde_json::json!({ "pattern": "auth" });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        let content = match result {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+        // Output should have: path:line:  content format with --- separators
+        assert!(
+            content.contains("src/auth.rs"),
+            "output should include file path, got: {content}"
+        );
+        assert!(
+            content.contains("---"),
+            "output should have --- separator between file groups, got: {content}"
+        );
+        assert!(
+            content.contains("handle_auth"),
+            "output should include matching line content, got: {content}"
+        );
+    }
 }
