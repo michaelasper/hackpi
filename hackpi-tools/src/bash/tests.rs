@@ -1,7 +1,7 @@
 use std::path::Path;
 use tokio::sync::watch;
 
-use super::filesystem::InMemoryFs;
+use super::filesystem::{FileSystem, InMemoryFs};
 use super::session::{with_session, BashOutput, BashSession};
 
 fn new_session() -> BashSession {
@@ -635,6 +635,39 @@ fn test_or_with_stderr_redirect() {
 }
 
 #[test]
+fn test_mkdir_with_parent_traversal() {
+    let mut session = new_session();
+    let out = session.execute("mkdir -p /tmp/a/b/../c");
+    assert_eq!(out.exit_code, 0);
+    assert!(session.fs.is_dir(Path::new("/tmp/a/c")));
+    assert!(!session.fs.is_dir(Path::new("/tmp/a/b")));
+}
+
+#[test]
+fn test_echo_with_parent_traversal() {
+    let mut session = new_session();
+    let out = session.execute("echo hello > /tmp/a/../b.txt");
+    assert_eq!(out.exit_code, 0);
+    assert!(session.fs.is_file(Path::new("/tmp/b.txt")));
+    let content = session.fs.read(Path::new("/tmp/b.txt")).unwrap();
+    assert_eq!(String::from_utf8_lossy(&content), "hello\n");
+    assert!(!session.fs.is_dir(Path::new("/tmp/a")));
+}
+
+#[test]
+fn test_rm_with_parent_traversal() {
+    let mut session = new_session();
+    session.execute("mkdir -p /tmp/a");
+    session
+        .fs
+        .write(Path::new("/tmp/b.txt"), b"content")
+        .unwrap();
+    let out = session.execute("rm /tmp/a/../b.txt");
+    assert_eq!(out.exit_code, 0);
+    assert!(!session.fs.exists(Path::new("/tmp/b.txt")));
+}
+
+#[test]
 fn test_with_session_works_without_workspace_root() {
     let (_, rx) = watch::channel(false);
     with_session(None, Some(rx), |session| {
@@ -642,4 +675,31 @@ fn test_with_session_works_without_workspace_root() {
         assert_eq!(out.exit_code, 0);
         assert_eq!(output_stdout(&out), "hello");
     });
+}
+
+#[test]
+fn test_concurrent_reads_do_not_deadlock() {
+    let fs = Box::new(InMemoryFs::default());
+    fs.write(Path::new("/file1.txt"), b"content1").unwrap();
+    fs.write(Path::new("/file2.txt"), b"content2").unwrap();
+    fs.write(Path::new("/file3.txt"), b"content3").unwrap();
+
+    std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            handles.push(s.spawn(|| {
+                for _ in 0..100 {
+                    let _r1 = fs.read(Path::new("/file1.txt"));
+                    let _r2 = fs.read(Path::new("/file2.txt"));
+                    let _r3 = fs.read(Path::new("/file3.txt"));
+                    let _e = fs.exists(Path::new("/file1.txt"));
+                    let _d = fs.is_dir(Path::new("/"));
+                    let _f = fs.is_file(Path::new("/file1.txt"));
+                }
+            }));
+        }
+    });
+
+    assert_eq!(fs.read(Path::new("/file1.txt")).unwrap(), b"content1");
+    assert_eq!(fs.read(Path::new("/file2.txt")).unwrap(), b"content2");
 }

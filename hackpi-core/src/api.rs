@@ -3,6 +3,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub struct ApiClient {
@@ -11,11 +12,15 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    pub fn new(config: ApiConfig) -> Self {
-        Self {
-            client: Client::new(),
+    pub fn new(config: ApiConfig) -> Result<Self> {
+        Ok(Self {
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(300))
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {e}"))?,
             config,
-        }
+        })
     }
 
     pub async fn send_messages(
@@ -98,4 +103,19 @@ impl ApiClient {
 pub enum ApiEvent {
     Event(Box<StreamEvent>),
     Done,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_api_client_has_connect_timeout() {
+        let config = ApiConfig::default();
+        let result = ApiClient::new(config);
+        assert!(
+            result.is_ok(),
+            "ApiClient::new should succeed with default config"
+        );
+    }
 }

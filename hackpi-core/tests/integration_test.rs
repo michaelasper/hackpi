@@ -27,7 +27,7 @@ async fn test_agent_basic_conversation() {
         temperature: 0.0,
     };
 
-    let api = ApiClient::new(config);
+    let api = ApiClient::new(config).unwrap();
     let tools = Arc::new(ToolRegistry::new());
     let system_prompt = "You are a helpful assistant. Respond concisely.";
     let workspace_root = PathBuf::from("/tmp");

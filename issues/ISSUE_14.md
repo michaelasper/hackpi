@@ -1,6 +1,9 @@
 # [Bugs] - [HIGH] - Empty assistant message pushed on every tool-use turn pollutes conversation
 
 **Labels:** `bug`, `priority-high`, `performance`
+**Status:** RESOLVED
+
+**Fix:** Removed the `if turn > 0` block in `agent.rs` that pushed an empty assistant message (`ContentBlock::text("")`) before tool results. Tool results are still pushed as a User message (preserving the API contract), but no wasteful empty message precedes them.
 
 ## Description
 

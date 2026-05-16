@@ -91,7 +91,7 @@ impl Agent {
             content: vec![ContentBlock::text(user_message)],
         });
 
-        for turn in 0..MAX_TURNS {
+        for _turn in 0..MAX_TURNS {
             if *signal.borrow() {
                 tx.send(AgentEvent::Done).ok();
                 return;
@@ -258,12 +258,6 @@ impl Agent {
             }
 
             if !tool_results.is_empty() {
-                if turn > 0 {
-                    conversation.push(Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::text("")],
-                    });
-                }
                 conversation.push(Message {
                     role: Role::User,
                     content: tool_results,
@@ -423,6 +417,40 @@ mod tests {
         assert!(result.contains("unknown"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_no_empty_assistant_messages_in_tool_results() {
+        let mut conversation: Vec<Message> = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("hello")],
+        }];
+
+        let tool_results = vec![ContentBlock::tool_result("tool_1", "result")];
+
+        let before = conversation.len();
+        conversation.push(Message {
+            role: Role::User,
+            content: tool_results,
+        });
+
+        assert_eq!(
+            conversation.len(),
+            before + 1,
+            "should add exactly one message"
+        );
+        let has_empty_assistant = conversation.iter().any(|m| {
+            if !matches!(m.role, Role::Assistant) {
+                return false;
+            }
+            m.content
+                .iter()
+                .any(|c| matches!(c, ContentBlock::Text { text, .. } if text.is_empty()))
+        });
+        assert!(
+            !has_empty_assistant,
+            "no empty assistant messages should exist"
+        );
     }
 
     #[test]

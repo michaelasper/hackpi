@@ -1,6 +1,9 @@
 # [Architecture] - [MEDIUM] - Conversation history is not persisted and recreated per API call
 
 **Labels:** `architecture`, `priority-medium`, `missing-feature`
+**Status:** RESOLVED
+
+**Fix:** Moved `conversation_mut` from inside the submit handler to the outer scope, wrapping it in `Arc<tokio::sync::Mutex<Vec<Message>>>` to share across `tokio::spawn` tasks. Each spawn clones the Arc, locks the mutex, and passes `&mut *guard` to `Agent::run`. Conversation now persists across user turns within a session.
 
 ## Description
 

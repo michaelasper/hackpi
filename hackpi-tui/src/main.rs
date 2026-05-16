@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app = App::new();
     let mut input = InputHandler::new();
+    let conversation_mut = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     let api_config = ApiConfig::from_env();
     let workspace_root = std::env::current_dir()?;
@@ -134,20 +135,21 @@ async fn main() -> anyhow::Result<()> {
                                 let agent_tx_clone = agent_tx.clone();
 
                                 let agent_instance = Agent::new(
-                                    ApiClient::new(api_config.clone()),
+                                    ApiClient::new(api_config.clone())?,
                                     tools.clone(),
                                     SYSTEM_PROMPT.to_string(),
                                     workspace_root.clone(),
                                 );
 
-                                let mut conversation_mut = Vec::new();
+                                let conversation_clone = Arc::clone(&conversation_mut);
                                 let tx_for_agent = agent_tx_clone.clone();
 
                                 tokio::spawn(async move {
+                                    let mut conv_guard = conversation_clone.lock().await;
                                     agent_instance
                                         .run(
                                             &submitted,
-                                            &mut conversation_mut,
+                                            &mut conv_guard,
                                             tx_for_agent,
                                             signal_rx_clone,
                                         )

@@ -33,6 +33,7 @@ pub struct App {
     pub scroll_offset: usize,
     pub usage: Option<Usage>,
     pub status_message: String,
+    pub quit_requested: bool,
 }
 
 impl Default for App {
@@ -50,6 +51,7 @@ impl App {
             scroll_offset: 0,
             usage: None,
             status_message: String::new(),
+            quit_requested: false,
         }
     }
 
@@ -130,9 +132,106 @@ impl App {
     }
 }
 
+pub fn handle_slash_command(
+    cmd: &str,
+    app: &mut App,
+    tui_tx: &tokio::sync::mpsc::UnboundedSender<TuiEvent>,
+) -> bool {
+    let parts: Vec<&str> = cmd.trim().splitn(2, char::is_whitespace).collect();
+    let command = parts[0];
+    match command {
+        "/help" => {
+            let help_text = "\
+Available commands:
+  /help  - Show this help message
+  /clear - Clear the conversation
+  /quit  - Exit the application";
+            tui_tx
+                .send(TuiEvent::StreamChunk(help_text.to_string()))
+                .ok();
+            tui_tx.send(TuiEvent::Done).ok();
+            true
+        }
+        "/clear" => {
+            app.clear();
+            true
+        }
+        "/quit" => {
+            app.quit_requested = true;
+            true
+        }
+        _ => {
+            let err = format!("Unknown command: {command}. Type /help for available commands.");
+            tui_tx.send(TuiEvent::Error(err)).ok();
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn test_slash_command_prevents_agent_spawn() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handled = handle_slash_command("/help", &mut app, &tx);
+        assert!(handled);
+    }
+
+    #[test]
+    fn test_slash_help_generates_help_text() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handled = handle_slash_command("/help", &mut app, &tx);
+        assert!(handled);
+        let mut found_chunk = false;
+        let mut found_done = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                TuiEvent::StreamChunk(text) => {
+                    found_chunk = true;
+                    assert!(text.contains("/help"));
+                    assert!(text.contains("/clear"));
+                    assert!(text.contains("/quit"));
+                }
+                TuiEvent::Done => found_done = true,
+                _ => {}
+            }
+        }
+        assert!(found_chunk);
+        assert!(found_done);
+    }
+
+    #[test]
+    fn test_slash_clear_clears_conversation() {
+        let mut app = App::new();
+        app.handle_event(TuiEvent::Submit("hello".into()));
+        assert_eq!(app.conversation.len(), 1);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handled = handle_slash_command("/clear", &mut app, &tx);
+        assert!(handled);
+        assert!(app.conversation.is_empty());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_slash_command_shows_error() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handled = handle_slash_command("/unknown", &mut app, &tx);
+        assert!(handled);
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::Error(msg) = event {
+                found_error = true;
+                assert!(msg.contains("/unknown"));
+            }
+        }
+        assert!(found_error);
+    }
 
     #[test]
     fn test_submit_creates_user_entry() {

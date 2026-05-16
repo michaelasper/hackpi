@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
@@ -49,7 +49,7 @@ pub(crate) struct FileNode {
 }
 
 pub struct InMemoryFs {
-    root: Mutex<FileNode>,
+    root: RwLock<FileNode>,
 }
 
 impl Default for InMemoryFs {
@@ -120,32 +120,9 @@ impl Default for InMemoryFs {
         root.children.insert("dev".into(), dev);
 
         InMemoryFs {
-            root: Mutex::new(root),
+            root: RwLock::new(root),
         }
     }
-}
-
-pub(crate) fn resolve_path_mut<'a>(
-    node: &'a mut FileNode,
-    path: &Path,
-) -> Option<&'a mut FileNode> {
-    let components: Vec<_> = path.components().collect();
-    let mut segments: Vec<&str> = Vec::new();
-    for comp in components {
-        let name = comp.as_os_str().to_str()?;
-        match name {
-            "/" | "." => continue,
-            ".." => {
-                segments.pop();
-            }
-            _ => segments.push(name),
-        }
-    }
-    let mut current = node;
-    for seg in segments {
-        current = current.children.get_mut(seg)?;
-    }
-    Some(current)
 }
 
 pub(crate) fn resolve_path_ref<'a>(node: &'a FileNode, path: &Path) -> Option<&'a FileNode> {
@@ -177,9 +154,8 @@ impl InMemoryFs {
 
 impl FileSystem for InMemoryFs {
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        let mut root_guard = self.root.lock().unwrap();
-        let root = &mut *root_guard;
-        if let Some(node) = resolve_path_mut(root, path) {
+        let root_guard = self.root.read().unwrap();
+        if let Some(node) = resolve_path_ref(&root_guard, path) {
             if node.is_dir {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::IsADirectory,
@@ -197,7 +173,7 @@ impl FileSystem for InMemoryFs {
 
     fn write(&self, path: &Path, content: &[u8]) -> std::io::Result<()> {
         self.ensure_parents(path)?;
-        let mut guard = self.root.lock().unwrap();
+        let mut guard = self.root.write().unwrap();
         let root = &mut *guard;
         let components: Vec<_> = path.components().collect();
         let file_name = components
@@ -211,7 +187,9 @@ impl FileSystem for InMemoryFs {
             match name {
                 "/" | "." => continue,
                 ".." => {
-                    segments.pop();
+                    if !segments.is_empty() {
+                        segments.pop();
+                    }
                 }
                 _ => segments.push(name),
             }
@@ -259,23 +237,32 @@ impl FileSystem for InMemoryFs {
     }
 
     fn remove(&self, path: &Path) -> std::io::Result<()> {
-        let mut guard = self.root.lock().unwrap();
+        let mut guard = self.root.write().unwrap();
         let root = &mut *guard;
         let components: Vec<_> = path.components().collect();
-        let file_name = components
-            .last()
-            .and_then(|c| c.as_os_str().to_str())
-            .unwrap_or("");
+
+        let mut segments: Vec<&str> = Vec::new();
+        for comp in &components {
+            let name = comp.as_os_str().to_str().unwrap_or("");
+            match name {
+                "/" | "." => continue,
+                ".." => {
+                    segments.pop();
+                }
+                _ => segments.push(name),
+            }
+        }
+
+        let file_name = segments.pop().unwrap_or("");
+        if file_name.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "not found",
+            ));
+        }
 
         let mut current = root;
-        for comp in &components[..components.len().saturating_sub(1)] {
-            let name = comp.as_os_str().to_str().unwrap_or("");
-            if name == "/" || name == "." {
-                continue;
-            }
-            if name == ".." {
-                continue;
-            }
+        for &name in &segments {
             current = match current.children.get_mut(name) {
                 Some(n) => n,
                 None => {
@@ -310,26 +297,26 @@ impl FileSystem for InMemoryFs {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        let root = self.root.lock().unwrap();
+        let root = self.root.read().unwrap();
         resolve_path_ref(&root, path).is_some()
     }
 
     fn is_dir(&self, path: &Path) -> bool {
-        let root = self.root.lock().unwrap();
+        let root = self.root.read().unwrap();
         resolve_path_ref(&root, path)
             .map(|n| n.is_dir)
             .unwrap_or(false)
     }
 
     fn is_file(&self, path: &Path) -> bool {
-        let root = self.root.lock().unwrap();
+        let root = self.root.read().unwrap();
         resolve_path_ref(&root, path)
             .map(|n| !n.is_dir)
             .unwrap_or(false)
     }
 
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<DirEntry>> {
-        let root = self.root.lock().unwrap();
+        let root = self.root.read().unwrap();
         let node = resolve_path_ref(&root, path)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
 
@@ -351,20 +338,24 @@ impl FileSystem for InMemoryFs {
     }
 
     fn create_dir(&self, path: &Path, recursive: bool) -> std::io::Result<()> {
-        let mut guard = self.root.lock().unwrap();
+        let mut guard = self.root.write().unwrap();
         let root = &mut *guard;
         let components: Vec<_> = path.components().collect();
 
-        let mut current = root;
+        let mut segments: Vec<&str> = Vec::new();
         for comp in &components {
             let name = comp.as_os_str().to_str().unwrap_or("");
-            if name.is_empty() || name == "/" || name == "." {
-                continue;
+            match name {
+                "" | "/" | "." => continue,
+                ".." => {
+                    segments.pop();
+                }
+                _ => segments.push(name),
             }
-            if name == ".." {
-                continue;
-            }
+        }
 
+        let mut current = root;
+        for &name in &segments {
             if !current.children.contains_key(name) {
                 if !recursive {
                     return Err(std::io::Error::new(
@@ -405,7 +396,7 @@ impl FileSystem for InMemoryFs {
     }
 
     fn metadata(&self, path: &Path) -> std::io::Result<FileMeta> {
-        let root = self.root.lock().unwrap();
+        let root = self.root.read().unwrap();
         let node = resolve_path_ref(&root, path)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
         Ok(FileMeta {
