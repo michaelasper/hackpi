@@ -32,7 +32,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let text = Line::from(vec![
-        Span::styled(" hackpi ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " hackpi ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("· ds4 · "),
         Span::raw(&usage_text),
     ]);
@@ -41,6 +46,17 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(text).style(Style::default().bg(Color::Black)),
         area,
     );
+}
+
+fn tool_card_color(name: &str) -> Color {
+    match name {
+        "read" => Color::Blue,
+        "edit" => Color::Magenta,
+        "bash" => Color::Yellow,
+        "search_grep" => Color::Cyan,
+        "write" => Color::Green,
+        _ => Color::DarkGray,
+    }
 }
 
 fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
@@ -65,7 +81,8 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
         }
 
         for tc in &entry.tool_calls {
-            let (status_symbol, status_color) = match &tc.status {
+            let border_color = tool_card_color(&tc.name);
+            let (status_symbol, _status_color) = match &tc.status {
                 ToolCallStatus::Running => ("⋯", Color::Yellow),
                 ToolCallStatus::Done(result) => match result {
                     hackpi_core::tools::ToolResult::Success { .. } => ("✓", Color::Green),
@@ -75,16 +92,51 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                 },
             };
 
-            let tool_text = format!("  {status_symbol} {name}", name = tc.name);
-            let style = Style::default().fg(status_color);
+            let title = format!(" {status_symbol} {name} ", name = tc.name);
 
-            items.push(ListItem::new(Line::from(Span::styled(tool_text, style))));
+            let mut card_lines: Vec<Line> = Vec::new();
+            if let ToolCallStatus::Done(result) = &tc.status {
+                let result_content = match result {
+                    hackpi_core::tools::ToolResult::Success { content } => content.clone(),
+                    hackpi_core::tools::ToolResult::SystemError { message } => {
+                        format!("Error: {message}")
+                    }
+                    hackpi_core::tools::ToolResult::Timeout => "Timed out.".into(),
+                    hackpi_core::tools::ToolResult::Cancelled => "Cancelled.".into(),
+                };
+                for line in result_content.lines() {
+                    card_lines.push(Line::from(Span::raw(line.to_string())));
+                }
+            } else {
+                card_lines.push(Line::from(Span::styled(
+                    "Running...",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+
+            card_lines.insert(
+                0,
+                Line::from(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(border_color)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            );
+
+            items.push(ListItem::new(card_lines.clone()));
         }
 
         items.push(ListItem::new(Line::from("")));
     }
 
-    let list = List::new(items).block(
+    let visible_items: &[ListItem] = if app.scroll_offset > 0 && app.scroll_offset < items.len() {
+        &items[app.scroll_offset..]
+    } else {
+        &items
+    };
+
+    let list = List::new(visible_items.to_vec()).block(
         Block::default()
             .borders(Borders::NONE)
             .style(Style::default()),
@@ -94,14 +146,15 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    let input_block = Block::default().borders(Borders::TOP).style(
-        Style::default()
-            .fg(if matches!(app.state, AppState::Generating) {
+    let input_block = Block::default()
+        .borders(Borders::TOP)
+        .style(
+            Style::default().fg(if matches!(app.state, AppState::Generating) {
                 Color::DarkGray
             } else {
                 Color::White
             }),
-    );
+        );
 
     let input_area = input_block.inner(area);
     frame.render_widget(input_block, area);

@@ -8,17 +8,15 @@ const HASH_CHARS: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
 
 fn line_hash(line: &str) -> String {
     let trimmed = line.trim();
-    if trimmed.chars().all(|c| !c.is_alphanumeric()) {
-        let hash = xxh32(line.as_bytes(), line.len() as u32);
-        let a = HASH_CHARS[(hash >> 4 & 0xF) as usize] as char;
-        let b = HASH_CHARS[(hash & 0xF) as usize] as char;
-        format!("{a}{b}")
+    let seed = if trimmed.chars().all(|c| !c.is_alphanumeric()) {
+        line.len() as u32
     } else {
-        let hash = xxh32(trimmed.as_bytes(), 0);
-        let a = HASH_CHARS[(hash >> 4 & 0xF) as usize] as char;
-        let b = HASH_CHARS[(hash & 0xF) as usize] as char;
-        format!("{a}{b}")
-    }
+        0
+    };
+    let hash = xxh32(trimmed.as_bytes(), seed);
+    let a = HASH_CHARS[(hash >> 4 & 0xF) as usize] as char;
+    let b = HASH_CHARS[(hash & 0xF) as usize] as char;
+    format!("{a}{b}")
 }
 
 const MAX_LINES: usize = 1000;
@@ -48,7 +46,7 @@ impl Tool for ReadTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "filePath": {
+                "path": {
                     "type": "string",
                     "description": "Path to the file or directory to read."
                 },
@@ -61,12 +59,12 @@ impl Tool for ReadTool {
                     "description": "Maximum number of lines to return. Default: all lines."
                 }
             },
-            "required": ["filePath"]
+            "required": ["path"]
         })
     }
 
     async fn execute(&self, params: Value, _ctx: &ToolContext) -> ToolResult {
-        let file_path = match params.get("filePath").and_then(|v| v.as_str()) {
+        let file_path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
             None => {
                 return ToolResult::SystemError {
@@ -94,10 +92,7 @@ impl Tool for ReadTool {
 
         if is_image {
             return ToolResult::Success {
-                content: format!(
-                    "[Image: {}] Passed through as attachment.\n",
-                    file_path
-                ),
+                content: format!("[Image: {}] Passed through as attachment.\n", file_path),
             };
         }
 
@@ -111,7 +106,10 @@ impl Tool for ReadTool {
         };
 
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-        let limit = params.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let limit = params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
@@ -139,7 +137,13 @@ impl Tool for ReadTool {
             for (i, line) in truncated_lines.iter().enumerate() {
                 let lnum = i + 1;
                 let hash = line_hash(line);
-                writeln!(output, "{:>width$}#{hash}:{line}", lnum, width = line_num_width).ok();
+                writeln!(
+                    output,
+                    "{:>width$}#{hash}:{line}",
+                    lnum,
+                    width = line_num_width
+                )
+                .ok();
             }
             output.push_str(&format!(
                 "... [truncated: {total_lines} total lines, showing {shown}] ..."
@@ -148,7 +152,13 @@ impl Tool for ReadTool {
             for (i, line) in display_lines.iter().enumerate() {
                 let lnum = start + i + 1;
                 let hash = line_hash(line);
-                writeln!(output, "{:>width$}#{hash}:{line}", lnum, width = line_num_width).ok();
+                writeln!(
+                    output,
+                    "{:>width$}#{hash}:{line}",
+                    lnum,
+                    width = line_num_width
+                )
+                .ok();
             }
         }
 

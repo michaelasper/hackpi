@@ -91,59 +91,54 @@ impl Agent {
                 }
 
                 match event {
-                    ApiEvent::Event(evt) => {
-                        match evt.event_type.as_str() {
-                            "content_block_delta" => {
-                                if let Some(delta) = &evt.delta {
-                                    if let Some(text) = &delta.text {
-                                        current_text.push_str(text);
-                                        tx.send(AgentEvent::TextChunk(text.clone())).ok();
-                                    }
-                                    if let Some(stop) = &delta.stop_reason {
-                                        stop_reason = Some(stop.clone());
-                                    }
+                    ApiEvent::Event(evt) => match evt.event_type.as_str() {
+                        "content_block_delta" => {
+                            if let Some(delta) = &evt.delta {
+                                if let Some(text) = &delta.text {
+                                    current_text.push_str(text);
+                                    tx.send(AgentEvent::TextChunk(text.clone())).ok();
+                                }
+                                if let Some(stop) = &delta.stop_reason {
+                                    stop_reason = Some(stop.clone());
                                 }
                             }
-                            "content_block_start" => {
-                                if let Some(block) = &evt.content_block {
-                                    if block.block_type == "tool_use" {
-                                        current_tool_id = block.id.clone().unwrap_or_default();
-                                        current_tool_name = block.name.clone().unwrap_or_default();
-                                        current_tool_input = String::new();
-                                        if let Some(input) = &block.input {
-                                            current_tool_input = input.to_string();
-                                        }
-                                    }
-                                }
-                            }
-                            "content_block_stop" => {
-                                if !current_tool_id.is_empty() {
-                                    let input: Value =
-                                        serde_json::from_str(&current_tool_input)
-                                            .unwrap_or(Value::Null);
-                                    pending_tool_calls.push((
-                                        current_tool_id.clone(),
-                                        current_tool_name.clone(),
-                                        input,
-                                    ));
-                                    current_tool_id.clear();
-                                    current_tool_name.clear();
-                                    current_tool_input.clear();
-                                }
-                            }
-                            "message_delta" => {
-                                if let Some(delta) = &evt.delta {
-                                    if let Some(stop) = &delta.stop_reason {
-                                        stop_reason = Some(stop.clone());
-                                    }
-                                }
-                                if let Some(u) = &evt.usage {
-                                    usage = Some(u.clone());
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        "content_block_start" => {
+                            if let Some(block) = &evt.content_block {
+                                if block.block_type == "tool_use" {
+                                    current_tool_id = block.id.clone().unwrap_or_default();
+                                    current_tool_name = block.name.clone().unwrap_or_default();
+                                    current_tool_input = String::new();
+                                    if let Some(input) = &block.input {
+                                        current_tool_input = input.to_string();
+                                    }
+                                }
+                            }
+                        }
+                        "content_block_stop" if !current_tool_id.is_empty() => {
+                            let input: Value =
+                                serde_json::from_str(&current_tool_input).unwrap_or(Value::Null);
+                            pending_tool_calls.push((
+                                current_tool_id.clone(),
+                                current_tool_name.clone(),
+                                input,
+                            ));
+                            current_tool_id.clear();
+                            current_tool_name.clear();
+                            current_tool_input.clear();
+                        }
+                        "message_delta" => {
+                            if let Some(delta) = &evt.delta {
+                                if let Some(stop) = &delta.stop_reason {
+                                    stop_reason = Some(stop.clone());
+                                }
+                            }
+                            if let Some(u) = &evt.usage {
+                                usage = Some(u.clone());
+                            }
+                        }
+                        _ => {}
+                    },
                     ApiEvent::Done => break,
                 }
             }
@@ -187,9 +182,16 @@ impl Agent {
                 match &result {
                     Some(ToolResult::Success { content }) => {
                         let truncated = if content.len() > MAX_TOOL_RESULT_BYTES {
+                            let tmp_path = self
+                                .workspace_root
+                                .join(format!(".truncated_{tool_id}.txt"));
+                            let _ = std::fs::write(&tmp_path, content);
                             let mut clipped = content[..MAX_TOOL_RESULT_BYTES].to_string();
-                            clipped.push_str("\n\n[Output truncated: ");
-                            clipped.push_str(&format!("{} total bytes]", content.len()));
+                            clipped.push_str(&format!(
+                                "\n\n[Output truncated: {} total bytes. Full output written to {}]",
+                                content.len(),
+                                tmp_path.display()
+                            ));
                             clipped
                         } else {
                             content.clone()
@@ -239,10 +241,7 @@ impl Agent {
                 });
             }
 
-            let should_stop = match &stop_reason {
-                Some(s) if s == "end_turn" || s == "stop" => true,
-                _ => false,
-            };
+            let should_stop = matches!(&stop_reason, Some(s) if s == "end_turn" || s == "stop");
 
             if should_stop {
                 tx.send(AgentEvent::Done).ok();

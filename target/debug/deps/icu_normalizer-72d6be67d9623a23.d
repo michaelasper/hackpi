@@ -1,8 +1,0 @@
-/Users/michaelasper/source/oven/target/debug/deps/icu_normalizer-72d6be67d9623a23.d: /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/lib.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/properties.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/provider.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/uts46.rs
-
-/Users/michaelasper/source/oven/target/debug/deps/libicu_normalizer-72d6be67d9623a23.rmeta: /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/lib.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/properties.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/provider.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/uts46.rs
-
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/lib.rs:
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/properties.rs:
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/provider.rs:
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/icu_normalizer-2.2.0/src/uts46.rs:

@@ -7,6 +7,7 @@ use hackpi_core::agent::{Agent, AgentEvent};
 use hackpi_core::api::ApiClient;
 use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
+use hackpi_tools::register_all_tools;
 use hackpi_tui::app::{App, AppState};
 use hackpi_tui::events::TuiEvent;
 use hackpi_tui::input::InputHandler;
@@ -17,9 +18,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-const SYSTEM_PROMPT: &str = "You are hackpi, a coding agent built with Rust. \
-You have access to tools for reading, writing, editing, and searching code. \
-Always read a file before editing it. Verify changes compile and pass tests.";
+const SYSTEM_PROMPT: &str = "\
+# Identity
+You are hackpi, a coding agent built with Rust. You help users write, debug, and refactor code.
+
+# Tools
+You have access to: read (view files), search_grep (search codebase), write (create files), edit (modify files with hash-anchored lines), bash (execute commands in a virtual shell).
+
+# Workflow
+1. Always read a file before editing it.
+2. Use search_grep to find relevant code before making changes.
+3. Verify changes compile and pass tests (cargo check / cargo test).
+4. For new files, use write; for existing files, use edit with LINE#HASH anchors from read output.
+
+# Rules
+- Never overwrite existing files with write — use edit instead.
+- Never send LINE#HASH: prefixes or diff +/- markers in edit lines (E_INVALID_PATCH).
+- Run cargo check after any Rust code change.";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,7 +56,8 @@ async fn main() -> anyhow::Result<()> {
     let _api = ApiClient::new(ApiConfig::default());
     let workspace_root = std::env::current_dir()?;
 
-    let tool_registry = ToolRegistry::new();
+    let mut tool_registry = ToolRegistry::new();
+    register_all_tools(&mut tool_registry, &workspace_root);
     let tools = Arc::new(tool_registry);
 
     terminal.clear()?;
@@ -58,10 +74,12 @@ async fn main() -> anyhow::Result<()> {
                     tui_tx.send(TuiEvent::ToolCall { id, name }).ok();
                 }
                 AgentEvent::ToolCallDelta(delta) => {
-                    tui_tx.send(TuiEvent::ToolDelta {
-                        id: String::new(),
-                        delta,
-                    }).ok();
+                    tui_tx
+                        .send(TuiEvent::ToolDelta {
+                            id: String::new(),
+                            delta,
+                        })
+                        .ok();
                 }
                 AgentEvent::ToolCallEnd { id, result } => {
                     tui_tx.send(TuiEvent::ToolResult { id, result }).ok();
@@ -97,9 +115,23 @@ async fn main() -> anyhow::Result<()> {
                     KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                         break;
                     }
+                    KeyCode::PageUp => {
+                        app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                    }
+                    KeyCode::PageDown => {
+                        app.scroll_offset = app.scroll_offset.saturating_add(5);
+                    }
+                    KeyCode::Home => {
+                        app.scroll_offset = 0;
+                    }
+                    KeyCode::End => {
+                        app.scroll_offset = usize::MAX;
+                    }
                     _ => {
                         if !matches!(app.state, AppState::Generating) {
-                            if let Some(submitted) = input.handle_key(key) {
+                            input.handle_key(key);
+                            app.input = input.buffer.clone();
+                            if let Some(submitted) = input.last_submitted() {
                                 tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
 
                                 let signal_rx_clone = signal_rx.clone();

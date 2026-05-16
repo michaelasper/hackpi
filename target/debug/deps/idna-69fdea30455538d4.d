@@ -1,8 +1,0 @@
-/Users/michaelasper/source/oven/target/debug/deps/idna-69fdea30455538d4.d: /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/lib.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/deprecated.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/punycode.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/uts46.rs
-
-/Users/michaelasper/source/oven/target/debug/deps/libidna-69fdea30455538d4.rmeta: /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/lib.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/deprecated.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/punycode.rs /Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/uts46.rs
-
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/lib.rs:
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/deprecated.rs:
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/punycode.rs:
-/Users/michaelasper/.local/share/mise/rust/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/idna-1.1.0/src/uts46.rs:

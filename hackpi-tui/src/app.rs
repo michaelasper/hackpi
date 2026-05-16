@@ -35,6 +35,12 @@ pub struct App {
     pub status_message: String,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {

@@ -1,6 +1,7 @@
 use crate::types::ToolSchema;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 
 pub struct ToolContext {
     pub workspace_root: std::path::PathBuf,
@@ -25,25 +26,34 @@ pub trait Tool: Send + Sync {
 }
 
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: HashMap<String, Box<dyn Tool>>,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(tool);
+        let name = tool.name().to_string();
+        self.tools.insert(name, tool);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+        self.tools.get(name).map(|t| t.as_ref())
     }
 
     pub fn all_schemas(&self) -> Vec<ToolSchema> {
         self.tools
-            .iter()
+            .values()
             .map(|t| ToolSchema {
                 name: t.name().to_string(),
                 description: t.description().to_string(),

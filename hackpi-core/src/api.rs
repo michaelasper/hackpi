@@ -80,7 +80,7 @@ impl ApiClient {
 
                     match serde_json::from_str::<StreamEvent>(data) {
                         Ok(event) => {
-                            tx.send(ApiEvent::Event(event)).ok();
+                            tx.send(ApiEvent::Event(Box::new(event))).ok();
                         }
                         Err(e) => {
                             tracing::warn!("Failed to parse SSE event: {e}, data: {data}");
@@ -96,6 +96,6 @@ impl ApiClient {
 
 #[derive(Debug, Clone)]
 pub enum ApiEvent {
-    Event(StreamEvent),
+    Event(Box<StreamEvent>),
     Done,
 }

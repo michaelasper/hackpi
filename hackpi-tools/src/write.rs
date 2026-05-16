@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use hackpi_core::tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
+use tokio::fs;
 
 pub struct WriteTool {
     workspace_root: std::path::PathBuf,
@@ -36,7 +37,8 @@ impl Tool for WriteTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "The complete, raw text content to write to the new file."
+                    "description": "The complete, raw text content to write to the new file. \
+                                   Do not wrap in markdown code blocks unless the file itself requires it."
                 }
             },
             "required": ["filePath", "content"],
@@ -69,25 +71,25 @@ impl Tool for WriteTool {
         let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
         if !canonical.starts_with(&self.workspace_root) {
             return ToolResult::SystemError {
-                message: "Security Error: Attempted to write outside workspace directory.".into(),
+                message: "Security Error: Attempted to write outside workspace.".into(),
             };
         }
 
         // Overwrite trap
         if path.exists() {
             return ToolResult::SystemError {
-                message: "Error: File already exists at this path. You cannot overwrite files with write. \
-                         You must use the edit tool to modify existing code."
-                    .into(),
+                message: "Error: File already exists. Use edit to modify.".into(),
             };
         }
 
         // Phantom directory handler
         if let Some(parent) = path.parent() {
             if !parent.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
+                if let Err(e) = fs::create_dir_all(parent).await {
                     return ToolResult::SystemError {
-                        message: format!("Failed to create parent directories for {file_path}: {e}"),
+                        message: format!(
+                            "Failed to create parent directories for {file_path}: {e}"
+                        ),
                     };
                 }
             }
@@ -97,26 +99,32 @@ impl Tool for WriteTool {
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
         let tmp_path = path.with_file_name(format!(".{file_name}.tmp"));
 
-        if let Err(e) = std::fs::write(&tmp_path, content.as_bytes()) {
-            return ToolResult::SystemError {
-                message: format!("IO error writing {file_path}: {e}"),
+        if let Err(e) = fs::write(&tmp_path, content.as_bytes()).await {
+            let msg = match e.kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    format!("Permission denied: {file_path}")
+                }
+                _ => format!("IO error: {e}"),
             };
+            return ToolResult::SystemError { message: msg };
         }
 
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return ToolResult::SystemError {
-                message: format!("IO error renaming {file_path}: {e}"),
+        if let Err(e) = fs::rename(&tmp_path, &path).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            let msg = match e.kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    format!("Permission denied: {file_path}")
+                }
+                _ => format!("IO error: {e}"),
             };
+            return ToolResult::SystemError { message: msg };
         }
 
         let byte_count = content.len();
         let line_count = content.lines().count();
 
         ToolResult::Success {
-            content: format!(
-                "Wrote {file_path}: {byte_count} bytes, {line_count} lines"
-            ),
+            content: format!("Wrote {file_path}: {byte_count} bytes, {line_count} lines"),
         }
     }
 }
