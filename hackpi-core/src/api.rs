@@ -1,9 +1,8 @@
-use crate::types::{ApiConfig, ContentBlock, Message, StreamEvent, ToolSchema};
+use crate::types::{ApiConfig, Message, StreamEvent, ToolSchema};
 use anyhow::Result;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub struct ApiClient {
