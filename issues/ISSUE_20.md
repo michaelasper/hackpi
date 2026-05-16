@@ -27,8 +27,11 @@ However, it's a defense-in-depth violation that should be addressed.
 - Potential path traversal if the API server is compromised or misconfigured
 - Temp files with `.txt` extension may leak into unexpected directories
 
-## Proposed Solutions
+## Resolution
 
-1. Sanitize `tool_id` by stripping all non-alphanumeric characters before using it in a path
-2. Use a counter-based temp filename instead of embedding the tool_id
-3. Verify the constructed path is within `workspace_root` before writing
+- Resolved as part of **ISSUE_02** work
+- `truncate_output()` in `agent.rs` now sanitizes `tool_id` using `filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')`
+- Empty tool_id falls back to `"unknown"`
+- Handled via the extracted `truncate_output()` function with dedicated tests
+
+**Status: RESOLVED**

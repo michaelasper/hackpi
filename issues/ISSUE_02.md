@@ -18,8 +18,12 @@ Additionally, the path is constructed by joining `workspace_root` with `.truncat
 - If the file write fails, the model's next read attempt will fail with "file not found," wasting a turn
 - No logging or fallback when the temp write fails
 
-## Proposed Solutions
+## Resolution
 
-1. Check the result of `std::fs::write` and log a warning if it fails
-2. If the temp file write fails, append `[Failed to write full output to disk]` to the truncated message instead of the file path
-3. Strip path traversal characters from tool_id before using it in a file path
+- Extracted `truncate_output()` function in `agent.rs` that handles all truncation logic
+- Checks `std::fs::write()` result: on failure, appends `"Could not write full output to disk."` instead of a misleading path
+- Sanitizes `tool_id` (only alphanumeric, `_`, `-`) before using in path — resolves **ISSUE_20** as well
+- Empty/unsanitary tool_id falls back to `"unknown"`
+- 4 tests added for under-limit, over-limit, tool_id sanitization, and empty tool_id
+
+**Status: RESOLVED**

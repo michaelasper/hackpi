@@ -2,12 +2,50 @@ use crate::api::{ApiClient, ApiEvent};
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 use crate::types::{ContentBlock, Message, Role, Usage};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const MAX_TURNS: u32 = 25;
 const MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
+
+pub(crate) fn truncate_output(
+    content: &str,
+    max_bytes: usize,
+    tool_id: &str,
+    workspace_root: &Path,
+) -> String {
+    if content.len() <= max_bytes {
+        return content.to_string();
+    }
+    let safe_id: String = tool_id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let safe_id = if safe_id.is_empty() {
+        "unknown"
+    } else {
+        &safe_id
+    };
+
+    let tmp_path = workspace_root.join(format!(".truncated_{safe_id}.txt"));
+    let write_ok = std::fs::write(&tmp_path, content).is_ok();
+
+    let mut clipped = content[..max_bytes].to_string();
+    if write_ok {
+        clipped.push_str(&format!(
+            "\n\n[Output truncated: {} total bytes. Full output written to {}]",
+            content.len(),
+            tmp_path.display()
+        ));
+    } else {
+        clipped.push_str(&format!(
+            "\n\n[Output truncated: {} total bytes. Could not write full output to disk.]",
+            content.len(),
+        ));
+    }
+    clipped
+}
 
 pub enum AgentEvent {
     TextChunk(String),
@@ -181,21 +219,12 @@ impl Agent {
 
                 match &result {
                     Some(ToolResult::Success { content }) => {
-                        let truncated = if content.len() > MAX_TOOL_RESULT_BYTES {
-                            let tmp_path = self
-                                .workspace_root
-                                .join(format!(".truncated_{tool_id}.txt"));
-                            let _ = std::fs::write(&tmp_path, content);
-                            let mut clipped = content[..MAX_TOOL_RESULT_BYTES].to_string();
-                            clipped.push_str(&format!(
-                                "\n\n[Output truncated: {} total bytes. Full output written to {}]",
-                                content.len(),
-                                tmp_path.display()
-                            ));
-                            clipped
-                        } else {
-                            content.clone()
-                        };
+                        let truncated = truncate_output(
+                            content,
+                            MAX_TOOL_RESULT_BYTES,
+                            tool_id,
+                            &self.workspace_root,
+                        );
                         tool_results.push(ContentBlock::tool_result(tool_id, &truncated));
                     }
                     Some(ToolResult::SystemError { message }) => {
@@ -254,5 +283,88 @@ impl Agent {
         ))
         .ok();
         tx.send(AgentEvent::Done).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_output_under_limit_passthrough() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_under");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "hello world";
+        let result = truncate_output(content, 1024, "tool_1", &dir);
+
+        assert_eq!(
+            result, content,
+            "content under limit should pass through unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncate_output_over_limit_clips_and_mentions_file() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_over");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "a".repeat(1000);
+        let result = truncate_output(&content, 100, "tool_1", &dir);
+
+        assert!(
+            result.len() < content.len(),
+            "result should be shorter than original"
+        );
+        let expected_clip: String = "a".repeat(100);
+        assert!(
+            result.starts_with(&expected_clip),
+            "first 100 chars should be preserved"
+        );
+        assert!(
+            result.contains("Output truncated"),
+            "should mention truncation"
+        );
+        assert!(
+            result.contains(".truncated_tool_1.txt"),
+            "should mention temp file path"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncate_output_sanitizes_tool_id() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_sanitize");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "a".repeat(1000);
+        // tool_id with path traversal characters
+        let result = truncate_output(&content, 100, "../../etc/passwd", &dir);
+
+        assert!(
+            !result.contains("../../etc/passwd"),
+            "should not contain raw traversal chars"
+        );
+        assert!(result.contains(".truncated_"), "should use safe filename");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncate_output_empty_tool_id_uses_fallback() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_empty_id");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "a".repeat(1000);
+        let result = truncate_output(&content, 100, "", &dir);
+
+        assert!(
+            result.contains("unknown"),
+            "should use 'unknown' for empty tool_id"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
