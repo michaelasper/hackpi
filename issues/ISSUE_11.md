@@ -22,8 +22,28 @@ The `grep-searcher` crate natively supports walking directories and filtering, w
 - Wasted latency: search doesn't begin until the full walk is complete
 - For 100k+ file repos, this could be a noticeable delay
 
-## Proposed Solutions
+## Resolution (Deferred)
 
-1. Use `grep-searcher`'s built-in `Searcher::search_paths()` with a path iterator instead of pre-collecting
-2. Stream paths through the walk and search each one immediately
-3. If pre-collection is intentional (e.g., for sorting/max-matches cutoff), add a comment explaining why
+This optimization changes the search architecture significantly by replacing the two-pass approach (walk → collect → search) with a single-pass streaming approach. The fix would require rewriting the `walkdir` integration in `search_grep.rs` to search files as they're discovered rather than pre-collecting into a `Vec<PathBuf>`.
+
+**Deferred to post-v1** — current implementation is correct and performant for repos under ~10k files. The pre-collection enables the `MAX_MATCHES` cutoff across files, which would need a different mechanism in streaming mode.
+
+## Implementation Notes (for future work)
+
+### 1. The ignore Crate Integration
+
+Since you are already using `grep-searcher` (part of the ripgrep core ecosystem), pair it with the `ignore` crate (also by BurntSushi). It natively handles recursive directory walking, respects `.gitignore`, and is built specifically to pipe discovered paths efficiently into a searcher.
+
+### 2. Managing the MAX_MATCHES Cutoff
+
+How you handle the cutoff in a streaming model depends on your concurrency:
+
+- **Single-threaded:** Keep a mutable running tally of matches. `walkdir` provides an iterator; process files as `walkdir` yields them and explicitly `break` the loop when the tally hits `MAX_MATCHES`.
+
+- **Multi-threaded:** Use an `Arc<AtomicUsize>` passed to search workers to track total global matches. Workers can check `matches.load(Ordering::Relaxed)` and bail out early if the limit is reached.
+
+### 3. Latency vs. Throughput
+
+By streaming, you drastically reduce the Time-To-First-Match (TTFM). In massive repos, users care more about seeing the first 10 results instantly than waiting 3 seconds to see all 1,000. Streaming optimizes for that UX.
+
+**Status: BACKLOGGED**

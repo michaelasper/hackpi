@@ -678,6 +678,47 @@ fn test_with_session_works_without_workspace_root() {
 }
 
 #[test]
+fn test_seq_with_stderr_redirect() {
+    let mut session = new_session();
+    let out = session.execute("cd /nonexistent 2>/tmp/seq_err.txt; echo ok");
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stdout.contains("ok"),
+        "right operand should run after left"
+    );
+    let content = session.fs.read(Path::new("/tmp/seq_err.txt")).unwrap();
+    let stderr_content = String::from_utf8_lossy(&content);
+    assert!(
+        stderr_content.contains("No such directory"),
+        "stderr from left operand should be captured in file"
+    );
+}
+
+#[test]
+fn test_seq_exit_code_comes_from_right() {
+    let mut session = new_session();
+    let out = session.execute("false; echo ok");
+    assert_eq!(
+        out.exit_code, 0,
+        "seq should return right operand's exit code"
+    );
+    assert!(
+        out.stdout.contains("ok"),
+        "right operand should run regardless of left exit code"
+    );
+}
+
+#[test]
+fn test_seq_last_command_exit_code() {
+    let mut session = new_session();
+    let out = session.execute("echo a; false");
+    assert_ne!(
+        out.exit_code, 0,
+        "seq should return right operand's exit code when it fails"
+    );
+}
+
+#[test]
 fn test_concurrent_reads_do_not_deadlock() {
     let fs = Box::new(InMemoryFs::default());
     fs.write(Path::new("/file1.txt"), b"content1").unwrap();

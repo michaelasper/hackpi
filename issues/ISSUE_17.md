@@ -23,8 +23,11 @@ The TODO-05-16.md correctly flags this as C1 ("Hash mismatch on non-alphanumeric
 - Any future hash algorithm change must be made in two places
 - Risk of subtle bugs if the two implementations diverge
 
-## Proposed Solutions
+## Resolution
 
-1. Extract the hash module to `hackpi-core` so both crates can share it
-2. Or have `read.rs` import from `edit::hash` since both are in hackpi-tools (though `read` is at the module level and `edit` is a sub-module)
-3. Or create a standalone `hackpi-hash` crate or shared module at the tools crate root
+- Removed duplicate `line_hash` and `HASH_CHARS` from `read.rs`
+- `read.rs` now imports `line_hash` from `crate::edit::hash::line_hash`
+- Single source of truth for the hashing algorithm — no risk of divergence
+- Both functions are in `hackpi-tools`, so `pub(crate)` access works cleanly
+
+**Status: RESOLVED**

@@ -23,7 +23,13 @@ The actual issue is that the `Seq` node doesn't propagate the left operand's exi
 - `false; false` also returns 0 (from second false), which is also correct — but if the user cares about the first command's failure, it's lost
 - The test `test_seq_operator` only tests the happy path
 
-## Proposed Solutions
+## Resolution
 
-1. Store the left exit code and return the last non-zero exit code if no right operand exists, or the right operand's exit code if it exists (matching `sh` semantics where Seq returns the last command's exit code)
-2. Add tests for `false; echo ok`, `echo ok; false`, and `false; false` sequences
+- Added 3 tests verifying Seq behavior:
+  - `test_seq_with_stderr_redirect` — stderr redirects in left Seq operand work correctly
+  - `test_seq_exit_code_comes_from_right` — `false; echo ok` returns exit code 0
+  - `test_seq_last_command_exit_code` — `echo a; false` returns non-zero exit code
+- Current implementation is correct per POSIX: Seq returns the last command's exit code
+- Stderr redirects function properly within Seq because each `SimpleCommand` handles its own redirects independently
+
+**Status: RESOLVED**
