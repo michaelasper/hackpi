@@ -31,7 +31,8 @@ pub(crate) fn truncate_output(
     let tmp_path = workspace_root.join(format!(".truncated_{safe_id}.txt"));
     let write_ok = std::fs::write(&tmp_path, content).is_ok();
 
-    let mut clipped = content[..max_bytes].to_string();
+    let end = content.floor_char_boundary(max_bytes);
+    let mut clipped = content[..end].to_string();
     if write_ok {
         clipped.push_str(&format!(
             "\n\n[Output truncated: {} total bytes. Full output written to {}]",
@@ -50,7 +51,6 @@ pub(crate) fn truncate_output(
 pub enum AgentEvent {
     TextChunk(String),
     ToolCallStart { id: String, name: String },
-    ToolCallDelta(String),
     ToolCallEnd { id: String, result: ToolResult },
     Done,
     Error(String),
@@ -298,38 +298,70 @@ mod tests {
         let content = "hello world";
         let result = truncate_output(content, 1024, "tool_1", &dir);
 
+        assert_eq!(result, content);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncate_output_at_exact_limit_passthrough() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_exact");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "a".repeat(100);
+        let result = truncate_output(&content, 100, "tool_1", &dir);
+
         assert_eq!(
             result, content,
-            "content under limit should pass through unchanged"
+            "content at exact limit should pass through"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn test_truncate_output_one_byte_over_truncates() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_over1");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "a".repeat(101);
+        let result = truncate_output(&content, 100, "tool_1", &dir);
+
+        assert_ne!(result, content, "content over limit should be modified");
+        assert!(
+            result.contains("Output truncated"),
+            "should mention truncation"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncate_output_over_limit_writes_full_content_to_disk() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_file");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "a".repeat(1000);
+        let _result = truncate_output(&content, 100, "tool_1", &dir);
+
+        let tmp_path = dir.join(".truncated_tool_1.txt");
+        assert!(tmp_path.exists(), "temp file should exist on disk");
+        let on_disk = std::fs::read_to_string(&tmp_path).unwrap();
+        assert_eq!(on_disk, content, "temp file should contain full output");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_truncate_output_over_limit_clips_and_mentions_file() {
-        let dir = std::env::temp_dir().join("hackpi_trunc_test_over");
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_clip");
         let _ = std::fs::create_dir_all(&dir);
 
         let content = "a".repeat(1000);
         let result = truncate_output(&content, 100, "tool_1", &dir);
 
-        assert!(
-            result.len() < content.len(),
-            "result should be shorter than original"
-        );
+        assert!(result.len() < content.len());
         let expected_clip: String = "a".repeat(100);
-        assert!(
-            result.starts_with(&expected_clip),
-            "first 100 chars should be preserved"
-        );
-        assert!(
-            result.contains("Output truncated"),
-            "should mention truncation"
-        );
-        assert!(
-            result.contains(".truncated_tool_1.txt"),
-            "should mention temp file path"
-        );
+        assert!(result.starts_with(&expected_clip));
+        assert!(result.contains("Output truncated"));
+        assert!(result.contains(".truncated_tool_1.txt"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -340,14 +372,42 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
 
         let content = "a".repeat(1000);
-        // tool_id with path traversal characters
         let result = truncate_output(&content, 100, "../../etc/passwd", &dir);
 
         assert!(
             !result.contains("../../etc/passwd"),
-            "should not contain raw traversal chars"
+            "path traversal chars should be removed"
         );
-        assert!(result.contains(".truncated_"), "should use safe filename");
+        assert!(result.contains(".truncated_"), "safe filename used");
+        // After filtering "../../etc/passwd", remaining chars are "etcpasswd"
+        let safe_path = dir.join(".truncated_etcpasswd.txt");
+        assert!(
+            safe_path.exists(),
+            "file should use sanitized tool_id chars"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncate_output_unsafe_only_tool_id_falls_back() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_unsafe");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let content = "a".repeat(1000);
+        // tool_id with ONLY unsafe chars (dots and slashes)
+        let result = truncate_output(&content, 100, "../", &dir);
+
+        assert!(
+            !result.contains("../"),
+            "unsafe-only tool_id should be replaced"
+        );
+        assert!(result.contains("unknown"), "should use 'unknown' fallback");
+        let unknown_path = dir.join(".truncated_unknown.txt");
+        assert!(
+            unknown_path.exists(),
+            "file should use 'unknown' fallback for all-unsafe tool_id"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -360,10 +420,26 @@ mod tests {
         let content = "a".repeat(1000);
         let result = truncate_output(&content, 100, "", &dir);
 
+        assert!(result.contains("unknown"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_truncate_output_non_ascii_safe_boundary() {
+        let dir = std::env::temp_dir().join("hackpi_trunc_test_utf8");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // multi-byte UTF-8 chars: each 'é' is 2 bytes
+        let content = "é".repeat(200);
+        let result = truncate_output(&content, 100, "tool_1", &dir);
+
+        // 100 bytes should cut at char boundary (floor to even: 100)
         assert!(
-            result.contains("unknown"),
-            "should use 'unknown' for empty tool_id"
+            result.contains("Output truncated"),
+            "should truncate safely at char boundary"
         );
+        // Should not panic from mid-char split
 
         let _ = std::fs::remove_dir_all(&dir);
     }

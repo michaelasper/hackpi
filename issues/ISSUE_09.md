@@ -20,3 +20,10 @@
 
 1. Remove `thiserror` from both `hackpi-tools/Cargo.toml` and `hackpi-core/Cargo.toml` since neither defines custom error types
 2. If `ToolResult` is considered an error type, derive `thiserror::Error` on it and use it consistently across the codebase
+
+## Resolution
+
+**RESOLVED** — Removed `thiserror` from:
+- Workspace `Cargo.toml` (workspace dependencies)
+- `hackpi-core/Cargo.toml`
+- `hackpi-tools/Cargo.toml`

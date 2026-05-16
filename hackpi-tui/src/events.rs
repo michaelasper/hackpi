@@ -6,7 +6,6 @@ pub enum TuiEvent {
     Submit(String),
     StreamChunk(String),
     ToolCall { id: String, name: String },
-    ToolDelta { id: String, delta: String },
     ToolResult { id: String, result: ToolResult },
     Error(String),
     Usage(Usage),

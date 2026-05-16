@@ -71,12 +71,14 @@ impl Tool for EditTool {
                                 "description": "For replace_text: the replacement text."
                             }
                         },
-                        "required": ["op"]
+                        "required": ["op"],
+                        "additionalProperties": false
                     },
                     "description": "List of edit operations. Applied bottom-up on pre-edit snapshot."
                 }
             },
-            "required": ["path", "edits"]
+            "required": ["path", "edits"],
+            "additionalProperties": false
         })
     }
 
@@ -420,5 +422,27 @@ impl Tool for EditTool {
         }
 
         ToolResult::Success { content: output }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_input_schema_has_additional_properties_false() {
+        let tool = EditTool::new(std::path::PathBuf::from("/tmp"));
+        let schema = tool.input_schema();
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "edit tool top-level schema missing additionalProperties: false"
+        );
+        let items = &schema["properties"]["edits"]["items"];
+        assert_eq!(
+            items.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "edit tool items schema missing additionalProperties: false"
+        );
     }
 }

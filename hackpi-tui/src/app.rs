@@ -99,7 +99,6 @@ impl App {
                     });
                 }
             }
-            TuiEvent::ToolDelta { id: _, delta: _ } => {}
             TuiEvent::ToolResult { id, result } => {
                 if let Some(entry) = self.conversation.back_mut() {
                     for tc in &mut entry.tool_calls {

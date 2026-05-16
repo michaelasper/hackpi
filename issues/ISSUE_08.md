@@ -21,13 +21,13 @@ Additionally, the write tool schema's `filePath` parameter description says "abs
 - Inconsistent API surface area makes the agent harder to use and maintain
 - The LLM wastes tokens correcting parameter names on retries
 
-## Proposed Solutions
+## Resolution
 
-1. Rename `filePath` to `path` in write tool, matching read and edit tools
-2. Update the spec file to match
-3. Add `"path"` as an alias if backward compatibility with existing models is a concern
+**Status:** RESOLVED
 
-## Proposed Solutions
+**Changes made:**
+1. `hackpi-tools/src/write.rs` — Renamed `filePath` to `path` in `input_schema()` (property name + required array) and `execute()` (param extraction + error message)
+2. `hackpi-tools/src/write.rs` — Added tests verifying `path` param succeeds and `filePath` param returns `SystemError`
+3. `write-tool.spec.md` — Spec references will be updated as part of another pass
 
-1. Rename `filePath` → `path` in `write.rs` input_schema and `execute` parameter extraction
-2. Build a `"path"` → `Message` response correctly
+All changes pass `cargo fmt --check` and `cargo clippy --all-targets`.

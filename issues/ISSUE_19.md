@@ -31,3 +31,14 @@ This is especially problematic for the edit tool, where the schema defines `line
 1. Add `"additionalProperties": false` to all top-level tool schemas
 2. Add `"additionalProperties": false` to the edit item sub-schema in `edit/tool.rs`
 3. Consider using serde's `deny_unknown_fields` on deserialization structs as a defense-in-depth measure
+
+## Resolution
+
+**Status:** RESOLVED
+
+**Changes made:**
+- Added `"additionalProperties": false` to `ReadTool::input_schema` in `hackpi-tools/src/read.rs`
+- Added `"additionalProperties": false` to `EditTool::input_schema` (top-level and inner items) in `hackpi-tools/src/edit/tool.rs`
+- Added `"additionalProperties": false` to `SearchGrepTool::input_schema` in `hackpi-tools/src/search_grep.rs`
+- Added `"additionalProperties": false` to `BashTool::input_schema` in `hackpi-tools/src/bash/tool.rs`
+- Added unit tests in each tool module verifying `"additionalProperties": false` is present

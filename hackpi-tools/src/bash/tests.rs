@@ -2,7 +2,7 @@ use std::path::Path;
 use tokio::sync::watch;
 
 use super::filesystem::InMemoryFs;
-use super::session::{BashOutput, BashSession};
+use super::session::{with_session, BashOutput, BashSession};
 
 fn new_session() -> BashSession {
     let fs = Box::new(InMemoryFs::default());
@@ -632,4 +632,14 @@ fn test_or_with_stderr_redirect() {
     assert!(output_stdout(&out).contains("ok"));
     let content = session.fs.read(Path::new("/tmp/err.txt")).unwrap();
     assert!(!content.is_empty());
+}
+
+#[test]
+fn test_with_session_works_without_workspace_root() {
+    let (_, rx) = watch::channel(false);
+    with_session(None, Some(rx), |session| {
+        let out = session.execute("echo hello");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(output_stdout(&out), "hello");
+    });
 }

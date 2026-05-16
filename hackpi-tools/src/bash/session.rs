@@ -320,12 +320,7 @@ pub struct BashOutput {
     pub command_count: u32,
 }
 
-pub fn with_session<F, R>(
-    workspace_root: &PathBuf,
-    workdir: Option<&str>,
-    signal: Option<watch::Receiver<bool>>,
-    f: F,
-) -> R
+pub fn with_session<F, R>(workdir: Option<&str>, signal: Option<watch::Receiver<bool>>, f: F) -> R
 where
     F: FnOnce(&mut BashSession) -> R,
 {
@@ -345,7 +340,6 @@ where
                 session.cwd = std::path::PathBuf::from(wd);
             }
         }
-        let _ = workspace_root;
         f(session)
     })
 }

@@ -29,7 +29,7 @@ impl Tool for WriteTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "filePath": {
+                "path": {
                     "type": "string",
                     "description": "The absolute or relative path where the new file should be created \
                                    (e.g., 'src/agent/orchestrator.rs'). Parent directories will be \
@@ -41,17 +41,17 @@ impl Tool for WriteTool {
                                    Do not wrap in markdown code blocks unless the file itself requires it."
                 }
             },
-            "required": ["filePath", "content"],
+            "required": ["path", "content"],
             "additionalProperties": false
         })
     }
 
     async fn execute(&self, params: Value, _ctx: &ToolContext) -> ToolResult {
-        let file_path = match params.get("filePath").and_then(|v| v.as_str()) {
+        let file_path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
             None => {
                 return ToolResult::SystemError {
-                    message: "Missing 'filePath' parameter.".into(),
+                    message: "Missing 'path' parameter.".into(),
                 }
             }
         };
@@ -126,5 +126,85 @@ impl Tool for WriteTool {
         ToolResult::Success {
             content: format!("Wrote {file_path}: {byte_count} bytes, {line_count} lines"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    fn temp_dir() -> std::path::PathBuf {
+        static COUNTER: OnceLock<std::sync::atomic::AtomicU32> = OnceLock::new();
+        let c = COUNTER.get_or_init(|| std::sync::atomic::AtomicU32::new(0));
+        let id = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("hackpi_write_test_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_write_with_path_param_succeeds() {
+        let dir = temp_dir();
+        let tool = WriteTool::new(dir.clone());
+
+        let params = serde_json::json!({
+            "path": "hello.txt",
+            "content": "Hello, world!"
+        });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("hello.txt"),
+                    "expected success mentioning file, got: {content}"
+                );
+            }
+            other => panic!("expected Success with 'path' param, got {other:?}"),
+        }
+
+        let file_path = dir.join("hello.txt");
+        assert!(file_path.exists(), "file should have been created");
+        let contents = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(contents, "Hello, world!");
+    }
+
+    #[tokio::test]
+    async fn test_write_with_old_file_path_param_fails() {
+        let dir = temp_dir();
+        let tool = WriteTool::new(dir.clone());
+
+        let params = serde_json::json!({
+            "filePath": "should_not_exist.txt",
+            "content": "should not be written"
+        });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("path"),
+                    "error should mention 'path' parameter, got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for old 'filePath' param, got {other:?}"),
+        }
+
+        let file_path = dir.join("should_not_exist.txt");
+        assert!(!file_path.exists(), "file should NOT have been created");
     }
 }

@@ -77,14 +77,6 @@ async fn main() -> anyhow::Result<()> {
                 AgentEvent::ToolCallStart { id, name } => {
                     tui_tx.send(TuiEvent::ToolCall { id, name }).ok();
                 }
-                AgentEvent::ToolCallDelta(delta) => {
-                    tui_tx
-                        .send(TuiEvent::ToolDelta {
-                            id: String::new(),
-                            delta,
-                        })
-                        .ok();
-                }
                 AgentEvent::ToolCallEnd { id, result } => {
                     tui_tx.send(TuiEvent::ToolResult { id, result }).ok();
                 }

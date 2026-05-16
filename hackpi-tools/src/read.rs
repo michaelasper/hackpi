@@ -59,7 +59,8 @@ impl Tool for ReadTool {
                     "description": "Maximum number of lines to return. Default: all lines."
                 }
             },
-            "required": ["path"]
+            "required": ["path"],
+            "additionalProperties": false
         })
     }
 
@@ -298,6 +299,17 @@ mod tests {
         assert!(
             !content.contains("truncated"),
             "small file should not be truncated: {content}"
+        );
+    }
+
+    #[test]
+    fn test_input_schema_has_additional_properties_false() {
+        let tool = ReadTool::new(std::path::PathBuf::from("/tmp"));
+        let schema = tool.input_schema();
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "read tool schema missing additionalProperties: false"
         );
     }
 

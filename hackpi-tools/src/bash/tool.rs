@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use super::session::with_session;
 
 pub struct BashTool {
+    #[allow(dead_code)]
     workspace_root: PathBuf,
 }
 
@@ -42,7 +43,8 @@ impl Tool for BashTool {
                     "description": "Working directory override (absolute path within virtual fs)."
                 }
             },
-            "required": ["command"]
+            "required": ["command"],
+            "additionalProperties": false
         })
     }
 
@@ -67,16 +69,13 @@ impl Tool for BashTool {
             return ToolResult::Cancelled;
         }
 
-        let wr = self.workspace_root.clone();
         let signal = ctx.signal.clone();
 
         let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
         let result = tokio::time::timeout(timeout_dur, async {
             tokio::task::block_in_place(|| {
-                with_session(&wr, workdir, Some(signal), |session| {
-                    session.execute(command)
-                })
+                with_session(workdir, Some(signal), |session| session.execute(command))
             })
         })
         .await;
@@ -101,5 +100,21 @@ impl Tool for BashTool {
         }
 
         ToolResult::Success { content: result }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_input_schema_has_additional_properties_false() {
+        let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+        let schema = tool.input_schema();
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "bash tool schema missing additionalProperties: false"
+        );
     }
 }

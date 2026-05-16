@@ -25,3 +25,13 @@ This means bash operations are always confined to the virtual in-memory filesyst
 1. Remove the `workspace_root` parameter from `with_session` entirely
 2. Or implement `OverlayFs` backed by the workspace root so bash can read real files
 3. Or add a `BashConfig` struct that specifies which filesystem backend to use
+
+## Resolution
+
+**Status:** RESOLVED
+
+**Changes made:**
+- Removed `workspace_root: &PathBuf` parameter from `with_session` in `hackpi-tools/src/bash/session.rs:323`
+- Removed `let _ = workspace_root;` discard line from `with_session` body
+- Updated call site in `hackpi-tools/src/bash/tool.rs:77` — removed `&wr` argument and the `let wr = self.workspace_root.clone();` line
+- Added test `test_with_session_works_without_workspace_root` in `hackpi-tools/src/bash/tests.rs` that calls `with_session` without the removed parameter

@@ -31,3 +31,7 @@ The `anyhow` dependency is underutilized: `send_messages` returns `anyhow::Resul
 1. Either use `anyhow` consistently (attach context with `.context()`) or remove it and use `Box<dyn Error>`
 2. Remove `thiserror` from both crate Cargo.tomls since it's never used
 3. Pass richer error information through `AgentEvent::Error` so the TUI can display it usefully
+
+## Resolution
+
+**RESOLVED** — Removed `anyhow` from `hackpi-tools/Cargo.toml` (unused). `anyhow` remains in workspace `Cargo.toml`, `hackpi-core/Cargo.toml` (used in `api.rs`), and `hackpi-tui/Cargo.toml` (used in `main.rs`).

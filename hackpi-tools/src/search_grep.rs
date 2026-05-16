@@ -48,7 +48,8 @@ impl Tool for SearchGrepTool {
                     "description": "Number of context lines before and after each match. Max 10. Default 2."
                 }
             },
-            "required": ["pattern"]
+            "required": ["pattern"],
+            "additionalProperties": false
         })
     }
 
@@ -370,6 +371,17 @@ mod tests {
         assert!(
             !content.contains("build/"),
             "search should not return results from build/, got: {content}"
+        );
+    }
+
+    #[test]
+    fn test_input_schema_has_additional_properties_false() {
+        let tool = SearchGrepTool::new(std::path::PathBuf::from("/tmp"));
+        let schema = tool.input_schema();
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "search_grep tool schema missing additionalProperties: false"
         );
     }
 
