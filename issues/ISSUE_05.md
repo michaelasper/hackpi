@@ -22,8 +22,12 @@ In `InMemoryFs::write`, `remove`, and `remove_dir`, path components with `".."` 
 - Commands that use `..` in paths behave unpredictably
 - Creating directories with `..` doesn't traverse upward as expected
 
-## Proposed Solutions
+## Resolution
 
-1. Make all path resolution functions handle `..` consistently — always pop the last segment when `..` is encountered
-2. Add a `min_index` check: only pop when `segments.len() > 0`
-3. Add tests for `../..` and `a/b/../../c` patterns across all filesystem operations
+- Fixed `write()`, `create_dir()`, and `remove()` to handle `..` by popping segments instead of skipping
+- `write()`: changed `".." => continue` to pop with boundary check
+- `create_dir()`: refactored to use segments Vec with `..` popping
+- `remove()`: refactored to use segments Vec with `..` popping
+- Added 3 tests: `test_mkdir_with_parent_traversal`, `test_echo_with_parent_traversal`, `test_rm_with_parent_traversal`
+
+**Status: RESOLVED**

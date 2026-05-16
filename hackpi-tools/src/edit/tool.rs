@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use hackpi_core::tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 use std::fmt::Write;
+use tokio::fs;
 
 use super::anchor::{
     contains_patch_markers, generate_anchor_hint, make_updated_anchors, resolve_anchor,
@@ -104,7 +105,7 @@ impl Tool for EditTool {
         let path = self.workspace_root.join(file_path);
         let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
 
-        let original = match std::fs::read_to_string(&canonical) {
+        let original = match fs::read_to_string(&canonical).await {
             Ok(c) => c,
             Err(e) => {
                 return ToolResult::SystemError {
@@ -304,11 +305,12 @@ impl Tool for EditTool {
                         Some(p) => resolve_anchor(p, &lines).unwrap() + 1,
                         None => current_lines.len(),
                     };
-                    let old_snippet: Vec<String> = if insert_at < current_lines.len() {
-                        current_lines[insert_at..insert_at].to_vec()
-                    } else {
-                        Vec::new()
-                    };
+                    let old_snippet: Vec<String> =
+                        if insert_at > 0 && insert_at <= current_lines.len() {
+                            vec![current_lines[insert_at - 1].clone()]
+                        } else {
+                            Vec::new()
+                        };
 
                     current_lines.splice(insert_at..insert_at, new_lines.iter().cloned());
                     let new_end = insert_at + new_lines.len();
@@ -317,7 +319,7 @@ impl Tool for EditTool {
                         anchor_text: pos.clone().unwrap_or_default(),
                         old_snippet,
                         new_snippet: current_lines[insert_at..new_end].to_vec(),
-                        start_line: insert_at,
+                        start_line: insert_at.saturating_sub(1),
                         end_line: new_end,
                     });
                 }
@@ -330,7 +332,7 @@ impl Tool for EditTool {
                         None => 0,
                     };
                     let old_snippet: Vec<String> = if insert_at < current_lines.len() {
-                        current_lines[insert_at..insert_at].to_vec()
+                        vec![current_lines[insert_at].clone()]
                     } else {
                         Vec::new()
                     };
@@ -375,18 +377,18 @@ impl Tool for EditTool {
 
         let original_perms = std::fs::metadata(&canonical).ok().map(|m| m.permissions());
 
-        if let Err(e) = std::fs::write(&tmp_path, result.as_bytes()) {
+        if let Err(e) = fs::write(&tmp_path, result.as_bytes()).await {
             return ToolResult::SystemError {
                 message: format!("IO error writing {file_path}: {e}"),
             };
         }
 
         if let Some(perms) = &original_perms {
-            let _ = std::fs::set_permissions(&tmp_path, perms.clone());
+            let _ = fs::set_permissions(&tmp_path, perms.clone()).await;
         }
 
-        if let Err(e) = std::fs::rename(&tmp_path, &canonical) {
-            let _ = std::fs::remove_file(&tmp_path);
+        if let Err(e) = fs::rename(&tmp_path, &canonical).await {
+            let _ = fs::remove_file(&tmp_path).await;
             return ToolResult::SystemError {
                 message: format!("IO error renaming {file_path}: {e}"),
             };

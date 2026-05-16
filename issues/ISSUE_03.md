@@ -21,8 +21,13 @@ In `filesystem.rs:180`, `read()` calls `self.root.lock().unwrap()` then immediat
 - Using `resolve_path_mut` for read-only operations is semantically incorrect and may mask bugs if the tree is mutated unexpectedly
 - Prevents future parallel filesystem access optimizations
 
-## Proposed Solutions
+## Resolution
 
-1. Split `resolve_path_mut` into a separate `resolve_path` that takes `&FileNode` for read-only operations, and use it in `read()` and `exists()`
-2. Use `std::sync::RwLock` instead of `Mutex` for multiple concurrent readers
-3. Leave as-is if single-threaded bash is intentional, but document the design decision
+- Changed `Mutex<FileNode>` to `RwLock<FileNode>` in `InMemoryFs`
+- Read-only operations (`read`, `exists`, `is_dir`, `is_file`, `read_dir`, `metadata`) use `read().unwrap()`
+- Write operations (`write`, `remove`, `create_dir`) use `write().unwrap()`
+- `read()` changed from `resolve_path_mut` to `resolve_path_ref` (read-only)
+- Removed unused `resolve_path_mut` function entirely
+- Added `test_concurrent_reads_do_not_deadlock` test with 10 concurrent readers
+
+**Status: RESOLVED**

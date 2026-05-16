@@ -236,3 +236,106 @@ fn test_empty_lines_list_produces_empty_block() {
         "even empty blocks should have header"
     );
 }
+
+// ── EditTool integration tests ────────────────────────────────
+
+use hackpi_core::tools::{Tool, ToolContext};
+
+fn create_test_file(dir: &std::path::Path, name: &str, content: &str) {
+    std::fs::write(dir.join(name), content).unwrap();
+}
+
+async fn apply_edit(
+    workspace_root: &std::path::Path,
+    file_path: &str,
+    edits: serde_json::Value,
+) -> String {
+    let tool = super::tool::EditTool::new(workspace_root.to_path_buf());
+    let params = serde_json::json!({
+        "path": file_path,
+        "edits": edits,
+    });
+    let ctx = ToolContext {
+        workspace_root: workspace_root.to_path_buf(),
+        conversation_id: String::new(),
+        signal: tokio::sync::watch::channel(false).1,
+    };
+    let result = tool.execute(params, &ctx).await;
+    match result {
+        hackpi_core::tools::ToolResult::Success { content } => content,
+        other => panic!("Expected Success, got {other:?}"),
+    }
+}
+
+fn make_anchor(line: &str, lineno: usize) -> String {
+    let h = super::hash::line_hash(line, lineno);
+    format!("{lineno}#{h}")
+}
+
+#[tokio::test]
+async fn test_multi_edit_diff_shows_accurate_old_content() {
+    let dir = std::env::temp_dir().join("hackpi_edit_test_diff");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "line1\nline2\nline3\nline4\nline5\n");
+
+    let anchor1 = make_anchor("line1", 1);
+    let anchor5 = make_anchor("line5", 5);
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor5,
+            "lines": ["modified5"]
+        },
+        {
+            "op": "replace",
+            "pos": anchor1,
+            "lines": ["modified1"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "test.rs", edits).await;
+
+    assert!(
+        result.contains("- line1"),
+        "diff should show replaced line1"
+    );
+    assert!(
+        result.contains("- line5"),
+        "diff should show replaced line5"
+    );
+    assert!(result.contains("+ modified1"), "diff should show new line1");
+    assert!(result.contains("+ modified5"), "diff should show new line5");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_single_edit_diff_works() {
+    let dir = std::env::temp_dir().join("hackpi_edit_test_single");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "fn old() {}\n");
+
+    let anchor = make_anchor("fn old() {}", 1);
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor,
+            "lines": ["fn new() {}"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "test.rs", edits).await;
+
+    assert!(
+        result.contains("- fn old() {}"),
+        "diff should show old line"
+    );
+    assert!(
+        result.contains("+ fn new() {}"),
+        "diff should show new line"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

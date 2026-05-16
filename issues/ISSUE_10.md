@@ -20,8 +20,13 @@ Additionally, `Ctrl+L` calls `app.clear()` (clearing the conversation), and `Ctr
 - Misleading UI: advertising a feature that doesn't exist
 - Spec compliance gap: TUI spec section "Slash Commands" lists 5 commands, none implemented
 
-## Proposed Solutions
+## Resolution
 
-1. Add a slash command parser in `main.rs` that intercepts messages starting with `/` before sending to the LLM
-2. Implement at minimum `/help` (display a help popup or inline text) and `/clear` (same as Ctrl+L)
-3. Remove `/help` from the status bar if slash commands are deferred
+- Added `handle_slash_command()` function in `app.rs` that handles `/help`, `/clear`, `/quit`
+- `/help` sends help text as `StreamChunk` events followed by `Done`
+- `/clear` calls `app.clear()`
+- `/quit` sets `app.quit_requested = true`
+- Unknown commands send an `Error` event
+- 4 tests added for slash command handling
+
+**Status: RESOLVED**

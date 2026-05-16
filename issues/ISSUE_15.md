@@ -20,9 +20,11 @@ Additionally, there is no per-request timeout or cancellation mechanism except f
 - Ctrl+C may not work if the HTTP stream is blocked (the signal is only checked between events)
 - A misconfigured server can permanently block the agent
 
-## Proposed Solutions
+## Resolution
 
-1. Add `Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(300)).build()?`
-2. Add a read timeout per chunk using `tokio::time::timeout` in the SSE streaming loop
-3. Add retry logic with exponential backoff for transient connection failures
-4. Make timeout configurable via `ApiConfig`
+- Changed `Client::new()` to `Client::builder().connect_timeout(10s).timeout(300s).build()`
+- `ApiClient::new()` now returns `Result<Self>` to propagate build errors
+- Updated all callers (`main.rs`, `integration_test.rs`) to use `?` or `.unwrap()`
+- Added `test_api_client_has_connect_timeout` test
+
+**Status: RESOLVED**
