@@ -15,3 +15,6 @@ grep-regex.workspace = true
 globset.workspace = true
 tracing.workspace = true
 futures.workspace = true
+walkdir.workspace = true
+async-trait.workspace = true
+hackpi-core = { path = "../hackpi-core" }
