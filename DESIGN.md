@@ -7,7 +7,7 @@ A Rust-based coding agent with a virtual bash filesystem, hash-anchored edits, a
 Three-crate Rust workspace:
 
 ```
-oven/
+hackpi/
 ├── Cargo.toml              # workspace root
 ├── DESIGN.md               # this file
 ├── hashline.spec.md         # edit system spec (ref)
@@ -15,7 +15,7 @@ oven/
 ├── read-tool.spec.md        # read/search_grep spec (ref)
 ├── write-tool.spec.md       # write_file spec (ref)
 ├── bash-tool.spec.md        # virtual bash spec (ref)
-├── oven-core/
+├── hackpi-core/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
@@ -23,7 +23,7 @@ oven/
 │       ├── api.rs           # Anthropic client
 │       ├── tools.rs         # tool registry
 │       └── types.rs         # shared types
-├── oven-tools/
+├── hackpi-tools/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
@@ -32,7 +32,7 @@ oven/
 │       ├── read.rs          # read tool
 │       ├── search_grep.rs   # context-aware rg wrapper
 │       └── write.rs         # write tool
-└── oven-tui/
+└── hackpi-tui/
     ├── Cargo.toml
     └── src/
         ├── lib.rs
@@ -46,7 +46,7 @@ oven/
 
 ```toml
 [workspace]
-members = ["oven-core", "oven-tools", "oven-tui"]
+members = ["hackpi-core", "hackpi-tools", "hackpi-tui"]
 resolver = "2"
 ```
 
@@ -62,7 +62,7 @@ resolver = "2"
 | `ratatui` + `crossterm` | TUI framework |
 | `anyhow` | Error handling |
 
-## Agent Loop (`oven-core`)
+## Agent Loop (`hackpi-core`)
 
 The central orchestrator. Implements the Anthropic `/v1/messages` streaming API.
 
@@ -71,7 +71,7 @@ The central orchestrator. Implements the Anthropic `/v1/messages` streaming API.
 ```
 ┌──────────┐     ┌──────────────┐     ┌───────────┐
 │  TUI     │────▶│  Agent Loop  │────▶│  API      │
-│  Events  │     │  (oven-core) │     │  Client   │
+│  Events  │     │  (hackpi-core) │     │  Client   │
 └──────────┘     └──────┬───────┘     └───────────┘
                         │
                    ┌────▼───────┐
@@ -83,7 +83,7 @@ The central orchestrator. Implements the Anthropic `/v1/messages` streaming API.
               │         │         │
          ┌────▼───┐ ┌──▼───┐ ┌───▼────┐
          │ bash   │ │ edit │ │ read   │ ...
-         │(oven-  │ │(oven-│ │(oven-  │
+         │(hackpi-  │ │(hackpi-│ │(hackpi-  │
          │ tools) │ │tools)│ │ tools) │
          └────────┘ └──────┘ └────────┘
 ```
@@ -135,7 +135,7 @@ Each tool result is capped at 256KB. If a tool produces more output, it's trunca
 ### System Prompt Design
 
 ```
-You are oven, a coding agent built with Rust.
+You are hackpi, a coding agent built with Rust.
 You have access to tools for reading, writing, editing, and searching code.
 
 Workflow:
@@ -153,7 +153,7 @@ Rules:
 
 The system prompt is decomposed into sections (identity, tools, workflow, rules) so each can be independently tuned. It stays under 500 tokens — DeepSeek V4 Flash is a local model and long system prompts degrade quality.
 
-## Tool System (`oven-tools`)
+## Tool System (`hackpi-tools`)
 
 ### Tool Trait
 
@@ -199,11 +199,11 @@ impl ToolRegistry {
 
 | Tool | Crate Location | Spec File |
 |---|---|---|
-| `read` | `oven-tools::read` | [read-tool.spec.md](read-tool.spec.md) |
-| `search_grep` | `oven-tools::search_grep` | [read-tool.spec.md](read-tool.spec.md) |
-| `edit` | `oven-tools::edit` | [hashline.spec.md](hashline.spec.md) |
-| `write` | `oven-tools::write` | [write-tool.spec.md](write-tool.spec.md) |
-| `bash` | `oven-tools::bash` | [bash-tool.spec.md](bash-tool.spec.md) |
+| `read` | `hackpi-tools::read` | [read-tool.spec.md](read-tool.spec.md) |
+| `search_grep` | `hackpi-tools::search_grep` | [read-tool.spec.md](read-tool.spec.md) |
+| `edit` | `hackpi-tools::edit` | [hashline.spec.md](hashline.spec.md) |
+| `write` | `hackpi-tools::write` | [write-tool.spec.md](write-tool.spec.md) |
+| `bash` | `hackpi-tools::bash` | [bash-tool.spec.md](bash-tool.spec.md) |
 
 Each tool's implementation details, schema, error handling, and edge cases are in its respective spec. The full spec documents cover:
 
@@ -213,7 +213,7 @@ Each tool's implementation details, schema, error handling, and edge cases are i
 - **[write-tool.spec.md](write-tool.spec.md)**: write_file (new-file-only contract, atomic write, phantom directory handler, path jail, error classification, memory footprint)
 - **[bash-tool.spec.md](bash-tool.spec.md)**: Virtual bash (filesystem trait with InMemoryFs/OverlayFs/ReadWriteFs, shell parser, command registry with full v1 command set, execution model, security model)
 
-## Shared Types (`oven-core::types`)
+## Shared Types (`hackpi-core::types`)
 
 ```rust
 pub struct Message {
@@ -277,13 +277,13 @@ Ctrl+C keypress → TUI sends signal
 ## Implementation Order
 
 1. **Workspace scaffolding** — Cargo.toml files, crate stubs, dependency resolution
-2. **oven-core: types + API client** — Shared types, reqwest SSE streaming to `/v1/messages`
-3. **oven-tui: basic rendering** — 4-region layout, keyboard input, event channels
-4. **oven-core: agent loop** — Message loop with tool dispatch, streaming, turn limit
-5. **oven-tools: read + search_grep** — Ripgrep wrapper, hashline file reader
-6. **oven-tools: write** — Atomic file creation with workspace jail
-7. **oven-tools: edit** — Hashline edit engine with validation
-8. **oven-tools: bash** — Virtual filesystem trait, InMemoryFs, shell parser, command registry
+2. **hackpi-core: types + API client** — Shared types, reqwest SSE streaming to `/v1/messages`
+3. **hackpi-tui: basic rendering** — 4-region layout, keyboard input, event channels
+4. **hackpi-core: agent loop** — Message loop with tool dispatch, streaming, turn limit
+5. **hackpi-tools: read + search_grep** — Ripgrep wrapper, hashline file reader
+6. **hackpi-tools: write** — Atomic file creation with workspace jail
+7. **hackpi-tools: edit** — Hashline edit engine with validation
+8. **hackpi-tools: bash** — Virtual filesystem trait, InMemoryFs, shell parser, command registry
 9. **Integration testing** — End-to-end workflow tests
 10. **Polish** — Error messages, loading states, perf tuning
 

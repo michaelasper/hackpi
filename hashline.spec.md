@@ -1,6 +1,6 @@
 # Hashline Edit Spec (v1)
 
-Hash-anchored line editing for the oven coding agent. Inspired by [oh-my-pi](https://github.com/can1357/oh-my-pi) and [pi-hashline-edit](https://github.com/RimuruW/pi-hashline-edit).
+Hash-anchored line editing for the hackpi coding agent. Inspired by [oh-my-pi](https://github.com/can1357/oh-my-pi) and [pi-hashline-edit](https://github.com/RimuruW/pi-hashline-edit).
 
 ## Core Concept
 

@@ -1,12 +1,12 @@
 # TUI Spec (v1)
 
-Terminal UI for the oven coding agent, built with ratatui + crossterm.
+Terminal UI for the hackpi coding agent, built with ratatui + crossterm.
 
 ## Layout
 
 ```
 ┌──────────────────────────────────────────────┐
-│  oven v0.1.0 · ds4 · 0tks ↑ 0tks ↓           │
+│  hackpi v0.1.0 · ds4 · 0tks ↑ 0tks ↓           │
 ├──────────────────────────────────────────────┤
 │                                              │
 │  ┌──────────────────────────────────────────┐│
@@ -41,7 +41,7 @@ Terminal UI for the oven coding agent, built with ratatui + crossterm.
 ### Regions
 
 1. **Header bar** (1 line)
-   - Left: `oven v{version}` · `{model_name}`
+   - Left: `hackpi v{version}` · `{model_name}`
    - Right: `{input_tokens}↑ {output_tokens}↓`
 
 2. **Conversation area** (remaining space - 3 lines)

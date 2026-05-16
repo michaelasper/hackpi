@@ -1,0 +1,17 @@
+[package]
+name = "hackpi-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+xxhash-rust.workspace = true
+grep-searcher.workspace = true
+grep-regex.workspace = true
+globset.workspace = true
+tracing.workspace = true
+futures.workspace = true
