@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-hackpi-core = { path = "../hackpi-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 globset.workspace = true

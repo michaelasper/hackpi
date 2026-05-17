@@ -12,4 +12,8 @@ reqwest.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 tracing.workspace = true
+hackpi-guardrails = { path = "../hackpi-guardrails" }
+
+[dev-dependencies]
+tempfile = "3"
 

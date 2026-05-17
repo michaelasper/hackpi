@@ -5,6 +5,7 @@ use crossterm::{
 };
 use hackpi_core::agent::{Agent, AgentEvent};
 use hackpi_core::api::ApiClient;
+use hackpi_core::tools::PermissionRequest;
 use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
 use hackpi_guardrails::{GuardEvaluator, PermissionDecision, SettingsPaths};
@@ -15,7 +16,7 @@ use hackpi_tui::input::InputHandler;
 use hackpi_tui::ui;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -51,7 +52,25 @@ async fn main() -> anyhow::Result<()> {
     // Create GuardEvaluator with settings paths from current directory
     let workspace_root = std::env::current_dir()?;
     let settings_paths = SettingsPaths::new(&workspace_root);
-    let _guard_evaluator = GuardEvaluator::new(god_mode, settings_paths);
+    let guard_evaluator = Arc::new(RwLock::new(GuardEvaluator::new(
+        god_mode,
+        settings_paths.clone(),
+    )));
+
+    // Load rules at startup
+    if let Ok(mut evaluator) = guard_evaluator.write() {
+        if let Err(e) = evaluator.load_rules() {
+            tracing::warn!("Failed to load guardrail rules: {e}");
+        }
+    }
+
+    // TODO: Spawn hot reload thread in a future phase.
+    // The HotReloader needs access to the GuardEvaluator's internal rule list
+    // (Arc<RwLock<Vec<PermissionRule>>>), which requires either exposing it
+    // via a method or restructuring GuardEvaluator to use shared rules internally.
+    // When that's ready:
+    //   let hot_reloader = HotReloader::new(rules, settings_paths);
+    //   let _handle = hot_reloader.start()?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -61,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (tui_tx, mut tui_rx) = mpsc::unbounded_channel::<TuiEvent>();
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let (permission_tx, mut permission_rx) = mpsc::unbounded_channel::<PermissionRequest>();
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
 
     let mut app = App::new();
@@ -70,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
     let api_config = ApiConfig::from_env();
 
     let mut tool_registry = ToolRegistry::new();
+    tool_registry.set_guard_evaluator(Arc::clone(&guard_evaluator));
+    tool_registry.set_permission_tx(permission_tx);
     register_all_tools(&mut tool_registry, &workspace_root);
     let tools = Arc::new(tool_registry);
 
@@ -98,7 +120,31 @@ async fn main() -> anyhow::Result<()> {
                 AgentEvent::Done => {
                     tui_tx.send(TuiEvent::Done).ok();
                 }
+                AgentEvent::PermissionRequest {
+                    id,
+                    reason,
+                    response,
+                } => {
+                    tui_tx
+                        .send(TuiEvent::PermissionRequest {
+                            id,
+                            reason,
+                            response,
+                        })
+                        .ok();
+                }
             }
+        }
+
+        // Check for permission requests from the dispatch permission channel
+        if let Ok((id, reason, response)) = permission_rx.try_recv() {
+            tui_tx
+                .send(TuiEvent::PermissionRequest {
+                    id,
+                    reason,
+                    response,
+                })
+                .ok();
         }
 
         if let Ok(event) = tui_rx.try_recv() {

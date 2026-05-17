@@ -517,9 +517,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "hackpi-guardrails",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -529,7 +531,6 @@ name = "hackpi-guardrails"
 version = "0.1.0"
 dependencies = [
  "globset",
- "hackpi-core",
  "home",
  "notify",
  "serde",

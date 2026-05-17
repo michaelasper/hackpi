@@ -1,10 +1,11 @@
 use crate::api::{ApiClient, ApiEvent};
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 use crate::types::{ContentBlock, Message, Role, Usage};
+use hackpi_guardrails::{GuardReason, PermissionDecision};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const MAX_TURNS: u32 = 25;
 const MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
@@ -50,11 +51,22 @@ pub(crate) fn truncate_output(
 
 pub enum AgentEvent {
     TextChunk(String),
-    ToolCallStart { id: String, name: String },
-    ToolCallEnd { id: String, result: ToolResult },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallEnd {
+        id: String,
+        result: ToolResult,
+    },
     Done,
     Error(String),
     Usage(Usage),
+    PermissionRequest {
+        id: u64,
+        reason: GuardReason,
+        response: oneshot::Sender<PermissionDecision>,
+    },
 }
 
 pub struct Agent {
