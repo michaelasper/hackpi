@@ -168,7 +168,7 @@ impl GuardEvaluator {
 
         // Check command gate (bash tool)
         if let Some(command) = params.get("command").and_then(|v| v.as_str()) {
-            let result = command_gate::check(command, &self.config_rules);
+            let result = command_gate::check(command, &self.config_rules, tool_name);
             if !matches!(result, GuardResult::Allow) {
                 return result;
             }
