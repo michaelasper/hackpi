@@ -16,7 +16,10 @@ pub fn register_vcs_tools(
     registry.register(Box::new(git_read::GitReadTool::new(
         workspace_root.to_path_buf(),
     )));
-    // GitWriteTool and GitHubTool will be registered in later phases
+    registry.register(Box::new(git_write::GitWriteTool::new(
+        workspace_root.to_path_buf(),
+    )));
+    // GitHubTool will be registered in a later phase
 }
 
 #[cfg(test)]
