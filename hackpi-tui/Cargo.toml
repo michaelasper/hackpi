@@ -20,6 +20,7 @@ futures.workspace = true
 hackpi-core = { path = "../hackpi-core" }
 hackpi-tools = { path = "../hackpi-tools" }
 hackpi-guardrails = { path = "../hackpi-guardrails" }
+hackpi-vcs = { path = "../hackpi-vcs" }
 
 [dev-dependencies]
 tempfile = "3"
