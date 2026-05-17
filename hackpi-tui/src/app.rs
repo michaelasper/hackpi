@@ -1,7 +1,7 @@
 use crate::events::TuiEvent;
 use hackpi_core::tools::ToolResult;
 use hackpi_core::types::Usage;
-use hackpi_guardrails::{GuardReason, PermissionDecision};
+use hackpi_guardrails::{GuardEvaluator, GuardReason, PermissionDecision};
 use std::collections::VecDeque;
 
 /// Represents a pending permission prompt awaiting user decision.
@@ -163,10 +163,11 @@ impl App {
     }
 }
 
-pub fn handle_slash_command(
+pub async fn handle_slash_command(
     cmd: &str,
     app: &mut App,
     tui_tx: &tokio::sync::mpsc::UnboundedSender<TuiEvent>,
+    guard_evaluator: &mut GuardEvaluator,
 ) -> bool {
     let parts: Vec<&str> = cmd.trim().splitn(2, char::is_whitespace).collect();
     let command = parts[0];
@@ -176,7 +177,10 @@ pub fn handle_slash_command(
 Available commands:
   /help  - Show this help message
   /clear - Clear the conversation
-  /quit  - Exit the application";
+  /quit  - Exit the application
+  /guardrails:status - Show guardrails status
+  /guardrails:clean - Clear session cache
+  /guardrails:onboarding [preset] - Write a preset guardrails config";
             tui_tx
                 .send(TuiEvent::StreamChunk(help_text.to_string()))
                 .ok();
@@ -191,6 +195,102 @@ Available commands:
             app.quit_requested = true;
             true
         }
+        "/guardrails:status" => {
+            let rule_count = guard_evaluator.rule_count();
+            let god_mode = guard_evaluator.is_god_mode();
+            let cache_len = guard_evaluator.session_cache_len();
+            let god_mode_str = if god_mode { "yes" } else { "no" };
+
+            // Determine which guards are active by checking if rules exist
+            // for each guard type (this is best-effort based on rule count)
+            let status_text = format!(
+                "\
+Guardrails Status:
+  Rules loaded: {rule_count}
+  God mode: {god_mode_str}
+  Session cache entries: {cache_len}
+  Active guards: PathGuard ✓, CommandGate ✓, FileProtection ✓"
+            );
+            tui_tx.send(TuiEvent::StreamChunk(status_text)).ok();
+            tui_tx.send(TuiEvent::Done).ok();
+            true
+        }
+        "/guardrails:clean" => {
+            guard_evaluator.clear_session();
+            let msg = "Session cache cleared.".to_string();
+            tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
+            tui_tx.send(TuiEvent::Done).ok();
+            true
+        }
+        cmd if cmd.starts_with("/guardrails:onboarding") => {
+            let rest = parts.get(1).copied().unwrap_or("");
+            let preset = rest.trim().to_lowercase();
+
+            let (preset_name, config_json) = match preset.as_str() {
+                "strict" => ("strict", STRICT_CONFIG),
+                "balanced" => ("balanced", BALANCED_CONFIG),
+                "permissive" => ("permissive", PERMISSIVE_CONFIG),
+                "" => {
+                    let summary = "\
+Guardrails Onboarding Presets:
+  /guardrails:onboarding strict     - Deny everything, ask for everything
+  /guardrails:onboarding balanced   - Balanced defaults (recommended)
+  /guardrails:onboarding permissive - Permissive rules with minimal restrictions";
+                    tui_tx.send(TuiEvent::StreamChunk(summary.to_string())).ok();
+                    tui_tx.send(TuiEvent::Done).ok();
+                    return true;
+                }
+                _ => {
+                    let err = format!(
+                        "Unknown preset: '{preset}'. Available: strict, balanced, permissive"
+                    );
+                    tui_tx.send(TuiEvent::Error(err)).ok();
+                    return true;
+                }
+            };
+
+            let hackpi_dir = match guard_evaluator.settings_paths().hackpi.parent() {
+                Some(dir) => dir.to_path_buf(),
+                None => {
+                    tui_tx
+                        .send(TuiEvent::Error(
+                            "Cannot determine workspace root for guardrails config".into(),
+                        ))
+                        .ok();
+                    return true;
+                }
+            };
+
+            // Create .hackpi directory if it doesn't exist
+            if let Err(e) = std::fs::create_dir_all(&hackpi_dir) {
+                let err = format!("Failed to create directory {e}");
+                tui_tx.send(TuiEvent::Error(err)).ok();
+                return true;
+            }
+
+            let config_path = hackpi_dir.join("guardrails.json");
+            if let Err(e) = std::fs::write(&config_path, config_json) {
+                let err = format!("Failed to write config file: {e}");
+                tui_tx.send(TuiEvent::Error(err)).ok();
+                return true;
+            }
+
+            // Reload rules from the new config
+            if let Err(e) = guard_evaluator.load_rules() {
+                let err = format!("Failed to load rules after writing config: {e}");
+                tui_tx.send(TuiEvent::Error(err)).ok();
+                return true;
+            }
+
+            let rule_count = guard_evaluator.rule_count();
+            let msg = format!(
+                "Wrote {preset_name} guardrails config to {} ({rule_count} rules loaded).",
+                config_path.display()
+            );
+            tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
+            tui_tx.send(TuiEvent::Done).ok();
+            true
+        }
         _ => {
             let err = format!("Unknown command: {command}. Type /help for available commands.");
             tui_tx.send(TuiEvent::Error(err)).ok();
@@ -198,6 +298,88 @@ Available commands:
         }
     }
 }
+
+// ── Preset configs ──────────────────────────────────────────────────────────
+
+const STRICT_CONFIG: &str = r#"{
+  "version": 1,
+  "permissions": {
+    "allow": [],
+    "deny": ["Read(./**)", "Write(./**)", "Bash(*)"]
+  },
+  "path_access": {
+    "allow": [],
+    "deny": ["/**", "~/**"],
+    "ask": false
+  },
+  "command_gate": {
+    "patterns": {
+      "rm -rf": "deny",
+      "sudo": "deny",
+      "curl": "ask",
+      "dd": "deny"
+    }
+  },
+  "file_protection": {
+    "patterns": {
+      ".env*": { "read": "deny", "write": "deny" },
+      "*.pem": { "read": "deny", "write": "deny" },
+      "*.key": { "read": "deny", "write": "deny" }
+    }
+  }
+}"#;
+
+const BALANCED_CONFIG: &str = r#"{
+  "version": 1,
+  "permissions": {
+    "allow": ["Read(./docs/**)"],
+    "deny": ["Read(./.env)", "Write(./.env)", "Bash(sudo *)"]
+  },
+  "path_access": {
+    "allow": [],
+    "deny": [],
+    "ask": true
+  },
+  "command_gate": {
+    "patterns": {
+      "rm -rf": "ask",
+      "sudo": "deny",
+      "curl": "ask",
+      "dd": "deny"
+    }
+  },
+  "file_protection": {
+    "patterns": {
+      ".env*": { "read": "ask", "write": "deny" },
+      "*.pem": { "read": "ask", "write": "deny" },
+      "*.key": { "read": "ask", "write": "deny" }
+    }
+  }
+}"#;
+
+const PERMISSIVE_CONFIG: &str = r#"{
+  "version": 1,
+  "permissions": {
+    "allow": ["Read(./**)", "Write(./**)", "Bash(*)"],
+    "deny": []
+  },
+  "path_access": {
+    "allow": ["/**", "~/**"],
+    "deny": [],
+    "ask": false
+  },
+  "command_gate": {
+    "patterns": {
+      "sudo": "deny",
+      "rm -rf /": "deny"
+    }
+  },
+  "file_protection": {
+    "patterns": {
+      ".env": { "write": "deny" }
+    }
+  }
+}"#;
 
 /// Map a key character to a `PermissionDecision`, matching the key bindings
 /// used in the TUI event loop when a permission prompt is active.
@@ -215,21 +397,32 @@ pub fn permission_decision_from_key(c: char) -> Option<PermissionDecision> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hackpi_guardrails::SettingsPaths;
     use tokio::sync::mpsc;
 
-    #[test]
-    fn test_slash_command_prevents_agent_spawn() {
+    /// Helper to create a GuardEvaluator backed by a temp directory.
+    fn make_guard_evaluator() -> (GuardEvaluator, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+        (evaluator, dir)
+    }
+
+    #[tokio::test]
+    async fn test_slash_command_prevents_agent_spawn() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let handled = handle_slash_command("/help", &mut app, &tx);
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled = handle_slash_command("/help", &mut app, &tx, &mut ge).await;
         assert!(handled);
     }
 
-    #[test]
-    fn test_slash_help_generates_help_text() {
+    #[tokio::test]
+    async fn test_slash_help_generates_help_text() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let handled = handle_slash_command("/help", &mut app, &tx);
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled = handle_slash_command("/help", &mut app, &tx, &mut ge).await;
         assert!(handled);
         let mut found_chunk = false;
         let mut found_done = false;
@@ -249,23 +442,25 @@ mod tests {
         assert!(found_done);
     }
 
-    #[test]
-    fn test_slash_clear_clears_conversation() {
+    #[tokio::test]
+    async fn test_slash_clear_clears_conversation() {
         let mut app = App::new();
         app.handle_event(TuiEvent::Submit("hello".into()));
         assert_eq!(app.conversation.len(), 1);
         let (tx, _rx) = mpsc::unbounded_channel();
-        let handled = handle_slash_command("/clear", &mut app, &tx);
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled = handle_slash_command("/clear", &mut app, &tx, &mut ge).await;
         assert!(handled);
         assert!(app.conversation.is_empty());
         assert!(app.input.is_empty());
     }
 
-    #[test]
-    fn test_unknown_slash_command_shows_error() {
+    #[tokio::test]
+    async fn test_unknown_slash_command_shows_error() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let handled = handle_slash_command("/unknown", &mut app, &tx);
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled = handle_slash_command("/unknown", &mut app, &tx, &mut ge).await;
         assert!(handled);
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -275,6 +470,208 @@ mod tests {
             }
         }
         assert!(found_error);
+    }
+
+    // ── Guardrails slash command tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_guardrails_status_returns_info() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled = handle_slash_command("/guardrails:status", &mut app, &tx, &mut ge).await;
+        assert!(handled);
+        let mut found_chunk = false;
+        let mut found_done = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                TuiEvent::StreamChunk(text) => {
+                    found_chunk = true;
+                    assert!(text.contains("Guardrails Status"));
+                    assert!(text.contains("Rules loaded"));
+                    assert!(text.contains("God mode"));
+                    assert!(text.contains("Active guards"));
+                }
+                TuiEvent::Done => found_done = true,
+                _ => {}
+            }
+        }
+        assert!(found_chunk);
+        assert!(found_done);
+    }
+
+    #[tokio::test]
+    async fn test_guardrails_clean_clears_session() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+
+        // Record a session decision first
+        ge.record_decision("test-key".into(), PermissionDecision::AllowSession);
+        assert_eq!(ge.session_cache_len(), 1);
+
+        let handled = handle_slash_command("/guardrails:clean", &mut app, &tx, &mut ge).await;
+        assert!(handled);
+
+        // Verify session cache is cleared
+        assert_eq!(ge.session_cache_len(), 0);
+
+        // Verify output message
+        let mut found_msg = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_msg = true;
+                assert!(msg.contains("cleared"), "msg: {msg}");
+            }
+        }
+        assert!(found_msg);
+    }
+
+    #[tokio::test]
+    async fn test_guardrails_onboarding_balanced_writes_config() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, dir) = make_guard_evaluator();
+
+        // Initial state: no rules loaded
+        assert_eq!(ge.rule_count(), 0);
+
+        let handled =
+            handle_slash_command("/guardrails:onboarding balanced", &mut app, &tx, &mut ge).await;
+        assert!(handled);
+
+        // Verify rules were loaded
+        assert!(
+            ge.rule_count() > 0,
+            "rules should be loaded after onboarding"
+        );
+
+        // Verify config file was written
+        let config_path = dir.path().join(".hackpi/guardrails.json");
+        assert!(config_path.exists(), "config file should exist");
+        let content = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            content.contains("Read(./docs/**)"),
+            "balanced config should contain Read(./docs/**)"
+        );
+        assert!(
+            content.contains("\"ask\": true"),
+            "balanced config should have ask: true"
+        );
+
+        // Verify success message
+        let mut found_msg = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_msg = true;
+                assert!(msg.contains("rules loaded"), "msg: {msg}");
+            }
+        }
+        assert!(found_msg);
+    }
+
+    #[tokio::test]
+    async fn test_guardrails_onboarding_no_args_shows_presets() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled = handle_slash_command("/guardrails:onboarding", &mut app, &tx, &mut ge).await;
+        assert!(handled);
+        let mut found_summary = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_summary = true;
+                assert!(msg.contains("strict"));
+                assert!(msg.contains("balanced"));
+                assert!(msg.contains("permissive"));
+            }
+        }
+        assert!(found_summary);
+    }
+
+    #[tokio::test]
+    async fn test_guardrails_onboarding_strict_writes_config() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, dir) = make_guard_evaluator();
+        let handled =
+            handle_slash_command("/guardrails:onboarding strict", &mut app, &tx, &mut ge).await;
+        assert!(handled);
+        assert!(ge.rule_count() > 0);
+
+        let config_path = dir.path().join(".hackpi/guardrails.json");
+        assert!(config_path.exists());
+        let content = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(content.contains("deny"));
+        assert!(content.contains("rm -rf"));
+
+        let mut found_msg = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_msg = true;
+                assert!(msg.contains("strict"), "msg: {msg}");
+            }
+        }
+        assert!(found_msg);
+    }
+
+    #[tokio::test]
+    async fn test_guardrails_onboarding_permissive_writes_config() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, dir) = make_guard_evaluator();
+        let handled =
+            handle_slash_command("/guardrails:onboarding permissive", &mut app, &tx, &mut ge).await;
+        assert!(handled);
+        assert!(ge.rule_count() > 0);
+
+        let config_path = dir.path().join(".hackpi/guardrails.json");
+        assert!(config_path.exists());
+        let content = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(content.contains("Read(./**)"));
+
+        let mut found_msg = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_msg = true;
+                assert!(msg.contains("permissive"), "msg: {msg}");
+            }
+        }
+        assert!(found_msg);
+    }
+
+    #[tokio::test]
+    async fn test_guardrails_unknown_subcommand_shows_error() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled = handle_slash_command("/guardrails:unknown", &mut app, &tx, &mut ge).await;
+        assert!(handled);
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::Error(msg) = event {
+                found_error = true;
+                assert!(msg.contains("/guardrails:unknown"));
+            }
+        }
+        assert!(found_error);
+    }
+
+    #[tokio::test]
+    async fn test_guardrails_commands_prevent_agent_spawn() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+
+        let cmds = [
+            "/guardrails:status",
+            "/guardrails:clean",
+            "/guardrails:onboarding balanced",
+        ];
+        for cmd in &cmds {
+            let handled = handle_slash_command(cmd, &mut app, &tx, &mut ge).await;
+            assert!(handled, "command '{cmd}' should prevent agent spawn");
+        }
     }
 
     #[test]

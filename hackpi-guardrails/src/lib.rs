@@ -257,6 +257,28 @@ impl GuardEvaluator {
         self.config_rules = new_rules;
         Ok(())
     }
+
+    // ── Accessors for UI slash commands ───────────────────────────────────
+
+    /// Return the number of currently loaded permission rules.
+    pub fn rule_count(&self) -> usize {
+        self.config_rules.len()
+    }
+
+    /// Return whether god mode is active.
+    pub fn is_god_mode(&self) -> bool {
+        self.god_mode
+    }
+
+    /// Return the number of entries in the session decision cache.
+    pub fn session_cache_len(&self) -> usize {
+        self.session_cache.len()
+    }
+
+    /// Return a reference to the settings paths.
+    pub fn settings_paths(&self) -> &SettingsPaths {
+        &self.settings_paths
+    }
 }
 
 #[cfg(test)]

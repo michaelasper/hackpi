@@ -10,7 +10,7 @@ use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
 use hackpi_guardrails::{GuardEvaluator, PermissionDecision, SettingsPaths};
 use hackpi_tools::register_all_tools;
-use hackpi_tui::app::{App, AppState};
+use hackpi_tui::app::{handle_slash_command, App, AppState};
 use hackpi_tui::events::TuiEvent;
 use hackpi_tui::input::InputHandler;
 use hackpi_tui::ui;
@@ -203,32 +203,44 @@ async fn main() -> anyhow::Result<()> {
                                 input.handle_key(key);
                                 app.input = input.buffer.clone();
                                 if let Some(submitted) = input.last_submitted() {
-                                    tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
+                                    // Check for slash commands first
+                                    if submitted.starts_with('/') {
+                                        let mut guard = guard_evaluator.write().unwrap();
+                                        handle_slash_command(
+                                            &submitted,
+                                            &mut app,
+                                            &tui_tx,
+                                            &mut *guard,
+                                        )
+                                        .await;
+                                    } else {
+                                        tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
 
-                                    let signal_rx_clone = signal_rx.clone();
-                                    let agent_tx_clone = agent_tx.clone();
+                                        let signal_rx_clone = signal_rx.clone();
+                                        let agent_tx_clone = agent_tx.clone();
 
-                                    let agent_instance = Agent::new(
-                                        ApiClient::new(api_config.clone())?,
-                                        tools.clone(),
-                                        SYSTEM_PROMPT.to_string(),
-                                        workspace_root.clone(),
-                                    );
+                                        let agent_instance = Agent::new(
+                                            ApiClient::new(api_config.clone())?,
+                                            tools.clone(),
+                                            SYSTEM_PROMPT.to_string(),
+                                            workspace_root.clone(),
+                                        );
 
-                                    let conversation_clone = Arc::clone(&conversation_mut);
-                                    let tx_for_agent = agent_tx_clone.clone();
+                                        let conversation_clone = Arc::clone(&conversation_mut);
+                                        let tx_for_agent = agent_tx_clone.clone();
 
-                                    tokio::spawn(async move {
-                                        let mut conv_guard = conversation_clone.lock().await;
-                                        agent_instance
-                                            .run(
-                                                &submitted,
-                                                &mut conv_guard,
-                                                tx_for_agent,
-                                                signal_rx_clone,
-                                            )
-                                            .await;
-                                    });
+                                        tokio::spawn(async move {
+                                            let mut conv_guard = conversation_clone.lock().await;
+                                            agent_instance
+                                                .run(
+                                                    &submitted,
+                                                    &mut conv_guard,
+                                                    tx_for_agent,
+                                                    signal_rx_clone,
+                                                )
+                                                .await;
+                                        });
+                                    }
                                 }
                             }
                         }
