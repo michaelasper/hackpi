@@ -63,6 +63,9 @@ fn tool_card_color(name: &str) -> Color {
         "bash" => Color::Yellow,
         "search_grep" => Color::Cyan,
         "write" => Color::Green,
+        "git_read" => Color::Rgb(100, 180, 100), // green — read-only, safe
+        "git_write" => Color::Rgb(255, 140, 0),  // orange — mutation, caution
+        "github" => Color::Rgb(255, 255, 255),   // white — external API
         _ => Color::DarkGray,
     }
 }
@@ -427,6 +430,23 @@ mod tests {
     #[test]
     fn test_tool_card_color_unknown() {
         assert_eq!(tool_card_color("unknown"), Color::DarkGray);
+    }
+
+    // ── VCS tool card color tests ──────────────────────────────────────
+
+    #[test]
+    fn test_tool_card_color_for_git_read() {
+        assert_eq!(tool_card_color("git_read"), Color::Rgb(100, 180, 100));
+    }
+
+    #[test]
+    fn test_tool_card_color_for_git_write() {
+        assert_eq!(tool_card_color("git_write"), Color::Rgb(255, 140, 0));
+    }
+
+    #[test]
+    fn test_tool_card_color_for_github() {
+        assert_eq!(tool_card_color("github"), Color::Rgb(255, 255, 255));
     }
 
     #[test]
