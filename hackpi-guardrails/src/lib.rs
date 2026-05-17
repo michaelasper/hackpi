@@ -275,10 +275,127 @@ impl GuardEvaluator {
         self.session_cache.len()
     }
 
+    /// Persist an `AlwaysAllow` or `AlwaysDeny` decision to `.claude/settings.local.json`.
+    ///
+    /// `AlwaysAllow` entries are appended to `permissions.allow`.
+    /// `AlwaysDeny` entries are appended to `permissions.deny`.
+    ///
+    /// Other decision variants return `Err` since they should not be persisted.
+    pub fn persist_decision(
+        &self,
+        decision: &PermissionDecision,
+        permission_string: &str,
+    ) -> Result<(), String> {
+        let target_array = match decision {
+            PermissionDecision::AlwaysAllow => "allow",
+            PermissionDecision::AlwaysDeny => "deny",
+            _ => return Err("Only AlwaysAllow and AlwaysDeny decisions can be persisted".into()),
+        };
+        append_to_permissions(
+            &self.settings_paths.claude_local,
+            permission_string,
+            target_array,
+        )
+    }
+
+    /// Persist an `AlwaysAllow` or `AlwaysDeny` decision to `.hackpi/guardrails.json`.
+    ///
+    /// Same semantics as `persist_decision` but targets the project-wide config file.
+    pub fn persist_to_hackpi_config(
+        &self,
+        decision: &PermissionDecision,
+        permission_string: &str,
+    ) -> Result<(), String> {
+        let target_array = match decision {
+            PermissionDecision::AlwaysAllow => "allow",
+            PermissionDecision::AlwaysDeny => "deny",
+            _ => return Err("Only AlwaysAllow and AlwaysDeny decisions can be persisted".into()),
+        };
+        append_to_permissions(&self.settings_paths.hackpi, permission_string, target_array)
+    }
+
     /// Return a reference to the settings paths.
     pub fn settings_paths(&self) -> &SettingsPaths {
         &self.settings_paths
     }
+}
+
+/// Append a permission string to a JSON config file's permissions array.
+///
+/// Reads the file at `file_path` (or uses a default structure if the file
+/// doesn't exist), navigates to `permissions.{target_array}`, checks for
+/// duplicates (case-insensitive), appends the `permission_string` if not
+/// already present, and writes the file back with pretty formatting.
+///
+/// # Errors
+///
+/// Returns `Err` if the file exists but cannot be read or parsed, or if
+/// the file cannot be written.
+pub fn append_to_permissions(
+    file_path: &std::path::Path,
+    permission_string: &str,
+    target_array: &str,
+) -> Result<(), String> {
+    // Default structure for new file
+    let default_value = serde_json::json!({
+        "permissions": {
+            "allow": [],
+            "deny": []
+        }
+    });
+
+    // Read existing or use default
+    let mut config: serde_json::Value = if file_path.exists() {
+        let content = std::fs::read_to_string(file_path)
+            .map_err(|e| format!("Failed to read {}: {e}", file_path.display()))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse {}: {e}", file_path.display()))?
+    } else {
+        default_value.clone()
+    };
+
+    // Ensure permissions struct exists
+    if !config.is_object() {
+        config = default_value;
+    }
+    if !config
+        .get("permissions")
+        .and_then(|v| v.is_object().then_some(true))
+        .unwrap_or(false)
+    {
+        config["permissions"] = serde_json::json!({"allow": [], "deny": []});
+    }
+
+    // Get target array
+    let arr = config["permissions"][target_array]
+        .as_array_mut()
+        .ok_or_else(|| format!("permissions.{target_array} is not an array"))?;
+
+    // Check for duplicate (case-insensitive for permission strings)
+    if arr.iter().any(|v| {
+        v.as_str()
+            .map(|s| s.eq_ignore_ascii_case(permission_string))
+            .unwrap_or(false)
+    }) {
+        return Ok(()); // Already exists, not an error
+    }
+
+    // Append
+    arr.push(serde_json::Value::String(permission_string.to_string()));
+
+    // Ensure parent directory exists
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+    }
+
+    // Write with pretty formatting
+    let content =
+        serde_json::to_string_pretty(&config).map_err(|e| format!("Failed to serialize: {e}"))?;
+    std::fs::write(file_path, content)
+        .map_err(|e| format!("Failed to write {}: {e}", file_path.display()))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -427,5 +544,280 @@ mod tests {
         assert_eq!(GuardType::PathAccess.to_string(), "PathAccess");
         assert_eq!(GuardType::CommandGate.to_string(), "CommandGate");
         assert_eq!(GuardType::FileProtection.to_string(), "FileProtection");
+    }
+
+    // ── append_to_permissions Tests ──────────────────────────────────────
+
+    // ── persist_decision Tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_persist_decision_always_allow_creates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let result =
+            evaluator.persist_decision(&PermissionDecision::AlwaysAllow, "Read(./docs/**)");
+        assert!(result.is_ok(), "should persist AlwaysAllow");
+
+        // Verify the file was created at claude_local path
+        let file_path = evaluator.settings_paths.claude_local.clone();
+        assert!(file_path.exists(), "claude settings.local should exist");
+
+        let content = std::fs::read_to_string(&file_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let allow = parsed["permissions"]["allow"]
+            .as_array()
+            .expect("allow array");
+        assert_eq!(allow.len(), 1);
+        assert_eq!(allow[0].as_str(), Some("Read(./docs/**)"));
+    }
+
+    #[test]
+    fn test_persist_decision_always_deny_appends_to_deny() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let result = evaluator.persist_decision(&PermissionDecision::AlwaysDeny, "Write(./.env)");
+        assert!(result.is_ok(), "should persist AlwaysDeny");
+
+        let file_path = evaluator.settings_paths.claude_local.clone();
+        let content = std::fs::read_to_string(&file_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let deny = parsed["permissions"]["deny"]
+            .as_array()
+            .expect("deny array");
+        assert_eq!(deny.len(), 1);
+        assert_eq!(deny[0].as_str(), Some("Write(./.env)"));
+    }
+
+    #[test]
+    fn test_persist_decision_non_persistable_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        // AllowOnce should not be persistable
+        let result = evaluator.persist_decision(&PermissionDecision::AllowOnce, "Read(foo)");
+        assert!(result.is_err(), "AllowOnce should not be persistable");
+        assert!(
+            result.unwrap_err().contains("Only AlwaysAllow"),
+            "should explain valid types"
+        );
+
+        // AllowSession should not be persistable
+        let result = evaluator.persist_decision(&PermissionDecision::AllowSession, "Read(foo)");
+        assert!(result.is_err(), "AllowSession should not be persistable");
+    }
+
+    // ── persist_to_hackpi_config Tests ───────────────────────────────────
+
+    #[test]
+    fn test_persist_to_hackpi_config_always_deny() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let result =
+            evaluator.persist_to_hackpi_config(&PermissionDecision::AlwaysDeny, "Bash(curl *)");
+        assert!(result.is_ok(), "should persist to hackpi config");
+
+        let hackpi_path = evaluator.settings_paths.hackpi.clone();
+        assert!(hackpi_path.exists(), ".hackpi/guardrails.json should exist");
+
+        let content = std::fs::read_to_string(&hackpi_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let deny = parsed["permissions"]["deny"]
+            .as_array()
+            .expect("deny array");
+        assert_eq!(deny.len(), 1);
+        assert_eq!(deny[0].as_str(), Some("Bash(curl *)"));
+    }
+
+    #[test]
+    fn test_persist_to_hackpi_config_always_allow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let result =
+            evaluator.persist_to_hackpi_config(&PermissionDecision::AlwaysAllow, "Read(./src/**)");
+        assert!(result.is_ok(), "should persist to hackpi config");
+
+        let hackpi_path = evaluator.settings_paths.hackpi.clone();
+        let content = std::fs::read_to_string(&hackpi_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let allow = parsed["permissions"]["allow"]
+            .as_array()
+            .expect("allow array");
+        assert_eq!(allow.len(), 1);
+        assert_eq!(allow[0].as_str(), Some("Read(./src/**)"));
+    }
+
+    #[test]
+    fn test_append_to_permissions_creates_new_file_with_allow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join(".claude/settings.local.json");
+
+        let result = append_to_permissions(&file_path, "Read(./docs/**)", "allow");
+        assert!(result.is_ok(), "should succeed creating new file");
+
+        // Verify file was created with correct content
+        let content = std::fs::read_to_string(&file_path).expect("file should exist");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("should be valid JSON");
+
+        // Check structure
+        let allow = parsed["permissions"]["allow"]
+            .as_array()
+            .expect("should have permissions.allow array");
+        assert_eq!(allow.len(), 1, "should have one allow entry");
+        assert_eq!(allow[0].as_str(), Some("Read(./docs/**)"));
+
+        // Deny should be empty
+        let deny = parsed["permissions"]["deny"]
+            .as_array()
+            .expect("should have permissions.deny array");
+        assert!(deny.is_empty(), "deny should be empty");
+    }
+
+    #[test]
+    fn test_append_to_permissions_duplicate_prevention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("guardrails.json");
+
+        // Create file with an existing entry
+        let initial = r#"{"permissions":{"allow":["Read(./docs/**)"],"deny":[]}}"#;
+        std::fs::write(&file_path, initial).expect("write initial");
+
+        // Append the same entry again
+        let result = append_to_permissions(&file_path, "Read(./docs/**)", "allow");
+        assert!(result.is_ok(), "duplicate should not error");
+
+        // Verify no duplicate was added
+        let content = std::fs::read_to_string(&file_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let allow = parsed["permissions"]["allow"]
+            .as_array()
+            .expect("allow array");
+        assert_eq!(allow.len(), 1, "no duplicate should be added");
+        assert_eq!(allow[0].as_str(), Some("Read(./docs/**)"));
+    }
+
+    #[test]
+    fn test_append_to_permissions_duplicate_case_insensitive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("guardrails.json");
+
+        // Create file with an existing entry in PascalCase
+        let initial = r#"{"permissions":{"allow":["Read(./docs/**)"],"deny":[]}}"#;
+        std::fs::write(&file_path, initial).expect("write initial");
+
+        // Try to add with different case
+        let result = append_to_permissions(&file_path, "read(./docs/**)", "allow");
+        assert!(
+            result.is_ok(),
+            "case-insensitive duplicate should not error"
+        );
+
+        // Verify no duplicate was added
+        let content = std::fs::read_to_string(&file_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let allow = parsed["permissions"]["allow"]
+            .as_array()
+            .expect("allow array");
+        assert_eq!(
+            allow.len(),
+            1,
+            "case-insensitive duplicate should not be added"
+        );
+        // Original casing should be preserved
+        assert_eq!(allow[0].as_str(), Some("Read(./docs/**)"));
+    }
+
+    #[test]
+    fn test_append_to_permissions_invalid_json_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("bad.json");
+
+        // Write invalid JSON
+        std::fs::write(&file_path, "this is not json").expect("write invalid json");
+
+        let result = append_to_permissions(&file_path, "Read(foo)", "allow");
+        assert!(result.is_err(), "invalid JSON should return error");
+        assert!(
+            result.unwrap_err().contains("Failed to parse"),
+            "error should mention parse failure"
+        );
+    }
+
+    #[test]
+    fn test_append_to_permissions_invalid_target_array() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("bad.json");
+
+        // Create file with allow as a string instead of array
+        let initial = r#"{"permissions":{"allow":"not_an_array","deny":[]}}"#;
+        std::fs::write(&file_path, initial).expect("write initial");
+
+        let result = append_to_permissions(&file_path, "Read(foo)", "allow");
+        assert!(result.is_err(), "invalid array should return error");
+        assert!(
+            result.unwrap_err().contains("is not an array"),
+            "error should mention array"
+        );
+    }
+
+    #[test]
+    fn test_append_to_permissions_write_failure_returns_error() {
+        // Use a path where write is impossible (parent is a file, not a directory)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("parent_file");
+        std::fs::write(&file_path, "i am a file, not a dir").expect("write file");
+
+        // Try to write to a "file" inside the parent_file "directory"
+        let bad_path = file_path.join("nested.json");
+
+        let result = append_to_permissions(&bad_path, "Read(foo)", "allow");
+        assert!(result.is_err(), "write to bad path should return error");
+    }
+
+    #[test]
+    fn test_append_to_permissions_appends_to_existing_deny() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("guardrails.json");
+
+        // Create existing file with pre-populated allow
+        let initial = r#"{"permissions":{"allow":["Read(./docs/**)"],"deny":[]}}"#;
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).expect("create dir");
+        }
+        std::fs::write(&file_path, initial).expect("write initial");
+
+        // Append a deny rule
+        let result = append_to_permissions(&file_path, "Write(./.env)", "deny");
+        assert!(result.is_ok(), "should append to existing file");
+
+        // Verify file content
+        let content = std::fs::read_to_string(&file_path).expect("file should exist");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("should be valid JSON");
+
+        let allow = parsed["permissions"]["allow"]
+            .as_array()
+            .expect("should have allow array");
+        assert_eq!(allow.len(), 1, "allow should preserve existing entry");
+        assert_eq!(
+            allow[0].as_str(),
+            Some("Read(./docs/**)"),
+            "allow entry unchanged"
+        );
+
+        let deny = parsed["permissions"]["deny"]
+            .as_array()
+            .expect("should have deny array");
+        assert_eq!(deny.len(), 1, "deny should have one entry");
+        assert_eq!(deny[0].as_str(), Some("Write(./.env)"), "deny entry added");
     }
 }

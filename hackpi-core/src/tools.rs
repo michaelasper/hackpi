@@ -7,6 +7,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, oneshot};
 
+/// Construct a permission string (Claude Code format `ToolName(pattern)`)
+/// from the tool name and its parameters.
+///
+/// Examples:
+/// - `Bash(rm -rf /)` for a bash tool with a command param
+/// - `Read(.env)` for a read tool with a path param
+fn permission_string(tool_name: &str, params: &Value) -> String {
+    if let Some(command) = params.get("command").and_then(|v| v.as_str()) {
+        format!("{}({})", tool_name, command)
+    } else if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+        format!("{}({})", tool_name, path)
+    } else {
+        format!("{}()", tool_name)
+    }
+}
+
 static NEXT_PERMISSION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A permission prompt request sent from `ToolRegistry::dispatch()` to the
@@ -144,13 +160,27 @@ impl ToolRegistry {
                             });
                         }
                         Ok(PermissionDecision::AlwaysAllow) => {
-                            // persist to config (future: write rule to config file)
+                            let perm_string = permission_string(name, &params);
+                            let guard = evaluator.read().unwrap();
+                            if let Err(e) = guard
+                                .persist_decision(&PermissionDecision::AlwaysAllow, &perm_string)
+                            {
+                                // Log the error but allow execution to proceed
+                                eprintln!("Warning: failed to persist AlwaysAllow: {e}");
+                            }
                             /* proceed */
                         }
                         Ok(PermissionDecision::AlwaysDeny) => {
-                            // persist to config (future: write rule to config file)
+                            let perm_string = permission_string(name, &params);
+                            let guard = evaluator.read().unwrap();
+                            if let Err(e) = guard
+                                .persist_decision(&PermissionDecision::AlwaysDeny, &perm_string)
+                            {
+                                // Log the error but still deny execution
+                                eprintln!("Warning: failed to persist AlwaysDeny: {e}");
+                            }
                             return Some(ToolResult::SystemError {
-                                message: "Permission denied by user.".into(),
+                                message: "Permission denied by user. Always deny saved.".into(),
                             });
                         }
                         Err(_) => {
