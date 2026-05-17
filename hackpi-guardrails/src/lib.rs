@@ -178,8 +178,15 @@ impl GuardEvaluator {
         if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
             let path = std::path::Path::new(path);
 
+            // Determine file operation type from tool name
+            let op = match tool_name {
+                "read" | "search_grep" | "searchgrep" => FileOp::Read,
+                "write" | "edit" => FileOp::Write,
+                _ => FileOp::Read, // unknown tools default to Read
+            };
+
             // File protection check
-            let fp_result = file_protection::check(path, &self.config_rules);
+            let fp_result = file_protection::check(path, &op, &self.config_rules, tool_name);
             if !matches!(fp_result, GuardResult::Allow) {
                 return fp_result;
             }
