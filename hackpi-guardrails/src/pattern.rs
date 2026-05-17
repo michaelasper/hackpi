@@ -145,8 +145,9 @@ pub fn resolve_pattern_path(pattern: &str, workspace_root: &Path) -> String {
             }
             return home.join(&pattern[2..]).to_string_lossy().to_string();
         }
-        // If home dir is not available, fall through to workspace root join
-        workspace_root.join(pattern).to_string_lossy().to_string()
+        // If home dir is not available, return the original pattern as-is
+        // rather than producing a path like /workspace/~/config.json
+        pattern.to_string()
     } else if Path::new(pattern).is_absolute() {
         pattern.to_string()
     } else {
@@ -167,8 +168,20 @@ pub fn rule_matches_tool(rule: &PermissionRule, tool: &str) -> bool {
 
 /// Check whether a rule applies to a given file operation.
 ///
-/// Returns `true` if the rule has no operation restriction (path-only rule),
-/// or if the operation matches.
+/// In the current data model, `PermissionRule` does not carry an operation-level
+/// filter (e.g. "only applies to Read, not Write"). As a result:
+///
+/// - **Path-only rules** (those with a `path_pattern` but no `command_pattern`)
+///   are considered to apply to **all** file operations — both `Read` and `Write`.
+///   This matches the semantics of config-level rules where a path pattern like
+///   `".env"` should protect the file regardless of the operation being performed.
+/// - **Command-only rules** (those with a `command_pattern` but no `path_pattern`)
+///   do not apply to any file operation and return `false`.
+/// - **Combined rules** (both `path_pattern` and `command_pattern`) apply to all
+///   file operations, same as path-only rules.
+///
+/// The `op` parameter is accepted for future use when rules gain per-operation
+/// filtering, but is not currently consulted.
 pub fn rule_matches_operation(rule: &PermissionRule, _op: &FileOp) -> bool {
     // Rules with no path pattern are command-only rules, not operation rules
     if rule.path_pattern.is_none() {
@@ -571,5 +584,48 @@ mod tests {
         // Command-only rules don't apply to file operations
         assert!(!rule_matches_operation(&rule, &FileOp::Read));
         assert!(!rule_matches_operation(&rule, &FileOp::Write));
+    }
+
+    #[test]
+    fn test_rule_matches_operation_path_rule_applies_to_read_and_write() {
+        // Path-only rules apply to ALL operations (current semantics)
+        let rule = PermissionRule {
+            tool_pattern: None,
+            path_pattern: Some("**/*.env".into()),
+            command_pattern: None,
+            action: RuleAction::Deny,
+        };
+        // Both Read and Write are matched
+        assert!(rule_matches_operation(&rule, &FileOp::Read));
+        assert!(rule_matches_operation(&rule, &FileOp::Write));
+    }
+
+    #[test]
+    fn test_rule_matches_operation_combined_rule_applies_to_all_ops() {
+        // A combined rule (both path and command) also applies to all operations
+        let rule = PermissionRule {
+            tool_pattern: None,
+            path_pattern: Some("**/secrets/*".into()),
+            command_pattern: Some("cat".into()),
+            action: RuleAction::Deny,
+        };
+        assert!(rule_matches_operation(&rule, &FileOp::Read));
+        assert!(rule_matches_operation(&rule, &FileOp::Write));
+    }
+
+    #[test]
+    fn test_rule_matches_operation_op_param_accepted_but_not_consulted() {
+        // Verify the current semantic: path-only rules ignore the specific op
+        let rule = PermissionRule {
+            tool_pattern: None,
+            path_pattern: Some("*.txt".into()),
+            command_pattern: None,
+            action: RuleAction::Allow,
+        };
+        // All file ops get the same answer
+        assert_eq!(
+            rule_matches_operation(&rule, &FileOp::Read),
+            rule_matches_operation(&rule, &FileOp::Write),
+        );
     }
 }
