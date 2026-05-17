@@ -9,7 +9,7 @@ serde_json = "1"
 globset.workspace = true
 home = "0.5"
 notify = "7"
-tokio = { version = "1", features = ["fs", "sync", "time", "rt"] }
+tokio = { version = "1", features = ["fs", "sync", "time", "rt", "macros"] }
 tracing.workspace = true
 walkdir.workspace = true
 
