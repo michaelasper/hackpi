@@ -11,7 +11,7 @@ use std::path::Path;
 pub fn register_vcs_tools(
     registry: &mut ToolRegistry,
     workspace_root: &Path,
-    _vcs_config: &VcsConfig,
+    vcs_config: &VcsConfig,
 ) {
     registry.register(Box::new(git_read::GitReadTool::new(
         workspace_root.to_path_buf(),
@@ -19,7 +19,10 @@ pub fn register_vcs_tools(
     registry.register(Box::new(git_write::GitWriteTool::new(
         workspace_root.to_path_buf(),
     )));
-    // GitHubTool will be registered in a later phase
+    registry.register(Box::new(github::GitHubTool::new(
+        workspace_root.to_path_buf(),
+        vcs_config.clone(),
+    )));
 }
 
 #[cfg(test)]
