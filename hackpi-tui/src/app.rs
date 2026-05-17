@@ -1,5 +1,5 @@
 use crate::events::TuiEvent;
-use hackpi_core::tools::ToolResult;
+use hackpi_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use hackpi_core::types::Usage;
 use hackpi_guardrails::{GuardEvaluator, GuardReason, PermissionDecision};
 use std::collections::VecDeque;
@@ -163,11 +163,69 @@ impl App {
     }
 }
 
+/// Invoke a registered tool by name with the given parameters and render
+/// the result as a tool card in the TUI conversation.
+///
+/// Emits `ToolCall` → `ToolResult` events so the conversation view shows
+/// a proper tool card with status indicator. Falls back to an error event
+/// if the tool is not found.
+async fn invoke_tool_and_render(
+    tool_name: &str,
+    params: serde_json::Value,
+    tool_registry: &ToolRegistry,
+    tui_tx: &tokio::sync::mpsc::UnboundedSender<TuiEvent>,
+) -> bool {
+    let tool_id = format!(
+        "slash-{tool_name}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+
+    let tool = match tool_registry.get(tool_name) {
+        Some(t) => t,
+        None => {
+            let err = format!("Tool '{tool_name}' is not registered.");
+            tui_tx.send(TuiEvent::Error(err)).ok();
+            return true;
+        }
+    };
+
+    // Emit ToolCall event so the conversation shows a tool card
+    tui_tx
+        .send(TuiEvent::ToolCall {
+            id: tool_id.clone(),
+            name: tool_name.to_string(),
+        })
+        .ok();
+
+    let ctx = ToolContext {
+        workspace_root: std::env::current_dir().unwrap_or_default(),
+        conversation_id: String::new(),
+        signal: tokio::sync::watch::channel(false).1,
+    };
+
+    let result = tool.execute(params, &ctx).await;
+
+    // Emit ToolResult event to complete the tool card
+    tui_tx
+        .send(TuiEvent::ToolResult {
+            id: tool_id,
+            result,
+        })
+        .ok();
+
+    tui_tx.send(TuiEvent::Done).ok();
+    true
+}
+
 pub async fn handle_slash_command(
     cmd: &str,
     app: &mut App,
     tui_tx: &tokio::sync::mpsc::UnboundedSender<TuiEvent>,
     guard_evaluator: &mut GuardEvaluator,
+    tool_registry: &hackpi_core::tools::ToolRegistry,
 ) -> bool {
     let parts: Vec<&str> = cmd.trim().splitn(2, char::is_whitespace).collect();
     let command = parts[0];
@@ -175,12 +233,15 @@ pub async fn handle_slash_command(
         "/help" => {
             let help_text = "\
 Available commands:
-  /help  - Show this help message
-  /clear - Clear the conversation
-  /quit  - Exit the application
-  /guardrails:status - Show guardrails status
-  /guardrails:clean - Clear session cache
-  /guardrails:onboarding [preset] - Write a preset guardrails config";
+   /help  - Show this help message
+   /clear - Clear the conversation
+   /quit  - Exit the application
+   /guardrails:status - Show guardrails status
+   /guardrails:clean - Clear session cache
+   /guardrails:onboarding [preset] - Write a preset guardrails config
+   /git:status - Show git status (via git_read)
+   /git:log - Show recent git log (via git_read)
+   /github:pr-list - List open pull requests (via github)";
             tui_tx
                 .send(TuiEvent::StreamChunk(help_text.to_string()))
                 .ok();
@@ -233,9 +294,9 @@ Guardrails Status:
                 "" => {
                     let summary = "\
 Guardrails Onboarding Presets:
-  /guardrails:onboarding strict     - Deny everything, ask for everything
-  /guardrails:onboarding balanced   - Balanced defaults (recommended)
-  /guardrails:onboarding permissive - Permissive rules with minimal restrictions";
+   /guardrails:onboarding strict     - Deny everything, ask for everything
+   /guardrails:onboarding balanced   - Balanced defaults (recommended)
+   /guardrails:onboarding permissive - Permissive rules with minimal restrictions";
                     tui_tx.send(TuiEvent::StreamChunk(summary.to_string())).ok();
                     tui_tx.send(TuiEvent::Done).ok();
                     return true;
@@ -290,6 +351,33 @@ Guardrails Onboarding Presets:
             tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
             tui_tx.send(TuiEvent::Done).ok();
             true
+        }
+        "/git:status" => {
+            invoke_tool_and_render(
+                "git_read",
+                serde_json::json!({"operation": "status"}),
+                tool_registry,
+                tui_tx,
+            )
+            .await
+        }
+        "/git:log" => {
+            invoke_tool_and_render(
+                "git_read",
+                serde_json::json!({"operation": "log"}),
+                tool_registry,
+                tui_tx,
+            )
+            .await
+        }
+        "/github:pr-list" => {
+            invoke_tool_and_render(
+                "github",
+                serde_json::json!({"operation": "pr_list"}),
+                tool_registry,
+                tui_tx,
+            )
+            .await
         }
         _ => {
             let err = format!("Unknown command: {command}. Type /help for available commands.");
@@ -408,12 +496,18 @@ mod tests {
         (evaluator, dir)
     }
 
+    /// Helper to create a ToolRegistry (empty — sufficient for non-VCS tests).
+    fn make_tool_registry() -> ToolRegistry {
+        ToolRegistry::new()
+    }
+
     #[tokio::test]
     async fn test_slash_command_prevents_agent_spawn() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled = handle_slash_command("/help", &mut app, &tx, &mut ge).await;
+        let handled =
+            handle_slash_command("/help", &mut app, &tx, &mut ge, &make_tool_registry()).await;
         assert!(handled);
     }
 
@@ -422,7 +516,8 @@ mod tests {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled = handle_slash_command("/help", &mut app, &tx, &mut ge).await;
+        let registry = make_tool_registry();
+        let handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
         assert!(handled);
         let mut found_chunk = false;
         let mut found_done = false;
@@ -449,7 +544,8 @@ mod tests {
         assert_eq!(app.conversation.len(), 1);
         let (tx, _rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled = handle_slash_command("/clear", &mut app, &tx, &mut ge).await;
+        let handled =
+            handle_slash_command("/clear", &mut app, &tx, &mut ge, &make_tool_registry()).await;
         assert!(handled);
         assert!(app.conversation.is_empty());
         assert!(app.input.is_empty());
@@ -460,7 +556,8 @@ mod tests {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled = handle_slash_command("/unknown", &mut app, &tx, &mut ge).await;
+        let handled =
+            handle_slash_command("/unknown", &mut app, &tx, &mut ge, &make_tool_registry()).await;
         assert!(handled);
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -479,7 +576,14 @@ mod tests {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled = handle_slash_command("/guardrails:status", &mut app, &tx, &mut ge).await;
+        let handled = handle_slash_command(
+            "/guardrails:status",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
         assert!(handled);
         let mut found_chunk = false;
         let mut found_done = false;
@@ -510,7 +614,14 @@ mod tests {
         ge.record_decision("test-key".into(), PermissionDecision::AllowSession);
         assert_eq!(ge.session_cache_len(), 1);
 
-        let handled = handle_slash_command("/guardrails:clean", &mut app, &tx, &mut ge).await;
+        let handled = handle_slash_command(
+            "/guardrails:clean",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
         assert!(handled);
 
         // Verify session cache is cleared
@@ -536,8 +647,14 @@ mod tests {
         // Initial state: no rules loaded
         assert_eq!(ge.rule_count(), 0);
 
-        let handled =
-            handle_slash_command("/guardrails:onboarding balanced", &mut app, &tx, &mut ge).await;
+        let handled = handle_slash_command(
+            "/guardrails:onboarding balanced",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
         assert!(handled);
 
         // Verify rules were loaded
@@ -575,7 +692,14 @@ mod tests {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled = handle_slash_command("/guardrails:onboarding", &mut app, &tx, &mut ge).await;
+        let handled = handle_slash_command(
+            "/guardrails:onboarding",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
         assert!(handled);
         let mut found_summary = false;
         while let Ok(event) = rx.try_recv() {
@@ -594,8 +718,14 @@ mod tests {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut ge, dir) = make_guard_evaluator();
-        let handled =
-            handle_slash_command("/guardrails:onboarding strict", &mut app, &tx, &mut ge).await;
+        let handled = handle_slash_command(
+            "/guardrails:onboarding strict",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
         assert!(handled);
         assert!(ge.rule_count() > 0);
 
@@ -620,8 +750,14 @@ mod tests {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut ge, dir) = make_guard_evaluator();
-        let handled =
-            handle_slash_command("/guardrails:onboarding permissive", &mut app, &tx, &mut ge).await;
+        let handled = handle_slash_command(
+            "/guardrails:onboarding permissive",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
         assert!(handled);
         assert!(ge.rule_count() > 0);
 
@@ -645,7 +781,14 @@ mod tests {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled = handle_slash_command("/guardrails:unknown", &mut app, &tx, &mut ge).await;
+        let handled = handle_slash_command(
+            "/guardrails:unknown",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
         assert!(handled);
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -669,9 +812,145 @@ mod tests {
             "/guardrails:onboarding balanced",
         ];
         for cmd in &cmds {
-            let handled = handle_slash_command(cmd, &mut app, &tx, &mut ge).await;
+            let handled =
+                handle_slash_command(cmd, &mut app, &tx, &mut ge, &make_tool_registry()).await;
             assert!(handled, "command '{cmd}' should prevent agent spawn");
         }
+    }
+
+    // ── VCS slash command tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_git_status_slash_command_handled() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+        let handled = handle_slash_command("/git:status", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled, "/git:status should be handled");
+    }
+
+    #[tokio::test]
+    async fn test_git_log_slash_command_handled() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+        let handled = handle_slash_command("/git:log", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled, "/git:log should be handled");
+    }
+
+    #[tokio::test]
+    async fn test_github_pr_list_slash_command_handled() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+        let handled =
+            handle_slash_command("/github:pr-list", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled, "/github:pr-list should be handled");
+    }
+
+    #[tokio::test]
+    async fn test_git_status_emits_tool_call_event() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        // Register a real git_read tool with a temp workspace
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(hackpi_vcs::git_read::GitReadTool::new(
+            tmp.path().to_path_buf(),
+        )));
+        let _handled = handle_slash_command("/git:status", &mut app, &tx, &mut ge, &registry).await;
+
+        let mut found_tool_call = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::ToolCall { name, .. } = &event {
+                found_tool_call = true;
+                assert_eq!(name, "git_read");
+            }
+        }
+        assert!(
+            found_tool_call,
+            "/git:status should emit a ToolCall event for git_read"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_log_emits_tool_call_event() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(hackpi_vcs::git_read::GitReadTool::new(
+            tmp.path().to_path_buf(),
+        )));
+        let _handled = handle_slash_command("/git:log", &mut app, &tx, &mut ge, &registry).await;
+
+        let mut found_tool_call = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::ToolCall { name, .. } = &event {
+                found_tool_call = true;
+                assert_eq!(name, "git_read");
+            }
+        }
+        assert!(
+            found_tool_call,
+            "/git:log should emit a ToolCall event for git_read"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_github_pr_list_emits_tool_call_event() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = ToolRegistry::new();
+        let vcs_config = hackpi_vcs::VcsConfig::from_env(tmp.path());
+        registry.register(Box::new(hackpi_vcs::github::GitHubTool::new(
+            tmp.path().to_path_buf(),
+            vcs_config,
+        )));
+        let _handled =
+            handle_slash_command("/github:pr-list", &mut app, &tx, &mut ge, &registry).await;
+
+        let mut found_tool_call = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::ToolCall { name, .. } = &event {
+                found_tool_call = true;
+                assert_eq!(name, "github");
+            }
+        }
+        assert!(
+            found_tool_call,
+            "/github:pr-list should emit a ToolCall event for github"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_help_includes_vcs_commands() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+        let _handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
+
+        let mut found_chunk = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_chunk = true;
+                assert!(text.contains("/git:status"), "help should list /git:status");
+                assert!(text.contains("/git:log"), "help should list /git:log");
+                assert!(
+                    text.contains("/github:pr-list"),
+                    "help should list /github:pr-list"
+                );
+            }
+        }
+        assert!(found_chunk);
     }
 
     #[test]
