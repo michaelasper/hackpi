@@ -500,6 +500,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hackpi-guardrails"
+version = "0.1.0"
+dependencies = [
+ "globset",
+ "hackpi-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
 name = "hackpi-tools"
 version = "0.1.0"
 dependencies = [
