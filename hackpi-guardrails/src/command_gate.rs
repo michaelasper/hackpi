@@ -4,6 +4,10 @@ use crate::{GuardReason, GuardResult, GuardType, PermissionRule, RuleAction};
 pub struct DangerousPattern {
     pub pattern: &'static str,
     pub action: RuleAction,
+    /// If true, the pattern must match at word boundaries (no partial word matches).
+    pub word_boundary: bool,
+    /// If true, matching is case-sensitive. Default (false) is case-insensitive.
+    pub case_sensitive: bool,
 }
 
 /// Built-in dangerous command patterns checked as a fallback after config rules.
@@ -15,67 +19,112 @@ pub const DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     DangerousPattern {
         pattern: ":(){ :|:& };:",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "> /dev/sda",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "> /dev/nvme",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
+    },
+    // No-space redirect variants
+    DangerousPattern {
+        pattern: ">/dev/sda",
+        action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
+    },
+    DangerousPattern {
+        pattern: ">/dev/nvme",
+        action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "mkfs.",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "dd",
         action: RuleAction::Deny,
+        word_boundary: true,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "sudo",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "su",
         action: RuleAction::Deny,
+        word_boundary: true,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "doas",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "passwd",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "chpasswd",
         action: RuleAction::Deny,
+        word_boundary: false,
+        case_sensitive: false,
     },
     // Ask patterns second (notable but potentially legitimate)
     DangerousPattern {
         pattern: "rm -rf",
         action: RuleAction::Ask,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "rm -r",
         action: RuleAction::Ask,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "chmod -R",
         action: RuleAction::Ask,
+        word_boundary: false,
+        case_sensitive: true,
     },
     DangerousPattern {
         pattern: "chown -R",
         action: RuleAction::Ask,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "curl",
         action: RuleAction::Ask,
+        word_boundary: false,
+        case_sensitive: false,
     },
     DangerousPattern {
         pattern: "wget",
         action: RuleAction::Ask,
+        word_boundary: false,
+        case_sensitive: false,
     },
 ];
 
@@ -106,8 +155,7 @@ pub fn check(command: &str, rules: &[PermissionRule], tool: &str) -> GuardResult
 /// Check a command against configured permission rules.
 ///
 /// Only considers rules that have a `command_pattern` (path-only rules are
-/// skipped). Deny rules are checked first (fail-closed), then Allow rules,
-/// then Ask rules.
+/// skipped). Rules are evaluated in config-list order (first-match-wins).
 ///
 /// Uses `crate::pattern::rule_matches_tool()` for tool scoping and
 /// `crate::pattern::command_matches_pattern()` for case-insensitive
@@ -155,12 +203,22 @@ pub fn check_command_against_rules(
 
 /// Check a command against the built-in `DANGEROUS_PATTERNS`.
 ///
-/// Uses case-insensitive substring matching via
-/// `crate::pattern::command_matches_pattern()`. Returns the first matching
-/// pattern's `GuardResult`, or `None` if no pattern matches.
+/// Uses `crate::pattern::command_matches_at_word_boundary()` for patterns
+/// with `word_boundary: true`, `crate::pattern::command_matches_pattern()`
+/// with case-sensitivity controlled by `case_sensitive` for other patterns.
+/// Returns the first matching pattern's `GuardResult`, or `None` if no
+/// pattern matches.
 pub fn check_against_dangerous_patterns(command: &str) -> Option<GuardResult> {
     for dp in DANGEROUS_PATTERNS {
-        if crate::pattern::command_matches_pattern(command, dp.pattern) {
+        let matches = if dp.word_boundary {
+            crate::pattern::command_matches_at_word_boundary(command, dp.pattern, dp.case_sensitive)
+        } else if dp.case_sensitive {
+            command.contains(dp.pattern)
+        } else {
+            crate::pattern::command_matches_pattern(command, dp.pattern)
+        };
+
+        if matches {
             return match dp.action {
                 RuleAction::Deny => Some(GuardResult::Deny(format!(
                     "Command '{}' matches dangerous pattern '{}'",
@@ -203,6 +261,72 @@ mod tests {
     #[test]
     fn test_empty_command_allows() {
         let result = check("", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    // ── False-positive regression tests ──────────────────────────────────
+
+    #[test]
+    fn test_git_add_not_flagged_by_dd() {
+        // "dd" should not match inside "add"
+        let result = check("git add .", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_source_env_not_flagged_by_su() {
+        // "su" should not match inside "source"
+        let result = check("source .env", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_echo_sure_not_flagged_by_su() {
+        // "su" should not match inside "sure"
+        let result = check("echo sure", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_cat_issue_not_flagged_by_su() {
+        // "su" should not match inside "issue"
+        let result = check("cat /etc/issue", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_chmod_lowercase_r_not_flagged() {
+        // "chmod -r" (remove read permission) should not match "chmod -R" (recursive)
+        let result = check("chmod -r file", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_no_space_dev_sda_denies() {
+        // ">/dev/sda" without space should still be caught
+        let result = check("echo foo>/dev/sda", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("/dev/sda"));
+            }
+            _ => panic!("expected Deny for >/dev/sda (no space)"),
+        }
+    }
+
+    #[test]
+    fn test_no_space_dev_nvme_denies() {
+        let result = check("echo foo >/dev/nvme0n1", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("/dev/nvme"));
+            }
+            _ => panic!("expected Deny for >/dev/nvme (no space)"),
+        }
+    }
+
+    #[test]
+    fn test_address_book_not_flagged_by_dd() {
+        let result = check("cat address_book.txt", &[], "bash");
         assert_eq!(result, GuardResult::Allow);
     }
 
@@ -634,6 +758,38 @@ mod tests {
         assert!(patterns.contains(&"sudo"));
         assert!(patterns.contains(&"curl"));
         assert!(patterns.contains(&":(){ :|:& };:"));
+        assert!(patterns.contains(&">/dev/sda"));
+        assert!(patterns.contains(&">/dev/nvme"));
+    }
+
+    #[test]
+    fn test_dd_uses_word_boundary_matching() {
+        let dd = DANGEROUS_PATTERNS
+            .iter()
+            .find(|dp| dp.pattern == "dd")
+            .expect("dd pattern must exist");
+        assert!(dd.word_boundary, "dd should use word-boundary matching");
+    }
+
+    #[test]
+    fn test_su_uses_word_boundary_matching() {
+        let su = DANGEROUS_PATTERNS
+            .iter()
+            .find(|dp| dp.pattern == "su")
+            .expect("su pattern must exist");
+        assert!(su.word_boundary, "su should use word-boundary matching");
+    }
+
+    #[test]
+    fn test_chmod_r_uses_case_sensitive_matching() {
+        let chmod = DANGEROUS_PATTERNS
+            .iter()
+            .find(|dp| dp.pattern == "chmod -R")
+            .expect("chmod -R pattern must exist");
+        assert!(
+            chmod.case_sensitive,
+            "chmod -R should use case-sensitive matching"
+        );
     }
 
     #[test]
