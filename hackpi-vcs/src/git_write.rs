@@ -18,11 +18,17 @@ impl GitWriteTool {
         })
     }
 
-    /// Create SSH-agent-backed remote callbacks for push/pull/fetch.
+    /// Create remote callbacks for push/pull/fetch with SSH agent and HTTPS fallback.
     fn create_remote_callbacks<'a>() -> git2::RemoteCallbacks<'a> {
         let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed_types| {
-            git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+        callbacks.credentials(|_url, username_from_url, allowed_types| {
+            if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+                git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+            } else if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+                git2::Cred::default()
+            } else {
+                Err(git2::Error::from_str("No authentication method available"))
+            }
         });
         callbacks
     }
@@ -744,11 +750,11 @@ fn cmd_checkout(repo: &git2::Repository, params: &Value) -> ToolResult {
 }
 
 fn cmd_branch_create(repo: &git2::Repository, params: &Value) -> ToolResult {
-    let name = match params.get("name").and_then(|v| v.as_str()) {
+    let name = match params.get("branch").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
             return ToolResult::SystemError {
-                message: "Missing 'name' parameter for branch_create.".into(),
+                message: "Missing 'branch' parameter for branch_create.".into(),
             }
         }
     };
@@ -788,11 +794,11 @@ fn cmd_branch_create(repo: &git2::Repository, params: &Value) -> ToolResult {
 }
 
 fn cmd_branch_delete(repo: &git2::Repository, params: &Value) -> ToolResult {
-    let name = match params.get("name").and_then(|v| v.as_str()) {
+    let name = match params.get("branch").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
             return ToolResult::SystemError {
-                message: "Missing 'name' parameter for branch_delete.".into(),
+                message: "Missing 'branch' parameter for branch_delete.".into(),
             }
         }
     };
@@ -1562,7 +1568,7 @@ mod tests {
         let tool = make_tool(repo.workdir().unwrap().to_path_buf());
         let result = execute(
             &tool,
-            json!({ "operation": "branch_create", "name": "new-branch" }),
+            json!({ "operation": "branch_create", "branch": "new-branch" }),
         )
         .await;
         match &result {
@@ -1586,8 +1592,8 @@ mod tests {
         let tool = make_tool(repo.workdir().unwrap().to_path_buf());
         let result = execute(&tool, json!({ "operation": "branch_create" })).await;
         assert!(
-            matches!(&result, ToolResult::SystemError { message } if message.contains("Missing 'name'")),
-            "Expected SystemError for missing name, got: {result:?}"
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Missing 'branch'")),
+            "Expected SystemError for missing branch name, got: {result:?}"
         );
     }
 
@@ -1601,7 +1607,7 @@ mod tests {
         let tool = make_tool(repo.workdir().unwrap().to_path_buf());
         let result = execute(
             &tool,
-            json!({ "operation": "branch_delete", "name": "delete-me" }),
+            json!({ "operation": "branch_delete", "branch": "delete-me" }),
         )
         .await;
         match &result {
@@ -1625,7 +1631,7 @@ mod tests {
         let tool = make_tool(repo.workdir().unwrap().to_path_buf());
         let result = execute(
             &tool,
-            json!({ "operation": "branch_delete", "name": "nonexistent" }),
+            json!({ "operation": "branch_delete", "branch": "nonexistent" }),
         )
         .await;
         assert!(
@@ -2091,7 +2097,7 @@ mod tests {
         let tool = make_tool(repo.workdir().unwrap().to_path_buf());
         let result = execute(
             &tool,
-            json!({ "operation": "branch_create", "name": "from-prev", "start_point": "HEAD~1" }),
+            json!({ "operation": "branch_create", "branch": "from-prev", "start_point": "HEAD~1" }),
         )
         .await;
         match &result {
