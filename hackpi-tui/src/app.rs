@@ -1,7 +1,25 @@
 use crate::events::TuiEvent;
 use hackpi_core::tools::ToolResult;
 use hackpi_core::types::Usage;
+use hackpi_guardrails::{GuardReason, PermissionDecision};
 use std::collections::VecDeque;
+
+/// Represents a pending permission prompt awaiting user decision.
+pub struct PermissionPrompt {
+    pub id: u64,
+    pub reason: GuardReason,
+    pub response: Option<tokio::sync::oneshot::Sender<PermissionDecision>>,
+}
+
+impl std::fmt::Debug for PermissionPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionPrompt")
+            .field("id", &self.id)
+            .field("reason", &self.reason)
+            .field("response", &self.response.as_ref().map(|_| "Sender<..>"))
+            .finish()
+    }
+}
 
 pub enum AppState {
     Resting,
@@ -34,6 +52,7 @@ pub struct App {
     pub usage: Option<Usage>,
     pub status_message: String,
     pub quit_requested: bool,
+    pub pending_permission: Option<PermissionPrompt>,
 }
 
 impl Default for App {
@@ -52,6 +71,7 @@ impl App {
             usage: None,
             status_message: String::new(),
             quit_requested: false,
+            pending_permission: None,
         }
     }
 
@@ -121,6 +141,17 @@ impl App {
             TuiEvent::Done => {
                 self.state = AppState::Resting;
             }
+            TuiEvent::PermissionRequest {
+                id,
+                reason,
+                response,
+            } => {
+                self.pending_permission = Some(PermissionPrompt {
+                    id,
+                    reason,
+                    response: Some(response),
+                });
+            }
         }
     }
 
@@ -165,6 +196,19 @@ Available commands:
             tui_tx.send(TuiEvent::Error(err)).ok();
             true
         }
+    }
+}
+
+/// Map a key character to a `PermissionDecision`, matching the key bindings
+/// used in the TUI event loop when a permission prompt is active.
+pub fn permission_decision_from_key(c: char) -> Option<PermissionDecision> {
+    match c {
+        '1' => Some(PermissionDecision::AllowOnce),
+        '2' => Some(PermissionDecision::AllowSession),
+        '3' => Some(PermissionDecision::Deny),
+        '4' => Some(PermissionDecision::AlwaysAllow),
+        '5' => Some(PermissionDecision::AlwaysDeny),
+        _ => None,
     }
 }
 
@@ -361,5 +405,117 @@ mod tests {
         app.handle_event(TuiEvent::Usage(usage));
         assert_eq!(app.usage.as_ref().unwrap().input_tokens, 100);
         assert_eq!(app.usage.as_ref().unwrap().output_tokens, 50);
+    }
+
+    // ── Permission prompt tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_permission_prompt_initial_state() {
+        let app = App::new();
+        assert!(app.pending_permission.is_none());
+    }
+
+    #[test]
+    fn test_permission_request_stored_in_app() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let reason = GuardReason {
+            guard: hackpi_guardrails::GuardType::CommandGate,
+            tool: "bash".into(),
+            details: "rm -rf /".into(),
+        };
+
+        app.handle_event(TuiEvent::PermissionRequest {
+            id: 42,
+            reason,
+            response: tx,
+        });
+
+        assert!(app.pending_permission.is_some());
+        let prompt = app.pending_permission.as_ref().unwrap();
+        assert_eq!(prompt.id, 42);
+        assert_eq!(
+            prompt.reason.guard,
+            hackpi_guardrails::GuardType::CommandGate
+        );
+        assert_eq!(prompt.reason.tool, "bash");
+        assert!(prompt.response.is_some());
+    }
+
+    #[test]
+    fn test_pending_permission_cleared_after_decision_sent() {
+        let mut app = App::new();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let reason = GuardReason {
+            guard: hackpi_guardrails::GuardType::CommandGate,
+            tool: "bash".into(),
+            details: "rm -rf /".into(),
+        };
+
+        app.handle_event(TuiEvent::PermissionRequest {
+            id: 1,
+            reason,
+            response: tx,
+        });
+
+        // Simulate taking the prompt and sending a decision
+        if let Some(mut prompt) = app.pending_permission.take() {
+            if let Some(sender) = prompt.response.take() {
+                sender.send(PermissionDecision::Deny).ok();
+            }
+        }
+
+        assert!(app.pending_permission.is_none());
+        assert_eq!(rx.try_recv(), Ok(PermissionDecision::Deny));
+    }
+
+    // ── Permission decision key mapping tests ────────────────────────────
+
+    #[test]
+    fn test_key_1_maps_to_allow_once() {
+        assert_eq!(
+            permission_decision_from_key('1'),
+            Some(PermissionDecision::AllowOnce)
+        );
+    }
+
+    #[test]
+    fn test_key_2_maps_to_allow_session() {
+        assert_eq!(
+            permission_decision_from_key('2'),
+            Some(PermissionDecision::AllowSession)
+        );
+    }
+
+    #[test]
+    fn test_key_3_maps_to_deny() {
+        assert_eq!(
+            permission_decision_from_key('3'),
+            Some(PermissionDecision::Deny)
+        );
+    }
+
+    #[test]
+    fn test_key_4_maps_to_always_allow() {
+        assert_eq!(
+            permission_decision_from_key('4'),
+            Some(PermissionDecision::AlwaysAllow)
+        );
+    }
+
+    #[test]
+    fn test_key_5_maps_to_always_deny() {
+        assert_eq!(
+            permission_decision_from_key('5'),
+            Some(PermissionDecision::AlwaysDeny)
+        );
+    }
+
+    #[test]
+    fn test_other_keys_return_none() {
+        assert_eq!(permission_decision_from_key('0'), None);
+        assert_eq!(permission_decision_from_key('6'), None);
+        assert_eq!(permission_decision_from_key('a'), None);
+        assert_eq!(permission_decision_from_key(' '), None);
     }
 }

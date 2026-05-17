@@ -1,9 +1,9 @@
 use crate::app::{App, AppState, ToolCallStatus};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -23,6 +23,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_conversation(frame, chunks[1], app);
     render_input(frame, chunks[2], app);
     render_status(frame, chunks[3], app);
+
+    if app.pending_permission.is_some() {
+        render_permission_modal(frame, area, app);
+    }
 }
 
 fn header_text(app: &App) -> Line<'static> {
@@ -211,6 +215,88 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+#[allow(clippy::vec_init_then_push)]
+fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let prompt = match &app.pending_permission {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Modal dimensions: 60 chars wide, proportional height
+    let modal_width = 60;
+    let modal_height = 15;
+    let x = (area.width.saturating_sub(modal_width)) / 2;
+    let y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect {
+        x,
+        y,
+        width: modal_width.min(area.width),
+        height: modal_height.min(area.height),
+    };
+
+    // Clear the area behind the modal
+    frame.render_widget(Clear, modal_area);
+
+    let reason = &prompt.reason;
+    let guard_name = format!("{}", reason.guard);
+
+    // Build modal content lines
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title
+    lines.push(Line::from(Span::styled(
+        " ⚠ Permission Required ",
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Details
+    lines.push(Line::from(vec![
+        Span::styled(" Pattern: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(&reason.details),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" Tool: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(&reason.tool),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Guard: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(&guard_name),
+    ]));
+    lines.push(Line::from(""));
+
+    // Options
+    lines.push(Line::from(Span::styled(
+        " [1] Allow once           [3] Deny",
+        Style::default().fg(Color::Yellow),
+    )));
+    lines.push(Line::from(Span::styled(
+        " [2] Allow session        [4] Always allow",
+        Style::default().fg(Color::Yellow),
+    )));
+    lines.push(Line::from(Span::styled(
+        "                         [5] Always deny",
+        Style::default().fg(Color::Yellow),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " [Esc] to cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .style(Style::default().bg(Color::Black));
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .alignment(Alignment::Left);
+
+    frame.render_widget(paragraph, modal_area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +427,64 @@ mod tests {
     #[test]
     fn test_tool_card_color_unknown() {
         assert_eq!(tool_card_color("unknown"), Color::DarkGray);
+    }
+
+    #[test]
+    fn test_render_permission_modal_does_not_panic_with_pending_prompt() {
+        // Create a minimal test buffer to render into
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let reason = hackpi_guardrails::GuardReason {
+            guard: hackpi_guardrails::GuardType::CommandGate,
+            tool: "bash".into(),
+            details: "rm -rf /".into(),
+        };
+
+        let mut app = App::new();
+        app.pending_permission = Some(crate::app::PermissionPrompt {
+            id: 1,
+            reason,
+            response: Some(tx),
+        });
+
+        // render() should not panic even with a pending permission prompt
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        // Verify the buffer contains expected modal text
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Permission Required"),
+            "modal should show title, got: {cell_str:?}"
+        );
+        assert!(
+            cell_str.contains("Allow once"),
+            "modal should show Allow once option"
+        );
+        assert!(
+            cell_str.contains("Allow session"),
+            "modal should show Allow session option"
+        );
+        assert!(cell_str.contains("Deny"), "modal should show Deny option");
+        assert!(
+            cell_str.contains("Always allow"),
+            "modal should show Always allow option"
+        );
+        assert!(
+            cell_str.contains("Always deny"),
+            "modal should show Always deny option"
+        );
+        assert!(
+            cell_str.contains("Esc"),
+            "modal should show Esc key binding"
+        );
     }
 }

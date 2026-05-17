@@ -19,3 +19,4 @@ tracing-subscriber.workspace = true
 futures.workspace = true
 hackpi-core = { path = "../hackpi-core" }
 hackpi-tools = { path = "../hackpi-tools" }
+hackpi-guardrails = { path = "../hackpi-guardrails" }

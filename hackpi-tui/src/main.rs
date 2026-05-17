@@ -7,6 +7,7 @@ use hackpi_core::agent::{Agent, AgentEvent};
 use hackpi_core::api::ApiClient;
 use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
+use hackpi_guardrails::{GuardEvaluator, PermissionDecision, SettingsPaths};
 use hackpi_tools::register_all_tools;
 use hackpi_tui::app::{App, AppState};
 use hackpi_tui::events::TuiEvent;
@@ -44,6 +45,14 @@ You are hackpi, a coding agent built with Rust. You help users write, debug, and
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
+    // Parse --god flag manually to avoid adding a CLI dependency
+    let god_mode = std::env::args().any(|arg| arg == "--god");
+
+    // Create GuardEvaluator with settings paths from current directory
+    let workspace_root = std::env::current_dir()?;
+    let settings_paths = SettingsPaths::new(&workspace_root);
+    let _guard_evaluator = GuardEvaluator::new(god_mode, settings_paths);
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -59,7 +68,6 @@ async fn main() -> anyhow::Result<()> {
     let conversation_mut = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     let api_config = ApiConfig::from_env();
-    let workspace_root = std::env::current_dir()?;
 
     let mut tool_registry = ToolRegistry::new();
     register_all_tools(&mut tool_registry, &workspace_root);
@@ -99,62 +107,83 @@ async fn main() -> anyhow::Result<()> {
 
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                        if matches!(app.state, AppState::Generating) {
-                            signal_tx.send(true).ok();
-                            app.state = AppState::Interrupted;
+                // If a permission prompt is active, intercept all keys
+                if app.pending_permission.is_some() {
+                    let decision = match key.code {
+                        KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
+                        KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
+                        KeyCode::Char('3') => Some(PermissionDecision::Deny),
+                        KeyCode::Char('4') => Some(PermissionDecision::AlwaysAllow),
+                        KeyCode::Char('5') => Some(PermissionDecision::AlwaysDeny),
+                        KeyCode::Esc => Some(PermissionDecision::Deny),
+                        _ => None,
+                    };
+
+                    if let Some(decision) = decision {
+                        if let Some(mut prompt) = app.pending_permission.take() {
+                            if let Some(sender) = prompt.response.take() {
+                                sender.send(decision).ok();
+                            }
                         }
                     }
-                    KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
-                        app.clear();
-                    }
-                    KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
-                        break;
-                    }
-                    KeyCode::PageUp => {
-                        app.scroll_offset = app.scroll_offset.saturating_sub(5);
-                    }
-                    KeyCode::PageDown => {
-                        app.scroll_offset = app.scroll_offset.saturating_add(5);
-                    }
-                    KeyCode::Home => {
-                        app.scroll_offset = 0;
-                    }
-                    KeyCode::End => {
-                        app.scroll_offset = usize::MAX;
-                    }
-                    _ => {
-                        if !matches!(app.state, AppState::Generating) {
-                            input.handle_key(key);
-                            app.input = input.buffer.clone();
-                            if let Some(submitted) = input.last_submitted() {
-                                tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
+                } else {
+                    match key.code {
+                        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                            if matches!(app.state, AppState::Generating) {
+                                signal_tx.send(true).ok();
+                                app.state = AppState::Interrupted;
+                            }
+                        }
+                        KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
+                            app.clear();
+                        }
+                        KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                            break;
+                        }
+                        KeyCode::PageUp => {
+                            app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                        }
+                        KeyCode::PageDown => {
+                            app.scroll_offset = app.scroll_offset.saturating_add(5);
+                        }
+                        KeyCode::Home => {
+                            app.scroll_offset = 0;
+                        }
+                        KeyCode::End => {
+                            app.scroll_offset = usize::MAX;
+                        }
+                        _ => {
+                            if !matches!(app.state, AppState::Generating) {
+                                input.handle_key(key);
+                                app.input = input.buffer.clone();
+                                if let Some(submitted) = input.last_submitted() {
+                                    tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
 
-                                let signal_rx_clone = signal_rx.clone();
-                                let agent_tx_clone = agent_tx.clone();
+                                    let signal_rx_clone = signal_rx.clone();
+                                    let agent_tx_clone = agent_tx.clone();
 
-                                let agent_instance = Agent::new(
-                                    ApiClient::new(api_config.clone())?,
-                                    tools.clone(),
-                                    SYSTEM_PROMPT.to_string(),
-                                    workspace_root.clone(),
-                                );
+                                    let agent_instance = Agent::new(
+                                        ApiClient::new(api_config.clone())?,
+                                        tools.clone(),
+                                        SYSTEM_PROMPT.to_string(),
+                                        workspace_root.clone(),
+                                    );
 
-                                let conversation_clone = Arc::clone(&conversation_mut);
-                                let tx_for_agent = agent_tx_clone.clone();
+                                    let conversation_clone = Arc::clone(&conversation_mut);
+                                    let tx_for_agent = agent_tx_clone.clone();
 
-                                tokio::spawn(async move {
-                                    let mut conv_guard = conversation_clone.lock().await;
-                                    agent_instance
-                                        .run(
-                                            &submitted,
-                                            &mut conv_guard,
-                                            tx_for_agent,
-                                            signal_rx_clone,
-                                        )
-                                        .await;
-                                });
+                                    tokio::spawn(async move {
+                                        let mut conv_guard = conversation_clone.lock().await;
+                                        agent_instance
+                                            .run(
+                                                &submitted,
+                                                &mut conv_guard,
+                                                tx_for_agent,
+                                                signal_rx_clone,
+                                            )
+                                            .await;
+                                    });
+                                }
                             }
                         }
                     }

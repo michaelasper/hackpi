@@ -566,6 +566,7 @@ dependencies = [
  "crossterm",
  "futures",
  "hackpi-core",
+ "hackpi-guardrails",
  "hackpi-tools",
  "ratatui",
  "serde",
