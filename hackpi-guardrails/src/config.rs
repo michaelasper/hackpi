@@ -529,6 +529,44 @@ mod tests {
         assert!(env_deny.count() >= 1, "should deny write for .env*");
     }
 
+    // ── load_all: Claude settings.local.json overrides settings.json ──────
+    //
+    // The medium-priority source (claude_local) must come before the low-priority
+    // source (claude_project) in the merge order so that deny/allow rules from
+    // local override project defaults.
+
+    #[test]
+    fn test_load_all_claude_local_overrides_claude_project() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_paths(dir.path());
+
+        // Claude local (medium priority) — deny Read(foo)
+        write_config(
+            &paths.claude_local,
+            r#"{"permissions": {"deny": ["Read(foo)"]}}"#,
+        );
+
+        // Claude project (lowest priority) — allow Read(foo)
+        write_config(
+            &paths.claude_project,
+            r#"{"permissions": {"allow": ["Read(foo)"]}}"#,
+        );
+
+        let rules = load_all(&paths).expect("load_all should succeed");
+        // claude_local deny should be first (checked before claude_project allow)
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            rules[0].action,
+            RuleAction::Deny,
+            "claude local deny should be checked first"
+        );
+        assert_eq!(
+            rules[1].action,
+            RuleAction::Allow,
+            "claude project allow should be second"
+        );
+    }
+
     // ── load_hackpi_config: Missing sections ──────────────────────────────
 
     #[test]
@@ -839,6 +877,76 @@ mod tests {
         let config = json!({"patterns": {}});
         let rules = parse_file_protection_block(&config).expect("should parse");
         assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_parse_file_protection_block_unknown_action_skipped() {
+        let config = json!({
+            "patterns": {
+                ".env": { "read": "allow", "write": "maybe" }
+            }
+        });
+        let rules = parse_file_protection_block(&config).expect("should parse");
+        // "write" action "maybe" is unknown → skipped, only "read" rule remains
+        assert_eq!(rules.len(), 1, "unknown action entry should be skipped");
+        assert_eq!(rules[0].action, RuleAction::Allow);
+        assert_eq!(rules[0].path_pattern.as_deref(), Some(".env"));
+    }
+
+    #[test]
+    fn test_parse_file_protection_block_invalid_operation_value_skipped() {
+        let config = json!({
+            "patterns": {
+                ".env": { "read": "ask", "write": 123 }
+            }
+        });
+        let rules = parse_file_protection_block(&config).expect("should parse");
+        // "write" value is a number, not a string → skipped
+        assert_eq!(
+            rules.len(),
+            1,
+            "non-string operation action should be skipped"
+        );
+        assert_eq!(rules[0].path_pattern.as_deref(), Some(".env"));
+    }
+
+    #[test]
+    fn test_parse_file_protection_block_string_instead_of_object_skipped() {
+        let config = json!({
+            "patterns": {
+                ".env": "just a string, not an object"
+            }
+        });
+        let rules = parse_file_protection_block(&config).expect("should parse");
+        assert!(
+            rules.is_empty(),
+            "non-object pattern value should be skipped"
+        );
+    }
+
+    /// Test that parse_file_protection_block with a pattern that has "allow" for read
+    /// and "deny" for write produces the correct per-operation rules.
+    #[test]
+    fn test_parse_file_protection_block_per_op_rules() {
+        let config = json!({
+            "patterns": {
+                ".secret": { "read": "allow", "write": "deny" }
+            }
+        });
+        let rules = parse_file_protection_block(&config).expect("should parse");
+        assert_eq!(rules.len(), 2, "should produce 2 per-operation rules");
+
+        let allow_rule = rules.iter().find(|r| r.action == RuleAction::Allow);
+        let deny_rule = rules.iter().find(|r| r.action == RuleAction::Deny);
+        assert!(allow_rule.is_some(), "should have an allow rule");
+        assert!(deny_rule.is_some(), "should have a deny rule");
+        for rule in &rules {
+            assert_eq!(
+                rule.path_pattern.as_deref(),
+                Some(".secret"),
+                "all rules should have the same path pattern"
+            );
+        }
     }
 
     // ── merge_rules ───────────────────────────────────────────────────────

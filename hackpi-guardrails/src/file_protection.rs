@@ -597,4 +597,173 @@ mod tests {
         assert_eq!(pp.read_action, RuleAction::Allow);
         assert_eq!(pp.write_action, RuleAction::Deny);
     }
+
+    // ── Same file, different ops ────────────────────────────────────────────
+
+    #[test]
+    fn test_same_file_read_asks_write_denies() {
+        // For .env: read → Ask, write → Deny
+        let path = Path::new(".env");
+        let read_result = check(path, &FileOp::Read, &[], "read");
+        assert!(
+            matches!(read_result, GuardResult::Ask(_)),
+            "read .env should ask"
+        );
+
+        let write_result = check(path, &FileOp::Write, &[], "write");
+        assert!(
+            matches!(write_result, GuardResult::Deny(_)),
+            "write .env should deny"
+        );
+    }
+
+    #[test]
+    fn test_same_file_git_config_read_allow_write_deny() {
+        let path = Path::new(".git/config");
+        let read_result = check(path, &FileOp::Read, &[], "read");
+        assert_eq!(
+            read_result,
+            GuardResult::Allow,
+            "read .git/config should allow"
+        );
+
+        let write_result = check(path, &FileOp::Write, &[], "write");
+        assert!(
+            matches!(write_result, GuardResult::Deny(_)),
+            "write .git/config should deny"
+        );
+    }
+
+    #[test]
+    fn test_same_file_protected_both_ops_with_custom_rules() {
+        let path = Path::new(".env");
+        // Custom rules: allow read, ask write
+        let rules = vec![
+            PermissionRule {
+                tool_pattern: None,
+                path_pattern: Some(".env".into()),
+                command_pattern: None,
+                action: RuleAction::Allow,
+            },
+            PermissionRule {
+                tool_pattern: None,
+                path_pattern: Some(".env".into()),
+                command_pattern: None,
+                action: RuleAction::Ask,
+            },
+        ];
+
+        // Allow rule should win (it's first in the list)
+        let read_result = check(path, &FileOp::Read, &rules, "read");
+        assert_eq!(
+            read_result,
+            GuardResult::Allow,
+            "custom allow should override default ask"
+        );
+
+        let write_result = check(path, &FileOp::Write, &rules, "write");
+        assert_eq!(
+            write_result,
+            GuardResult::Allow,
+            "first matching rule wins for write too"
+        );
+    }
+
+    // ── Nested subdirectory matching ─────────────────────────────────────────
+
+    #[test]
+    fn test_nested_deeply_env_local() {
+        let path = Path::new("a/very/deeply/nested/folder/.env.local");
+        let result = check_against_defaults(path, &FileOp::Read);
+        assert!(result.is_some(), "deeply nested .env.local should match");
+        assert!(matches!(result.unwrap(), GuardResult::Ask(_)));
+    }
+
+    #[test]
+    fn test_nested_credentials_in_subdir() {
+        let path = Path::new("config/backups/credentials.old.json");
+        let result = check_against_defaults(path, &FileOp::Read);
+        assert!(result.is_some(), "nested credentials file should match");
+        assert!(matches!(result.unwrap(), GuardResult::Ask(_)));
+    }
+
+    #[test]
+    fn test_nested_secrets_deeply() {
+        let path = Path::new("infra/secrets/production/database/password.txt");
+        let result = check_against_defaults(path, &FileOp::Read);
+        assert!(result.is_some(), "deeply nested secrets file should match");
+        assert!(matches!(result.unwrap(), GuardResult::Ask(_)));
+    }
+
+    #[test]
+    fn test_nested_pem_in_deep_path() {
+        let path = Path::new("certs/2024/wildcard.example.com.pem");
+        let result = check_against_defaults(path, &FileOp::Read);
+        assert!(result.is_some(), "nested .pem should match");
+        assert!(matches!(result.unwrap(), GuardResult::Ask(_)));
+    }
+
+    #[test]
+    fn test_nested_key_in_deep_path() {
+        let path = Path::new("ssh/keys/deploy.key");
+        let result = check_against_defaults(path, &FileOp::Read);
+        assert!(result.is_some(), "nested .key should match");
+        assert!(matches!(result.unwrap(), GuardResult::Ask(_)));
+    }
+
+    #[test]
+    fn test_nested_not_protected_returns_none() {
+        let path = Path::new("src/components/Button.tsx");
+        let result = check_against_defaults(path, &FileOp::Read);
+        assert!(result.is_none(), "non-protected file should not match");
+    }
+
+    #[test]
+    fn test_nested_git_in_inside_hidden_dir() {
+        let path = Path::new(".git/objects/pack/pack-abc123.pack");
+        let result = check_against_defaults(path, &FileOp::Read);
+        assert!(
+            matches!(result, Some(GuardResult::Allow)),
+            "reading nested .git objects should allow"
+        );
+
+        let write_result = check_against_defaults(path, &FileOp::Write);
+        assert!(
+            matches!(write_result, Some(GuardResult::Deny(_))),
+            "writing nested .git objects should deny"
+        );
+    }
+
+    /// Test that a custom rule for a nested path pattern works correctly.
+    #[test]
+    fn test_nested_custom_rule_matches_subdirectory() {
+        let path = Path::new("logs/debug.log");
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: Some("logs/**".into()),
+            command_pattern: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check(path, &FileOp::Read, &rules, "read");
+        assert!(
+            matches!(result, GuardResult::Deny(_)),
+            "custom rule for logs/ should deny"
+        );
+    }
+
+    #[test]
+    fn test_nested_custom_rule_with_globstar() {
+        let path = Path::new("node_modules/express/lib/index.js");
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: Some("**/node_modules/**".into()),
+            command_pattern: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check(path, &FileOp::Read, &rules, "read");
+        assert!(
+            matches!(result, GuardResult::Deny(_)),
+            "globstar pattern should match nested node_modules"
+        );
+    }
 }

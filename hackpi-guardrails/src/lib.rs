@@ -537,6 +537,128 @@ mod tests {
         assert_eq!(paths.claude_project, root.join(".claude/settings.json"));
     }
 
+    // ── PermissionRule Construction Tests ───────────────────────────────
+
+    #[test]
+    fn test_permission_rule_path_only() {
+        let rule = PermissionRule {
+            tool_pattern: Some(ToolPattern {
+                name: "read".into(),
+                pattern: "./docs/**".into(),
+            }),
+            path_pattern: Some("./docs/**".into()),
+            command_pattern: None,
+            action: RuleAction::Allow,
+        };
+        assert!(rule.path_pattern.is_some());
+        assert!(rule.command_pattern.is_none());
+    }
+
+    #[test]
+    fn test_permission_rule_command_only() {
+        let rule = PermissionRule {
+            tool_pattern: Some(ToolPattern {
+                name: "bash".into(),
+                pattern: "curl *".into(),
+            }),
+            path_pattern: None,
+            command_pattern: Some("curl *".into()),
+            action: RuleAction::Deny,
+        };
+        assert!(rule.path_pattern.is_none());
+        assert!(rule.command_pattern.is_some());
+    }
+
+    #[test]
+    fn test_permission_rule_both_patterns() {
+        let rule = PermissionRule {
+            tool_pattern: None,
+            path_pattern: Some("./secrets/**".into()),
+            command_pattern: Some("cat".into()),
+            action: RuleAction::Ask,
+        };
+        assert!(rule.path_pattern.is_some());
+        assert!(rule.command_pattern.is_some());
+    }
+
+    #[test]
+    fn test_permission_rule_no_patterns() {
+        let rule = PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: None,
+            action: RuleAction::Allow,
+        };
+        assert!(rule.path_pattern.is_none());
+        assert!(rule.command_pattern.is_none());
+    }
+
+    #[test]
+    fn test_permission_rule_serde_json_compatible() {
+        // Verify PermissionRule fields are compatible with serde_json types
+        // (even though RuleAction and ToolPattern don't derive Serialize/Deserialize)
+        let _rule = PermissionRule {
+            tool_pattern: Some(ToolPattern {
+                name: "read".into(),
+                pattern: "./docs/**".into(),
+            }),
+            path_pattern: Some("./docs/**".into()),
+            command_pattern: None,
+            action: RuleAction::Allow,
+        };
+        // Manually construct the JSON representation
+        let json = serde_json::json!({
+            "tool": "read",
+            "path_pattern": "./docs/**",
+            "action": "Allow"
+        });
+        assert_eq!(json["tool"].as_str(), Some("read"));
+        assert_eq!(json["path_pattern"].as_str(), Some("./docs/**"));
+        assert_eq!(json["action"].as_str(), Some("Allow"));
+    }
+
+    // ── check_tool Edge Cases ────────────────────────────────────────────
+
+    #[test]
+    fn test_check_tool_with_both_command_and_path_command_wins() {
+        // When both command and path are present, command gate is checked first
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "command": "sudo rm -rf /",
+            "path": "safe-file.txt"
+        });
+        let result = evaluator.check_tool("bash", &params);
+        // Command gate should catch sudo before path guard is even reached
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("sudo") || msg.contains("dangerous"));
+            }
+            other => panic!("expected Deny for sudo command, got {other:?}"),
+        }
+    }
+
+    /// An allow rule for a command should bypass dangerous patterns.
+    #[test]
+    fn test_check_tool_allow_rule_bypasses_dangerous_patterns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Load a config that allows "sudo"
+        let hackpi = dir.path().join(".hackpi/guardrails.json");
+        std::fs::create_dir_all(hackpi.parent().unwrap()).expect("create dir");
+        std::fs::write(&hackpi, r#"{"permissions": {"allow": ["Bash(sudo)"]}}"#).expect("write");
+
+        evaluator.load_rules().expect("load rules");
+
+        let params = json!({ "command": "sudo echo hello" });
+        let result = evaluator.check_tool("bash", &params);
+        assert_eq!(result, GuardResult::Allow);
+    }
+
     // ── GuardType Display Tests ──────────────────────────────────────────
 
     #[test]

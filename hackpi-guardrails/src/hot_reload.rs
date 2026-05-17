@@ -383,6 +383,93 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_empty_command_pattern() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("".into()),
+            action: RuleAction::Deny,
+        }];
+        let result = validate(&rules);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("empty"),
+            "should reject empty command pattern"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_tool_name() {
+        let rules = vec![PermissionRule {
+            tool_pattern: Some(crate::ToolPattern {
+                name: "nonexistent_tool".into(),
+                pattern: "*".into(),
+            }),
+            path_pattern: Some("./foo".into()),
+            command_pattern: None,
+            action: RuleAction::Deny,
+        }];
+        let result = validate(&rules);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("unknown tool"),
+            "should reject unknown tool"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_glob_with_brackets() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: Some("[invalid-glob".into()),
+            command_pattern: None,
+            action: RuleAction::Deny,
+        }];
+        let result = validate(&rules);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("invalid glob"),
+            "should reject invalid glob pattern"
+        );
+    }
+
+    #[test]
+    fn test_try_reload_preserves_old_rules_when_new_config_is_missing_required_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_paths(dir.path());
+        let rules = Arc::new(RwLock::new(Vec::new()));
+
+        // First, load valid rules
+        write_config(
+            &paths.hackpi,
+            r#"{"permissions": {"allow": ["Read(./docs/**)"]}}"#,
+        );
+        try_reload(&rules, &paths).expect("first reload should succeed");
+        assert_eq!(
+            rules.read().expect("lock").len(),
+            1,
+            "should have 1 valid rule initially"
+        );
+
+        // Now write a config with an invalid glob
+        write_config(
+            &paths.hackpi,
+            r#"{"permissions": {"allow": ["Read([bad-glob)"]}}"#,
+        );
+        let result = try_reload(&rules, &paths);
+        assert!(result.is_err(), "invalid glob config should fail");
+
+        // Old rules must be preserved
+        let guard = rules.read().expect("lock");
+        assert_eq!(
+            guard.len(),
+            1,
+            "old rules should be preserved after glob validation failure"
+        );
+        assert_eq!(guard[0].action, RuleAction::Allow);
+    }
+
+    #[test]
     fn test_try_reload_atomic_swap_visible_immediately() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_paths(dir.path());
