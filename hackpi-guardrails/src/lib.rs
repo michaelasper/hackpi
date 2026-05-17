@@ -128,6 +128,8 @@ pub struct GuardEvaluator {
     session_cache: HashMap<String, PermissionDecision>,
     /// Paths to config files.
     settings_paths: SettingsPaths,
+    /// The root directory of the workspace (used by path_guard).
+    workspace_root: PathBuf,
 }
 
 impl GuardEvaluator {
@@ -135,11 +137,18 @@ impl GuardEvaluator {
     ///
     /// When `god_mode` is true, all checks return `Allow` unconditionally.
     pub fn new(god_mode: bool, settings_paths: SettingsPaths) -> Self {
+        let workspace_root = settings_paths
+            .hackpi
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
         Self {
             god_mode,
             config_rules: Vec::new(),
             session_cache: HashMap::new(),
             settings_paths,
+            workspace_root,
         }
     }
 
@@ -152,7 +161,7 @@ impl GuardEvaluator {
     ///
     /// Returns `Allow` if all guards pass, `Deny` with a reason if any
     /// guard blocks, or `Ask` with a reason if user input is needed.
-    pub fn check_tool(&self, _tool_name: &str, params: &serde_json::Value) -> GuardResult {
+    pub fn check_tool(&self, tool_name: &str, params: &serde_json::Value) -> GuardResult {
         if self.god_mode {
             return GuardResult::Allow;
         }
@@ -176,7 +185,12 @@ impl GuardEvaluator {
             }
 
             // Path guard check
-            let pg_result = path_guard::check(path, &self.config_rules);
+            let pg_result = path_guard::check(
+                &path.to_string_lossy(),
+                &self.workspace_root,
+                &self.config_rules,
+                tool_name,
+            );
             if !matches!(pg_result, GuardResult::Allow) {
                 return pg_result;
             }
@@ -349,14 +363,19 @@ mod tests {
 
     #[test]
     fn test_check_tool_non_god_mode_passes_with_no_rules() {
-        let paths = SettingsPaths::new(std::path::Path::new("/tmp/test"));
+        // Use a temp dir so that path_guard can canonicalize the workspace root
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
         let evaluator = GuardEvaluator::new(false, paths);
 
         // With no rules loaded, everything should be allowed
         let params = json!({ "command": "echo hello" });
         assert_eq!(evaluator.check_tool("bash", &params), GuardResult::Allow);
 
-        let params = json!({ "path": "/tmp/foo.txt" });
+        // Create a file inside the workspace so canonicalize works
+        let inside_path = dir.path().join("test.txt");
+        std::fs::write(&inside_path, "content").expect("write test file");
+        let params = json!({ "path": inside_path.to_str().unwrap() });
         assert_eq!(evaluator.check_tool("read", &params), GuardResult::Allow);
     }
 
