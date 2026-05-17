@@ -14,6 +14,7 @@ use hackpi_tui::app::{handle_slash_command, App, AppState};
 use hackpi_tui::events::TuiEvent;
 use hackpi_tui::input::InputHandler;
 use hackpi_tui::ui;
+use hackpi_vcs::{register_vcs_tools, VcsConfig};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::{Arc, RwLock};
@@ -93,6 +94,8 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.set_guard_evaluator(Arc::clone(&guard_evaluator));
     tool_registry.set_permission_tx(permission_tx);
     register_all_tools(&mut tool_registry, &workspace_root);
+    let vcs_config = VcsConfig::from_env(&workspace_root);
+    register_vcs_tools(&mut tool_registry, &workspace_root, &vcs_config);
     let tools = Arc::new(tool_registry);
 
     terminal.clear()?;

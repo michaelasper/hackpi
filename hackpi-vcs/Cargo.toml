@@ -1,0 +1,15 @@
+[package]
+name = "hackpi-vcs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hackpi-core = { path = "../hackpi-core" }
+git2.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
