@@ -132,6 +132,57 @@ pub fn command_matches_pattern(command: &str, pattern: &str) -> bool {
     command_lower.contains(&pattern_lower)
 }
 
+/// Check whether a command string matches a pattern at word boundaries.
+///
+/// The pattern must be surrounded by word boundaries (start-of-string,
+/// end-of-string, or non-alphanumeric characters excluding `_`). When
+/// `case_sensitive` is true, the match is case-sensitive; otherwise it's
+/// case-insensitive.
+///
+/// This prevents false positives like `dd` matching inside `git add .`
+/// (where "dd" appears within "add") or `su` matching inside `source` or
+/// `issue`.
+pub fn command_matches_at_word_boundary(
+    command: &str,
+    pattern: &str,
+    case_sensitive: bool,
+) -> bool {
+    let (cmd, pat) = if case_sensitive {
+        (command.as_bytes().to_vec(), pattern.as_bytes().to_vec())
+    } else {
+        (
+            command.to_lowercase().into_bytes(),
+            pattern.to_lowercase().into_bytes(),
+        )
+    };
+
+    if pat.is_empty() {
+        return true;
+    }
+
+    let mut i = 0;
+    while i + pat.len() <= cmd.len() {
+        if cmd[i..i + pat.len()] == pat[..] {
+            // Check left word boundary
+            let left_ok = i == 0 || !is_word_char(cmd[i - 1]);
+            // Check right word boundary
+            let right_ok = i + pat.len() == cmd.len() || !is_word_char(cmd[i + pat.len()]);
+
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+
+    false
+}
+
+/// Returns `true` if `b` is an ASCII word character (alphanumeric or underscore).
+fn is_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 /// Resolve a pattern path to an absolute path string.
 ///
 /// - `~/...` paths are resolved against the user's home directory
@@ -463,6 +514,116 @@ mod tests {
     #[test]
     fn test_command_matches_empty_command() {
         assert!(!command_matches_pattern("", "something"));
+    }
+
+    // ── command_matches_at_word_boundary ──────────────────────────────────
+
+    #[test]
+    fn test_word_boundary_dd_matches_at_start() {
+        assert!(command_matches_at_word_boundary(
+            "dd if=/dev/zero of=/dev/sda bs=4M",
+            "dd",
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_word_boundary_dd_does_not_match_inside_word() {
+        assert!(!command_matches_at_word_boundary("git add .", "dd", false));
+        assert!(!command_matches_at_word_boundary(
+            "cat address_book.txt",
+            "dd",
+            false
+        ));
+        assert!(!command_matches_at_word_boundary(
+            "echo hidden",
+            "dd",
+            false
+        ));
+    }
+
+    #[test]
+    fn test_word_boundary_su_matches_at_start() {
+        assert!(command_matches_at_word_boundary("su - root", "su", false));
+    }
+
+    #[test]
+    fn test_word_boundary_su_matches_with_space_prefix() {
+        assert!(command_matches_at_word_boundary(
+            "run su - root",
+            "su",
+            false
+        ));
+    }
+
+    #[test]
+    fn test_word_boundary_su_does_not_match_inside_word() {
+        assert!(!command_matches_at_word_boundary(
+            "cat /etc/issue",
+            "su",
+            false
+        ));
+        assert!(!command_matches_at_word_boundary(
+            "source .env",
+            "su",
+            false
+        ));
+        assert!(!command_matches_at_word_boundary("echo sure", "su", false));
+        assert!(!command_matches_at_word_boundary(
+            "grep -r result .",
+            "su",
+            false
+        ));
+    }
+
+    #[test]
+    fn test_word_boundary_case_insensitive() {
+        assert!(command_matches_at_word_boundary(
+            "DD if=/dev/zero",
+            "dd",
+            false
+        ));
+        assert!(!command_matches_at_word_boundary(
+            "DD if=/dev/zero",
+            "dd",
+            true
+        ));
+    }
+
+    #[test]
+    fn test_word_boundary_case_sensitive() {
+        assert!(command_matches_at_word_boundary(
+            "chmod -R 777 /",
+            "chmod -R",
+            true
+        ));
+        assert!(!command_matches_at_word_boundary(
+            "chmod -r file",
+            "chmod -R",
+            true
+        ));
+    }
+
+    #[test]
+    fn test_word_boundary_empty_pattern() {
+        assert!(command_matches_at_word_boundary("anything", "", false));
+    }
+
+    #[test]
+    fn test_word_boundary_no_match() {
+        assert!(!command_matches_at_word_boundary("ls -la", "rm", false));
+    }
+
+    #[test]
+    fn test_word_boundary_respects_punctuation() {
+        // "dd" followed by non-word char like '=' should match
+        assert!(command_matches_at_word_boundary(
+            "dd=something",
+            "dd",
+            false
+        ));
+        // "dd" as a standalone command
+        assert!(command_matches_at_word_boundary("dd", "dd", false));
     }
 
     // ── resolve_pattern_path ─────────────────────────────────────────────
