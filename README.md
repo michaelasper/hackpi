@@ -109,7 +109,7 @@ hackpi is a TUI application — launch it and type natural-language requests.
 | `write` | Atomic file creation jailed to workspace root |
 | `bash` | Virtual filesystem with command registry — no network, no arbitrary exec |
 
-###.design-decisions
+### Design decisions
 
 - **Hash-anchored edits**: Every `read` output includes a hash per line. Edits reference those hashes. If the file changed since the read, the edit is rejected rather than silently relocated.
 - **Streaming tool results**: Tool output streams back to the LLM in the same turn. No batched delivery.
@@ -177,9 +177,30 @@ export PATH="$PATH:/usr/local/bin"
 | 256 KB per tool result | Large outputs truncated to temp file | Re-read the temp file with `read` |
 | 25-turn cap | Agent stops after 25 rounds | Continue in a new request |
 
-## Spec Files
+## Documentation
 
-Detailed specifications for each subsystem:
+### Tutorials (learn by doing)
+- [Getting Started](docs/tutorials/getting-started.md) — Install hackpi, connect to an LLM, make your first edit
+
+### How-to Guides (solve a problem)
+- [Configure Guardrails](docs/how-to/configure-guardrails.md) — Set up allow/deny rules, respond to permission prompts
+- [Edit Files with Hash Anchors](docs/how-to/edit-files.md) — Read, edit, and chain operations
+- [Connect to Different LLM Providers](docs/how-to/connect-llm.md) — Point hackpi at different API endpoints
+
+### Reference (look things up)
+- [Tools Reference](docs/reference/tools.md) — Full schemas and parameters for all five tools
+- [Key Bindings](docs/reference/key-bindings.md) — TUI keyboard shortcuts
+- [Guardrails Reference](docs/reference/guardrails.md) — Rule format, evaluation order, persistence
+- [Environment Variables](docs/reference/environment-variables.md) — Configuration variables
+
+### Explanation (understand concepts)
+- [Why Hash Anchors?](docs/explanation/hash-anchors.md) — The motivation and design behind hash-anchored editing
+- [Security Model](docs/explanation/security-model.md) — Sandboxed execution, path jails, and guardrails
+- [Architecture](docs/explanation/architecture.md) — Crate structure, data flow, and streaming tool results
+
+### Specification files
+
+Detailed implementation specs for each subsystem:
 
 - [hashline.spec.md](hashline.spec.md) — Edit system, LINE#HASH anchoring, diff preview
 - [tui.spec.md](tui.spec.md) — TUI layout, key bindings, event channels
