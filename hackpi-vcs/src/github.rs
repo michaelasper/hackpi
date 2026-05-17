@@ -103,8 +103,10 @@ impl Tool for GitHubTool {
                 "operation": {
                     "type": "string",
                     "enum": [
-                        "pr_create", "pr_list", "pr_merge",
-                        "issue_create", "issue_list", "issue_close", "issue_comment"
+                        "pr_create", "pr_list", "pr_merge", "pr_checkout",
+                        "issue_create", "issue_list", "issue_close", "issue_comment",
+                        "label_add", "label_list",
+                        "release_create", "release_list"
                     ],
                     "description": "The GitHub operation to perform"
                 },
@@ -130,11 +132,19 @@ impl Tool for GitHubTool {
                 },
                 "body": {
                     "type": "string",
-                    "description": "Body text for PR, issue, or comment"
+                    "description": "Body text for PR, issue, comment, or release"
                 },
                 "draft": {
                     "type": "boolean",
-                    "description": "Create PR as draft"
+                    "description": "Create PR or release as draft"
+                },
+                "prerelease": {
+                    "type": "boolean",
+                    "description": "Create release as prerelease"
+                },
+                "tag_name": {
+                    "type": "string",
+                    "description": "Tag name for release creation"
                 },
                 "state": {
                     "type": "string",
@@ -143,12 +153,12 @@ impl Tool for GitHubTool {
                 },
                 "number": {
                     "type": "integer",
-                    "description": "PR or issue number for merge/close/comment operations"
+                    "description": "PR or issue number for merge/close/comment/checkout/label operations"
                 },
                 "labels": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Labels for issue creation"
+                    "description": "Labels for issue creation or label_add"
                 }
             },
             "required": ["operation"],
@@ -380,6 +390,151 @@ impl Tool for GitHubTool {
                 }
             }
 
+            "pr_checkout" => {
+                let number = match params.get("number").and_then(|v| v.as_u64()) {
+                    Some(n) => n,
+                    None => {
+                        return ToolResult::SystemError {
+                            message: "Missing 'number' parameter for pr_checkout.".into(),
+                        }
+                    }
+                };
+                match client
+                    .pr_checkout(&owner, &repo, number, &self.workspace_root)
+                    .await
+                {
+                    Ok(msg) => ToolResult::Success { content: msg },
+                    Err(e) => ToolResult::SystemError { message: e },
+                }
+            }
+            "label_add" => {
+                let number = match params.get("number").and_then(|v| v.as_u64()) {
+                    Some(n) => n,
+                    None => {
+                        return ToolResult::SystemError {
+                            message: "Missing 'number' parameter for label_add.".into(),
+                        }
+                    }
+                };
+                let labels: Vec<String> = params
+                    .get("labels")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if labels.is_empty() {
+                    return ToolResult::SystemError {
+                        message: "Missing 'labels' parameter for label_add.".into(),
+                    };
+                }
+                match client
+                    .label_add(&owner, &repo, number, labels.clone())
+                    .await
+                {
+                    Ok(added) => {
+                        let label_names: Vec<&str> =
+                            added.iter().map(|l| l.name.as_str()).collect();
+                        ToolResult::Success {
+                            content: format!(
+                                "Added labels: {} to #{}",
+                                label_names.join(", "),
+                                number
+                            ),
+                        }
+                    }
+                    Err(e) => ToolResult::SystemError { message: e },
+                }
+            }
+            "label_list" => match client.label_list(&owner, &repo).await {
+                Ok(labels) => {
+                    if labels.is_empty() {
+                        return ToolResult::Success {
+                            content: "No labels found.".into(),
+                        };
+                    }
+                    let mut output = String::new();
+                    for (i, label) in labels.iter().enumerate() {
+                        use std::fmt::Write;
+                        let color_str = label
+                            .color
+                            .as_deref()
+                            .map(|c| format!(" (#{c})"))
+                            .unwrap_or_default();
+                        let _ = writeln!(output, "{}. {}{}", i + 1, label.name, color_str);
+                    }
+                    ToolResult::Success { content: output }
+                }
+                Err(e) => ToolResult::SystemError { message: e },
+            },
+            "release_create" => {
+                let tag_name = match params.get("tag_name").and_then(|v| v.as_str()) {
+                    Some(t) => t,
+                    None => {
+                        return ToolResult::SystemError {
+                            message: "Missing 'tag_name' parameter for release_create.".into(),
+                        }
+                    }
+                };
+                let name = match params.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => {
+                        return ToolResult::SystemError {
+                            message: "Missing 'name' parameter for release_create.".into(),
+                        }
+                    }
+                };
+                let body = params.get("body").and_then(|v| v.as_str());
+                let draft = params
+                    .get("draft")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let prerelease = params
+                    .get("prerelease")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match client
+                    .release_create(&owner, &repo, tag_name, name, body, draft, prerelease)
+                    .await
+                {
+                    Ok(release) => ToolResult::Success {
+                        content: format!(
+                            "Created release {}\nURL: {}",
+                            release.tag_name, release.html_url
+                        ),
+                    },
+                    Err(e) => ToolResult::SystemError { message: e },
+                }
+            }
+            "release_list" => match client.release_list(&owner, &repo).await {
+                Ok(releases) => {
+                    if releases.is_empty() {
+                        return ToolResult::Success {
+                            content: "No releases found.".into(),
+                        };
+                    }
+                    let mut output = String::new();
+                    for release in &releases {
+                        use std::fmt::Write;
+                        let date = release
+                            .published_at
+                            .as_deref()
+                            .or(Some(&release.created_at))
+                            .map(|d| {
+                                // Trim to date portion
+                                let date_str: String = d.chars().take(10).collect();
+                                date_str
+                            })
+                            .unwrap_or_default();
+                        let _ =
+                            writeln!(output, "{} ({}): {}", release.tag_name, date, release.name);
+                    }
+                    ToolResult::Success { content: output }
+                }
+                Err(e) => ToolResult::SystemError { message: e },
+            },
             _ => ToolResult::SystemError {
                 message: format!("Unknown operation: {operation}"),
             },
@@ -1040,5 +1195,431 @@ mod tests {
             matches!(&result, ToolResult::SystemError { message } if message.contains("Missing 'body'")),
             "Expected SystemError for missing body, got: {result:?}"
         );
+    }
+
+    // ── pr_checkout ──
+
+    #[tokio::test]
+    async fn test_pr_checkout_success() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        let head_sha = "abc123def4567890123456789012345678901234";
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "Feature branch",
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "body": null,
+                "head": {
+                    "label": "owner:feature-x",
+                    "ref": "feature-x",
+                    "sha": head_sha
+                },
+                "base": {
+                    "label": "owner:main",
+                    "ref": "main",
+                    "sha": "789012345678"
+                },
+                "draft": false,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "user": { "login": "testuser" }
+            })))
+            .mount(&server)
+            .await;
+
+        // Create a bare repo as remote
+        let remote_dir = tempfile::tempdir().unwrap();
+        let bare_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = bare_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            bare_repo.find_tree(oid).unwrap().id()
+        };
+        let initial_oid = bare_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &bare_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+        bare_repo
+            .reference("refs/pull/42/head", initial_oid, true, "PR ref")
+            .unwrap();
+
+        // Create local repo
+        let tmp = tempfile::tempdir().unwrap();
+        let local_repo = git2::Repository::init(tmp.path()).unwrap();
+        let tree_id = {
+            let mut index = local_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            local_repo.find_tree(oid).unwrap().id()
+        };
+        local_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &local_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+        local_repo
+            .remote("origin", remote_dir.path().to_str().unwrap())
+            .unwrap();
+
+        let tool = GitHubTool::new(tmp.path().to_path_buf(), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "pr_checkout",
+                    "owner": "owner",
+                    "repo": "repo",
+                    "number": 42
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("42"),
+                    "Expected PR number in output, got: {content}"
+                );
+                assert!(
+                    content.contains("feature-x"),
+                    "Expected branch name in output, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pr_checkout_missing_number() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "pr_checkout",
+                    "owner": "owner",
+                    "repo": "repo"
+                    // Missing number
+                }),
+                &test_ctx(),
+            )
+            .await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Missing 'number'")),
+            "Expected SystemError for missing number, got: {result:?}"
+        );
+    }
+
+    // ── label_add ──
+
+    #[tokio::test]
+    async fn test_label_add_success() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/issues/15/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "bug", "color": "d73a4a", "description": "Bug report"},
+                {"name": "feature", "color": "0e8a16", "description": "Feature request"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "label_add",
+                    "owner": "owner",
+                    "repo": "repo",
+                    "number": 15,
+                    "labels": ["bug", "feature"]
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("Added labels"),
+                    "Expected 'Added labels' in output, got: {content}"
+                );
+                assert!(
+                    content.contains("bug"),
+                    "Expected 'bug' in output, got: {content}"
+                );
+                assert!(
+                    content.contains("feature"),
+                    "Expected 'feature' in output, got: {content}"
+                );
+                assert!(
+                    content.contains("#15"),
+                    "Expected issue number in output, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    // ── label_list ──
+
+    #[tokio::test]
+    async fn test_label_list_success() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "bug", "color": "d73a4a", "description": "Bug report"},
+                {"name": "feature", "color": "0e8a16", "description": "Feature request"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "label_list",
+                    "owner": "owner",
+                    "repo": "repo"
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("bug"),
+                    "Expected 'bug' in output, got: {content}"
+                );
+                assert!(
+                    content.contains("feature"),
+                    "Expected 'feature' in output, got: {content}"
+                );
+                assert!(
+                    content.contains("#d73a4a"),
+                    "Expected color in output, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_label_list_empty() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "label_list",
+                    "owner": "owner",
+                    "repo": "repo"
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("No labels found"),
+                    "Expected empty message, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    // ── release_create ──
+
+    #[tokio::test]
+    async fn test_release_create_success() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "tag_name": "v1.0.0",
+                "name": "Release v1.0.0",
+                "body": "First release",
+                "draft": false,
+                "prerelease": false,
+                "html_url": "https://github.com/owner/repo/releases/tag/v1.0.0",
+                "created_at": "2024-01-01T00:00:00Z",
+                "published_at": "2024-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "release_create",
+                    "owner": "owner",
+                    "repo": "repo",
+                    "tag_name": "v1.0.0",
+                    "name": "Release v1.0.0",
+                    "body": "First release",
+                    "draft": false,
+                    "prerelease": false
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("Created release v1.0.0"),
+                    "Expected 'Created release v1.0.0' in output, got: {content}"
+                );
+                assert!(
+                    content.contains("https://github.com/owner/repo/releases/tag/v1.0.0"),
+                    "Expected URL in output, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    // ── release_list ──
+
+    #[tokio::test]
+    async fn test_release_list_success() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "tag_name": "v2.0.0",
+                    "name": "Version 2",
+                    "body": "Major release",
+                    "draft": false,
+                    "prerelease": false,
+                    "html_url": "https://github.com/owner/repo/releases/tag/v2.0.0",
+                    "created_at": "2024-02-01T00:00:00Z",
+                    "published_at": "2024-02-01T00:00:00Z"
+                },
+                {
+                    "tag_name": "v1.0.0",
+                    "name": "Version 1",
+                    "body": "Initial release",
+                    "draft": false,
+                    "prerelease": false,
+                    "html_url": "https://github.com/owner/repo/releases/tag/v1.0.0",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "published_at": "2024-01-01T00:00:00Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "release_list",
+                    "owner": "owner",
+                    "repo": "repo"
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("v2.0.0"),
+                    "Expected v2.0.0 in output, got: {content}"
+                );
+                assert!(
+                    content.contains("v1.0.0"),
+                    "Expected v1.0.0 in output, got: {content}"
+                );
+                assert!(
+                    content.contains("Version 2"),
+                    "Expected Version 2 in output, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_list_empty() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "release_list",
+                    "owner": "owner",
+                    "repo": "repo"
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("No releases found"),
+                    "Expected empty message, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
     }
 }

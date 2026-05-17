@@ -60,6 +60,25 @@ pub struct IssueLabel {
     pub color: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelInfo {
+    pub name: String,
+    pub color: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    pub tag_name: String,
+    pub name: String,
+    pub body: Option<String>,
+    pub draft: bool,
+    pub prerelease: bool,
+    pub html_url: String,
+    pub created_at: String,
+    pub published_at: Option<String>,
+}
+
 // ── GitHub Client ──
 
 pub struct GitHubClient {
@@ -161,15 +180,7 @@ impl GitHubClient {
             url = format!("{}?state={}", url, s);
         }
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", self.auth_header())
-            .send()
-            .await
-            .map_err(|e| format!("Network error: {e}"))?;
-
-        handle_response(resp).await
+        fetch_all_pages(&self.client, &url, &self.auth_header(), 100).await
     }
 
     pub async fn pr_merge(&self, owner: &str, repo: &str, number: u64) -> Result<(), String> {
@@ -247,15 +258,7 @@ impl GitHubClient {
             url = format!("{}?state={}", url, s);
         }
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", self.auth_header())
-            .send()
-            .await
-            .map_err(|e| format!("Network error: {e}"))?;
-
-        handle_response(resp).await
+        fetch_all_pages(&self.client, &url, &self.auth_header(), 100).await
     }
 
     pub async fn issue_close(
@@ -324,6 +327,179 @@ impl GitHubClient {
             Err(format!("GitHub API error ({}): {}", status, body))
         }
     }
+
+    // ── PR Checkout ──
+
+    pub async fn pr_checkout(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        checkout_dir: &std::path::Path,
+    ) -> Result<String, String> {
+        // GET /repos/{owner}/{repo}/pulls/{number} to get PR details
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}",
+            self.base_url, owner, repo, number
+        );
+
+        let pr: PrInfo = handle_response(
+            self.client
+                .get(&url)
+                .header("Authorization", self.auth_header())
+                .send()
+                .await
+                .map_err(|e| format!("Network error: {e}"))?,
+        )
+        .await?;
+
+        // Use git2 to fetch and checkout the PR head
+        let git_repo = git2::Repository::open(checkout_dir)
+            .map_err(|e| format!("Failed to open git repository: {e}"))?;
+
+        // Add the remote if it doesn't exist, or get existing one
+        let remote_name = "origin";
+        let mut remote = if let Ok(r) = git_repo.find_remote(remote_name) {
+            r
+        } else {
+            git_repo
+                .remote(
+                    remote_name,
+                    &format!("https://github.com/{owner}/{repo}.git"),
+                )
+                .map_err(|e| format!("Failed to create remote: {e}"))?
+        };
+
+        // Fetch the PR head ref
+        let refspec = format!("+refs/pull/{number}/head:refs/remotes/origin/pr/{number}");
+        remote
+            .fetch(&[&refspec], None, None)
+            .map_err(|e| format!("Failed to fetch PR #{number}: {e}"))?;
+
+        // Create a local branch tracking the PR head
+        let branch_name = format!("pr-{number}-{}", pr.head.git_ref);
+        let pr_oid = git_repo
+            .refname_to_id(&format!("refs/remotes/origin/pr/{number}"))
+            .map_err(|e| format!("Failed to resolve PR reference: {e}"))?;
+
+        let pr_commit = git_repo
+            .find_commit(pr_oid)
+            .map_err(|e| format!("Failed to find PR commit: {e}"))?;
+
+        // Create or reset branch
+        if git_repo
+            .find_branch(&branch_name, git2::BranchType::Local)
+            .is_ok()
+        {
+            // Branch already exists, reset it via its reference
+            let branch = git_repo
+                .find_branch(&branch_name, git2::BranchType::Local)
+                .unwrap();
+            branch
+                .into_reference()
+                .set_target(pr_commit.id(), "Reset to PR head")
+                .map_err(|e| format!("Failed to reset branch: {e}"))?;
+        } else {
+            git_repo
+                .branch(&branch_name, &pr_commit, false)
+                .map_err(|e| format!("Failed to create branch: {e}"))?;
+        }
+
+        // Checkout the branch
+        git_repo
+            .set_head(&format!("refs/heads/{branch_name}"))
+            .map_err(|e| format!("Failed to set HEAD: {e}"))?;
+
+        git_repo
+            .checkout_head(Some(
+                git2::build::CheckoutBuilder::default()
+                    .force()
+                    .remove_untracked(false),
+            ))
+            .map_err(|e| format!("Failed to checkout: {e}"))?;
+
+        Ok(format!(
+            "Checked out PR #{number} ({}) locally",
+            pr.head.git_ref
+        ))
+    }
+
+    // ── Labels ──
+
+    pub async fn label_add(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        labels: Vec<String>,
+    ) -> Result<Vec<LabelInfo>, String> {
+        let url = format!(
+            "{}/repos/{}/{}/issues/{}/labels",
+            self.base_url, owner, repo, issue_number
+        );
+
+        let params = serde_json::json!({
+            "labels": labels,
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&params)
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {e}"))?;
+
+        handle_response(resp).await
+    }
+
+    pub async fn label_list(&self, owner: &str, repo: &str) -> Result<Vec<LabelInfo>, String> {
+        let url = format!("{}/repos/{}/{}/labels", self.base_url, owner, repo);
+        fetch_all_pages(&self.client, &url, &self.auth_header(), 100).await
+    }
+
+    // ── Releases ──
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn release_create(
+        &self,
+        owner: &str,
+        repo: &str,
+        tag_name: &str,
+        name: &str,
+        body: Option<&str>,
+        draft: bool,
+        prerelease: bool,
+    ) -> Result<ReleaseInfo, String> {
+        let url = format!("{}/repos/{}/{}/releases", self.base_url, owner, repo);
+
+        let mut params = serde_json::json!({
+            "tag_name": tag_name,
+            "name": name,
+            "draft": draft,
+            "prerelease": prerelease,
+        });
+        if let Some(b) = body {
+            params["body"] = serde_json::Value::String(b.to_string());
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&params)
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {e}"))?;
+
+        handle_response(resp).await
+    }
+
+    pub async fn release_list(&self, owner: &str, repo: &str) -> Result<Vec<ReleaseInfo>, String> {
+        let url = format!("{}/repos/{}/{}/releases", self.base_url, owner, repo);
+        fetch_all_pages(&self.client, &url, &self.auth_header(), 100).await
+    }
 }
 
 // ── Error helpers ──
@@ -355,6 +531,82 @@ async fn rate_limit_error(resp: reqwest::Response) -> String {
         .to_string();
     let body = resp.text().await.unwrap_or_default();
     format!("Rate limited (retry after {retry_after}s): {body}")
+}
+
+// ── Pagination helpers ──
+
+/// Fetch all pages from a paginated GitHub API endpoint, up to max_results.
+async fn fetch_all_pages<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    auth_header: &str,
+    max_results: usize,
+) -> Result<Vec<T>, String> {
+    let mut all_results = Vec::new();
+    let mut next_url = Some(url.to_string());
+
+    while let Some(url) = next_url.take() {
+        let resp = client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            if status.as_u16() == 403 || status.as_u16() == 429 {
+                return Err(rate_limit_error(resp).await);
+            } else if status.as_u16() == 404 {
+                return Err("Repository not found. Check visibility and permissions.".to_string());
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!("GitHub API error ({}): {}", status, body));
+            }
+        }
+
+        // Parse Link header for pagination
+        let link_header = resp
+            .headers()
+            .get("link")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // Parse response body
+        let page: Vec<T> = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+        let remaining = max_results.saturating_sub(all_results.len());
+        let take = page.len().min(remaining);
+        all_results.extend(page.into_iter().take(take));
+
+        if all_results.len() >= max_results {
+            break;
+        }
+
+        // Check for next page
+        if let Some(link) = link_header {
+            next_url = parse_next_link(&link);
+        }
+    }
+
+    Ok(all_results)
+}
+
+fn parse_next_link(link_header: &str) -> Option<String> {
+    // Link header format: <https://api.github.com/...?page=2>; rel="next", <...>; rel="last"
+    for part in link_header.split(',') {
+        if part.contains("rel=\"next\"") {
+            if let Some(start) = part.find('<') {
+                if let Some(end) = part.find('>') {
+                    return Some(part[start + 1..end].to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -873,5 +1125,493 @@ mod tests {
     fn test_new_client_success() {
         let client = GitHubClient::new("token", "https://api.github.com").unwrap();
         assert_eq!(client.base_url, "https://api.github.com");
+    }
+
+    // ── Pagination helpers ──
+
+    #[test]
+    fn test_parse_next_link_found() {
+        let link = r#"<https://api.github.com/repos/owner/repo/labels?page=2>; rel="next", <https://api.github.com/repos/owner/repo/labels?page=3>; rel="last""#;
+        let result = parse_next_link(link);
+        assert_eq!(
+            result,
+            Some("https://api.github.com/repos/owner/repo/labels?page=2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_next_link_not_found() {
+        let link = r#"<https://api.github.com/repos/owner/repo/labels?page=1>; rel="last""#;
+        let result = parse_next_link(link);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_next_link_empty() {
+        let result = parse_next_link("");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_next_link_no_rel() {
+        let link = r#"<https://api.github.com/repos/owner/repo/labels?page=2>"#;
+        let result = parse_next_link(link);
+        assert_eq!(result, None);
+    }
+
+    // ── label_add ──
+
+    #[tokio::test]
+    async fn test_label_add_single() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/issues/42/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "bug", "color": "d73a4a", "description": "Bug report"}
+            ])))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client
+            .label_add("owner", "repo", 42, vec!["bug".into()])
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let labels = result.unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "bug");
+        assert_eq!(labels[0].color, Some("d73a4a".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_label_add_multiple() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/issues/42/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "bug", "color": "d73a4a", "description": "Bug report"},
+                {"name": "feature", "color": "0e8a16", "description": "Feature request"}
+            ])))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client
+            .label_add("owner", "repo", 42, vec!["bug".into(), "feature".into()])
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let labels = result.unwrap();
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].name, "bug");
+        assert_eq!(labels[1].name, "feature");
+    }
+
+    // ── label_list ──
+
+    #[tokio::test]
+    async fn test_label_list_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "bug", "color": "d73a4a", "description": "Bug report"},
+                {"name": "feature", "color": "0e8a16", "description": "Feature request"}
+            ])))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client.label_list("owner", "repo").await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let labels = result.unwrap();
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].name, "bug");
+        assert_eq!(labels[1].name, "feature");
+    }
+
+    #[tokio::test]
+    async fn test_label_list_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client.label_list("owner", "repo").await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let labels = result.unwrap();
+        assert!(labels.is_empty());
+    }
+
+    // ── release_create ──
+
+    #[tokio::test]
+    async fn test_release_create_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "tag_name": "v1.0.0",
+                "name": "Release v1.0.0",
+                "body": "First release",
+                "draft": false,
+                "prerelease": false,
+                "html_url": "https://github.com/owner/repo/releases/tag/v1.0.0",
+                "created_at": "2024-01-01T00:00:00Z",
+                "published_at": "2024-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client
+            .release_create(
+                "owner",
+                "repo",
+                "v1.0.0",
+                "Release v1.0.0",
+                Some("First release"),
+                false,
+                false,
+            )
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let release = result.unwrap();
+        assert_eq!(release.tag_name, "v1.0.0");
+        assert_eq!(release.name, "Release v1.0.0");
+        assert!(!release.draft);
+        assert!(!release.prerelease);
+    }
+
+    #[tokio::test]
+    async fn test_release_create_draft() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "tag_name": "v2.0.0-beta",
+                "name": "Beta",
+                "body": null,
+                "draft": true,
+                "prerelease": false,
+                "html_url": "https://github.com/owner/repo/releases/tag/v2.0.0-beta",
+                "created_at": "2024-01-01T00:00:00Z",
+                "published_at": null
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client
+            .release_create("owner", "repo", "v2.0.0-beta", "Beta", None, true, false)
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let release = result.unwrap();
+        assert_eq!(release.tag_name, "v2.0.0-beta");
+        assert!(release.draft);
+        assert!(!release.prerelease);
+        assert!(release.body.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_release_create_prerelease() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "tag_name": "v1.1.0-rc1",
+                "name": "Release Candidate 1",
+                "body": "RC",
+                "draft": false,
+                "prerelease": true,
+                "html_url": "https://github.com/owner/repo/releases/tag/v1.1.0-rc1",
+                "created_at": "2024-01-01T00:00:00Z",
+                "published_at": null
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client
+            .release_create(
+                "owner",
+                "repo",
+                "v1.1.0-rc1",
+                "Release Candidate 1",
+                Some("RC"),
+                false,
+                true,
+            )
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let release = result.unwrap();
+        assert_eq!(release.tag_name, "v1.1.0-rc1");
+        assert!(!release.draft);
+        assert!(release.prerelease);
+    }
+
+    // ── release_list ──
+
+    #[tokio::test]
+    async fn test_release_list_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "tag_name": "v2.0.0",
+                    "name": "Version 2",
+                    "body": "Major release",
+                    "draft": false,
+                    "prerelease": false,
+                    "html_url": "https://github.com/owner/repo/releases/tag/v2.0.0",
+                    "created_at": "2024-02-01T00:00:00Z",
+                    "published_at": "2024-02-01T00:00:00Z"
+                },
+                {
+                    "tag_name": "v1.0.0",
+                    "name": "Version 1",
+                    "body": "Initial release",
+                    "draft": false,
+                    "prerelease": false,
+                    "html_url": "https://github.com/owner/repo/releases/tag/v1.0.0",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "published_at": "2024-01-01T00:00:00Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client.release_list("owner", "repo").await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let releases = result.unwrap();
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].tag_name, "v2.0.0");
+        assert_eq!(releases[1].tag_name, "v1.0.0");
+    }
+
+    #[tokio::test]
+    async fn test_release_list_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client.release_list("owner", "repo").await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let releases = result.unwrap();
+        assert!(releases.is_empty());
+    }
+
+    // ── pr_checkout ──
+
+    #[tokio::test]
+    async fn test_pr_checkout_success() {
+        let server = MockServer::start().await;
+        // Mock the GET /pulls/{number} endpoint
+        let head_sha = "abc123def4567890123456789012345678901234";
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "Feature branch",
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "body": null,
+                "head": {
+                    "label": "owner:feature-x",
+                    "ref": "feature-x",
+                    "sha": head_sha
+                },
+                "base": {
+                    "label": "owner:main",
+                    "ref": "main",
+                    "sha": "789012345678"
+                },
+                "draft": false,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "user": { "login": "testuser" }
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        // Create a bare repo to act as the "remote" origin
+        let remote_dir = tempfile::tempdir().unwrap();
+        let bare_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+
+        // Create an initial commit in the bare repo
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = bare_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            bare_repo.find_tree(oid).unwrap().id()
+        };
+        let initial_oid = bare_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &bare_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+
+        // Create a PR ref in the remote: refs/pull/42/head
+        bare_repo
+            .reference("refs/pull/42/head", initial_oid, true, "Create PR ref")
+            .unwrap();
+
+        // Create a local repo with the bare repo as origin
+        let tmp = tempfile::tempdir().unwrap();
+        let local_repo = git2::Repository::init(tmp.path()).unwrap();
+
+        // Create initial commit in local repo
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = local_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            local_repo.find_tree(oid).unwrap().id()
+        };
+        local_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &local_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+
+        // Set remote origin to point to the bare repo
+        local_repo
+            .remote("origin", remote_dir.path().to_str().unwrap())
+            .unwrap();
+
+        let result = client.pr_checkout("owner", "repo", 42, tmp.path()).await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("42"),
+            "Expected PR number in output, got: {msg}"
+        );
+        assert!(
+            msg.contains("feature-x"),
+            "Expected branch name in output, got: {msg}"
+        );
+
+        // Verify the branch was created
+        let branch = local_repo.find_branch("pr-42-feature-x", git2::BranchType::Local);
+        assert!(branch.is_ok(), "Expected branch pr-42-feature-x to exist");
+    }
+
+    // ── Pagination integration ──
+
+    #[tokio::test]
+    async fn test_fetch_all_pages_caps_at_max() {
+        let server = MockServer::start().await;
+        let page1_link = format!(
+            r#"<{}/repos/owner/repo/labels?page=2>; rel="next", <{}/repos/owner/repo/labels?page=2>; rel="last""#,
+            server.uri(),
+            server.uri()
+        );
+        let page2_link = format!(
+            r#"<{}/repos/owner/repo/labels?page=3>; rel="next", <{}/repos/owner/repo/labels?page=3>; rel="last""#,
+            server.uri(),
+            server.uri()
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", page1_link.as_str())
+                    .set_body_json(serde_json::json!([
+                        {"name": "bug", "color": "red"},
+                        {"name": "feature", "color": "green"},
+                    ])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .and(query_param("page", "2"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", page2_link.as_str())
+                    .set_body_json(serde_json::json!([
+                        {"name": "enhancement", "color": "blue"},
+                        {"name": "documentation", "color": "yellow"},
+                    ])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .and(query_param("page", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "urgent", "color": "orange"},
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+        let url = format!("{}/repos/owner/repo/labels", server.uri());
+
+        let result = fetch_all_pages::<LabelInfo>(
+            &client.client,
+            &url,
+            &client.auth_header(),
+            3, // cap at 3
+        )
+        .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let labels = result.unwrap();
+        assert_eq!(labels.len(), 3, "Should be capped at 3");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_all_pages_no_pagination() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "bug", "color": "red"},
+                {"name": "feature", "color": "green"},
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+        let url = format!("{}/repos/owner/repo/labels", server.uri());
+
+        let result =
+            fetch_all_pages::<LabelInfo>(&client.client, &url, &client.auth_header(), 100).await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let labels = result.unwrap();
+        assert_eq!(labels.len(), 2);
     }
 }
