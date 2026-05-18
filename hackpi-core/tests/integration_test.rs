@@ -46,7 +46,13 @@ async fn test_agent_basic_conversation() {
 
     tokio::time::timeout(Duration::from_secs(30), async {
         agent
-            .run("Say hello in one word.", &mut conversation, tx, signal, cancelled)
+            .run(
+                "Say hello in one word.",
+                &mut conversation,
+                tx,
+                signal,
+                cancelled,
+            )
             .await;
     })
     .await

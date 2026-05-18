@@ -1042,13 +1042,19 @@ mod tests {
     #[test]
     fn test_format_timestamp_negative_seconds_returns_pre_epoch() {
         let result = format_timestamp(-1);
-        assert_eq!(result, "pre-epoch", "negative timestamp should return pre-epoch, got: {result}");
+        assert_eq!(
+            result, "pre-epoch",
+            "negative timestamp should return pre-epoch, got: {result}"
+        );
     }
 
     #[test]
     fn test_format_timestamp_negative_large_returns_pre_epoch() {
         let result = format_timestamp(-999999999);
-        assert_eq!(result, "pre-epoch", "large negative timestamp should return pre-epoch, got: {result}");
+        assert_eq!(
+            result, "pre-epoch",
+            "large negative timestamp should return pre-epoch, got: {result}"
+        );
     }
 
     // ── Non-git directory error ──

@@ -217,8 +217,7 @@ impl Tool for SearchGrepTool {
                     let file_path = entry.path();
 
                     if let Ok(content) = std::fs::read_to_string(file_path) {
-                        let is_rust =
-                            file_path.extension().map(|e| e == "rs").unwrap_or(false);
+                        let is_rust = file_path.extension().map(|e| e == "rs").unwrap_or(false);
                         if is_rust {
                             let chunks = rust_chunker.chunk_file(file_path, &content);
                             if !chunks.is_empty() {
@@ -426,10 +425,7 @@ fn load_gitignore_patterns(root: &Path) -> Vec<globset::GlobMatcher> {
 }
 
 /// Apply the standard filter_entry logic used by all walkdir iterations.
-fn filter_entry(
-    e: &walkdir::DirEntry,
-    gitignore_patterns: &[globset::GlobMatcher],
-) -> bool {
+fn filter_entry(e: &walkdir::DirEntry, gitignore_patterns: &[globset::GlobMatcher]) -> bool {
     let name = e.file_name().to_str().unwrap_or("");
     if name.starts_with('.') && name != "." {
         return false;
@@ -437,9 +433,7 @@ fn filter_entry(
     if name == "node_modules" || name == "target" || name == "dist" || name == "build" {
         return false;
     }
-    if !gitignore_patterns.is_empty()
-        && gitignore_patterns.iter().any(|p| p.is_match(e.path()))
-    {
+    if !gitignore_patterns.is_empty() && gitignore_patterns.iter().any(|p| p.is_match(e.path())) {
         return false;
     }
     true

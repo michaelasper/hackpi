@@ -1838,7 +1838,10 @@ mod tests {
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf0 = terminal.backend().buffer();
         let text0: String = buf0.content.iter().map(|c| c.symbol()).collect();
-        assert!(text0.contains("first message"), "first message should be visible at offset 0");
+        assert!(
+            text0.contains("first message"),
+            "first message should be visible at offset 0"
+        );
 
         // With scroll_offset = 2, "first message" should be skipped
         app.scroll_offset = 2;
@@ -1846,7 +1849,10 @@ mod tests {
         let buf1 = terminal.backend().buffer();
         let text1: String = buf1.content.iter().map(|c| c.symbol()).collect();
         // "third message" should still be visible
-        assert!(text1.contains("third message"), "third message should be visible when scrolled");
+        assert!(
+            text1.contains("third message"),
+            "third message should be visible when scrolled"
+        );
     }
 
     #[test]
