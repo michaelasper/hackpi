@@ -1246,6 +1246,109 @@ transitions:
     }
 
     #[tokio::test]
+    async fn custom_workflow_enforces_transitions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = dir.path().join("tasks");
+        let workflows_dir = dir.path().join("workflows");
+        tokio::fs::create_dir_all(&workflows_dir)
+            .await
+            .expect("create dir");
+
+        // Custom workflow: todo → wip → done (no direct todo → done)
+        let yaml = r#"
+name: custom
+description: "Custom workflow"
+states:
+  - todo
+  - wip
+  - done
+transitions:
+  - from: todo
+    to:
+      - wip
+  - from: wip
+    to:
+      - done
+"#;
+        tokio::fs::write(workflows_dir.join("custom.yaml"), yaml)
+            .await
+            .expect("write");
+
+        let store = JsonTaskStore::with_workflows(tasks_dir, &workflows_dir)
+            .await
+            .expect("create store");
+
+        let task = store
+            .create(&NewTask {
+                title: "Custom task".to_string(),
+                workflow: Some("custom".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create");
+        assert_eq!(task.workflow, "custom");
+        assert_eq!(task.state, "todo");
+
+        // Valid transition: todo → wip (allowed in custom workflow)
+        let updated = store
+            .update(
+                &task.id,
+                &TaskUpdate {
+                    state: Some("wip".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("some");
+        assert_eq!(updated.state, "wip");
+
+        // Invalid transition: wip → todo (not in custom workflow transitions)
+        let result = store
+            .update(
+                &task.id,
+                &TaskUpdate {
+                    state: Some("todo".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(result.is_err(), "wip → todo should be invalid");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid transition"), "error: {err}");
+        assert!(
+            err.contains("custom"),
+            "error should mention workflow: {err}"
+        );
+
+        // Valid transition: wip → done (allowed in custom workflow)
+        let updated = store
+            .update(
+                &task.id,
+                &TaskUpdate {
+                    state: Some("done".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("some");
+        assert_eq!(updated.state, "done");
+
+        // Invalid transition from terminal state: done → wip
+        let result = store
+            .update(
+                &task.id,
+                &TaskUpdate {
+                    state: Some("wip".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(result.is_err(), "done → wip should be invalid");
+    }
+
+    #[tokio::test]
     async fn reload_workflows_adds_new_profiles() {
         let dir = tempfile::tempdir().expect("tempdir");
         let tasks_dir = dir.path().join("tasks");

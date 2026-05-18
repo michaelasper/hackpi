@@ -243,6 +243,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meta_corrupt_json_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = dir.path().join("tasks");
+        tokio::fs::create_dir_all(&tasks_dir)
+            .await
+            .expect("create dir");
+
+        // Write invalid JSON to _meta.json
+        tokio::fs::write(tasks_dir.join("_meta.json"), "not valid json {{")
+            .await
+            .expect("write");
+
+        let result = Meta::load(&tasks_dir).await;
+        assert!(result.is_err(), "corrupt meta.json should return an error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("_meta.json"),
+            "error should mention the meta file, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn id_generator_concurrent_allocation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let tasks_dir = dir.path().join("tasks");
