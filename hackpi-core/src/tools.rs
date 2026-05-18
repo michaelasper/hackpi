@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// Construct a permission string (Claude Code format `ToolName(pattern)`)
@@ -56,6 +57,7 @@ pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     guard_evaluator: Option<Arc<RwLock<GuardEvaluator>>>,
     permission_tx: Option<mpsc::UnboundedSender<PermissionRequest>>,
+    permission_timeout: Duration,
 }
 
 impl Default for ToolRegistry {
@@ -70,7 +72,13 @@ impl ToolRegistry {
             tools: HashMap::new(),
             guard_evaluator: None,
             permission_tx: None,
+            permission_timeout: Duration::from_secs(120),
         }
+    }
+
+    /// Override the default permission prompt timeout (used in tests).
+    pub fn set_permission_timeout(&mut self, timeout: Duration) {
+        self.permission_timeout = timeout;
     }
 
     pub fn set_guard_evaluator(&mut self, evaluator: Arc<RwLock<GuardEvaluator>>) {
@@ -144,22 +152,22 @@ impl ToolRegistry {
                         });
                     }
 
-                    // Await user response
-                    match resp_rx.await {
-                        Ok(PermissionDecision::AllowOnce) => { /* proceed */ }
-                        Ok(PermissionDecision::AllowSession) => {
+                    // Await user response with timeout
+                    match tokio::time::timeout(self.permission_timeout, resp_rx).await {
+                        Ok(Ok(PermissionDecision::AllowOnce)) => { /* proceed */ }
+                        Ok(Ok(PermissionDecision::AllowSession)) => {
                             let mut guard = evaluator.write().unwrap();
                             let session_key =
                                 format!("{}:{}", guard_reason.tool, guard_reason.details);
                             guard.record_decision(session_key, PermissionDecision::AllowSession);
                             /* proceed */
                         }
-                        Ok(PermissionDecision::Deny) => {
+                        Ok(Ok(PermissionDecision::Deny)) => {
                             return Some(ToolResult::SystemError {
                                 message: "Permission denied by user.".into(),
                             });
                         }
-                        Ok(PermissionDecision::AlwaysAllow) => {
+                        Ok(Ok(PermissionDecision::AlwaysAllow)) => {
                             let perm_string = permission_string(name, &params);
                             let guard = evaluator.read().unwrap();
                             if let Err(e) = guard
@@ -170,7 +178,7 @@ impl ToolRegistry {
                             }
                             /* proceed */
                         }
-                        Ok(PermissionDecision::AlwaysDeny) => {
+                        Ok(Ok(PermissionDecision::AlwaysDeny)) => {
                             let perm_string = permission_string(name, &params);
                             let guard = evaluator.read().unwrap();
                             if let Err(e) = guard
@@ -183,10 +191,15 @@ impl ToolRegistry {
                                 message: "Permission denied by user. Always deny saved.".into(),
                             });
                         }
-                        Err(_) => {
+                        Ok(Err(_)) => {
                             // Channel closed = deny
                             return Some(ToolResult::SystemError {
                                 message: "Permission prompt cancelled.".into(),
+                            });
+                        }
+                        Err(_) => {
+                            return Some(ToolResult::SystemError {
+                                message: "Permission prompt timed out after 120 seconds.".into(),
                             });
                         }
                     }
@@ -293,5 +306,104 @@ mod tests {
         let registry = make_registry();
         let result = registry.dispatch("echo", json!({}), &test_ctx()).await;
         assert!(matches!(result, Some(ToolResult::Success { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_permission_ask_timeout_returns_system_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Create a .hackpi/guardrails.json that asks for "echo" commands
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create .hackpi dir");
+        let guardrails_config = json!({
+            "command_gate": {
+                "ask": ["echo"]
+            }
+        });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&guardrails_config).unwrap(),
+        )
+        .expect("write guardrails config");
+
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+        evaluator.load_rules().expect("load rules");
+        let evaluator = Arc::new(RwLock::new(evaluator));
+
+        // Set up permission channel — keep rx alive but never respond
+        let (perm_tx, _perm_rx): (mpsc::UnboundedSender<PermissionRequest>, _) =
+            mpsc::unbounded_channel();
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+        registry.set_permission_tx(perm_tx);
+        registry.set_permission_timeout(Duration::from_millis(50));
+
+        // The "echo" command should trigger Ask, which will time out
+        let result = registry
+            .dispatch("echo", json!({"command": "echo test"}), &test_ctx())
+            .await;
+
+        match result {
+            Some(ToolResult::SystemError { message }) => {
+                assert!(
+                    message.contains("timed out"),
+                    "Expected timeout message, got: {message}"
+                );
+            }
+            other => {
+                panic!("Expected SystemError with timeout, got: {other:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_permission_ask_allow_once_executes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Create a .hackpi/guardrails.json that asks for "echo" commands
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create .hackpi dir");
+        let guardrails_config = json!({
+            "command_gate": {
+                "ask": ["echo"]
+            }
+        });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&guardrails_config).unwrap(),
+        )
+        .expect("write guardrails config");
+
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+        evaluator.load_rules().expect("load rules");
+        let evaluator = Arc::new(RwLock::new(evaluator));
+
+        // Set up permission channel and respond with AllowOnce
+        let (perm_tx, mut perm_rx): (mpsc::UnboundedSender<PermissionRequest>, _) =
+            mpsc::unbounded_channel();
+
+        // Spawn a task that receives the permission request and responds
+        tokio::spawn(async move {
+            if let Some((_id, _reason, resp_tx)) = perm_rx.recv().await {
+                let _ = resp_tx.send(PermissionDecision::AllowOnce);
+            }
+        });
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+        registry.set_permission_tx(perm_tx);
+        registry.set_permission_timeout(Duration::from_secs(120));
+
+        let result = registry
+            .dispatch("echo", json!({"command": "echo test"}), &test_ctx())
+            .await;
+
+        assert!(
+            matches!(result, Some(ToolResult::Success { .. })),
+            "Expected Success after AllowOnce, got: {result:?}"
+        );
     }
 }
