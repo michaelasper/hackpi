@@ -119,7 +119,7 @@ fn assistant_prefix() -> &'static str {
 }
 
 fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
-    let mut items: Vec<ListItem> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
 
     for entry in &app.conversation {
         let prefix = match entry.role.as_str() {
@@ -136,7 +136,7 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
 
         if !entry.text.is_empty() {
             let content = format!("{prefix}{}", entry.text);
-            items.push(ListItem::new(Line::from(Span::styled(content, role_style))));
+            lines.push(Line::from(Span::styled(content, role_style)));
         }
 
         for tc in &entry.tool_calls {
@@ -153,7 +153,14 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
 
             let title = format!(" {status_symbol} {name} ", name = tc.name);
 
-            let mut card_lines: Vec<Line> = Vec::new();
+            // Push title BEFORE result content so it appears right above, not at the top
+            lines.push(Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(border_color)
+                    .add_modifier(Modifier::BOLD),
+            )));
+
             if let ToolCallStatus::Done(result) = &tc.status {
                 let result_content = match result {
                     hackpi_core::tools::ToolResult::Success { content } => content.clone(),
@@ -163,45 +170,35 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                     hackpi_core::tools::ToolResult::Timeout => "Timed out.".into(),
                     hackpi_core::tools::ToolResult::Cancelled => "Cancelled.".into(),
                 };
-                for line in result_content.lines() {
-                    card_lines.push(Line::from(Span::raw(line.to_string())));
+                for line_content in result_content.lines() {
+                    lines.push(Line::from(Span::raw(line_content.to_string())));
                 }
             } else {
-                card_lines.push(Line::from(Span::styled(
+                lines.push(Line::from(Span::styled(
                     "Running...",
                     Style::default().fg(Color::Yellow),
                 )));
             }
-
-            card_lines.insert(
-                0,
-                Line::from(Span::styled(
-                    title,
-                    Style::default()
-                        .fg(border_color)
-                        .add_modifier(Modifier::BOLD),
-                )),
-            );
-
-            items.push(ListItem::new(card_lines.clone()));
         }
 
-        items.push(ListItem::new(Line::from("")));
+        lines.push(Line::from(""));
     }
 
-    let visible_items: &[ListItem] = if app.scroll_offset > 0 && app.scroll_offset < items.len() {
-        &items[app.scroll_offset..]
+    let visible_lines: &[Line] = if app.scroll_offset > 0 && app.scroll_offset < lines.len() {
+        &lines[app.scroll_offset..]
     } else {
-        &items
+        &lines
     };
 
-    let list = List::new(visible_items.to_vec()).block(
-        Block::default()
-            .borders(Borders::NONE)
-            .style(Style::default()),
-    );
+    let paragraph = Paragraph::new(Text::from(visible_lines.to_vec()))
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default()),
+        )
+        .wrap(Wrap { trim: false });
 
-    frame.render_widget(list, area);
+    frame.render_widget(paragraph, area);
 }
 
 /// Color for a task state badge.
@@ -634,6 +631,7 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::TuiEvent;
 
     #[test]
     fn test_tab_header_shows_version_and_usage() {
@@ -1093,6 +1091,124 @@ mod tests {
 
         // Should not panic
         terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    // ── Tool call title positioning tests ────────────────────────────────
+
+    #[test]
+    fn test_tool_call_title_appears_after_user_text_not_at_top() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+
+        // Add a user message
+        app.handle_event(TuiEvent::Submit("hello".into()));
+        // Add an assistant tool call with result
+        app.handle_event(TuiEvent::ToolCall {
+            id: "tc1".into(),
+            name: "read".into(),
+        });
+        app.handle_event(TuiEvent::ToolResult {
+            id: "tc1".into(),
+            result: hackpi_core::tools::ToolResult::Success {
+                content: "file content".into(),
+            },
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // Find the position of the user prefix and the tool call title
+        let user_pos = cell_str.find("○ me:").expect("should contain user prefix");
+        let title_pos = cell_str
+            .find("read")
+            .expect("should contain tool call name");
+
+        // The tool call title should appear AFTER the user text,
+        // not before it (which would happen if insert(0) bug is present)
+        assert!(
+            title_pos > user_pos,
+            "tool call title 'read' should appear after user text '○ me:', \
+             but title_pos={title_pos} <= user_pos={user_pos}. \
+             This means insert(0) is pushing the title to the top."
+        );
+    }
+
+    #[test]
+    fn test_multiple_tool_calls_keep_correct_ordering() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+
+        // First conversation: user + assistant with tool call
+        app.handle_event(TuiEvent::Submit("first message".into()));
+        app.handle_event(TuiEvent::StreamChunk("first response".into()));
+        app.handle_event(TuiEvent::Done);
+
+        // Second conversation: user + assistant with two tool calls
+        app.handle_event(TuiEvent::Submit("second message".into()));
+        app.handle_event(TuiEvent::ToolCall {
+            id: "tc1".into(),
+            name: "read".into(),
+        });
+        app.handle_event(TuiEvent::ToolResult {
+            id: "tc1".into(),
+            result: hackpi_core::tools::ToolResult::Success {
+                content: "read result".into(),
+            },
+        });
+        app.handle_event(TuiEvent::ToolCall {
+            id: "tc2".into(),
+            name: "edit".into(),
+        });
+        app.handle_event(TuiEvent::ToolResult {
+            id: "tc2".into(),
+            result: hackpi_core::tools::ToolResult::Success {
+                content: "edit result".into(),
+            },
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // First user message and response should appear before second conversation
+        let first_user_pos = cell_str.find("first message").expect("first message");
+        let first_resp_pos = cell_str.find("first response").expect("first response");
+        let second_user_pos = cell_str.find("second message").expect("second message");
+        let tc1_pos = cell_str.find("read").expect("tool call 'read'");
+        let tc2_pos = cell_str.find("edit").expect("tool call 'edit'");
+
+        assert!(
+            first_resp_pos > first_user_pos,
+            "first response after first user"
+        );
+        assert!(
+            second_user_pos > first_resp_pos,
+            "second message after first response"
+        );
+        assert!(
+            tc1_pos > second_user_pos,
+            "first tool call title after second user message"
+        );
+        assert!(tc2_pos > tc1_pos, "second tool call title after first");
     }
 
     // ── Task detail view tests ──────────────────────────────────────────

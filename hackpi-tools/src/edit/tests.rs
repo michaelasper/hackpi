@@ -58,6 +58,70 @@ fn test_line_hash_zero_seed_for_alphanumeric_lines() {
     );
 }
 
+#[test]
+fn test_line_hash_trailing_whitespace_matches_trimmed_non_alphanumeric() {
+    // Spec §94: "Line hashing operates on trimmed content"
+    // A non-alphanumeric line with trailing whitespace must produce the
+    // same hash as the trimmed version.
+    let trimmed = line_hash("}", 5);
+    let trailing = line_hash("}   ", 5);
+    let leading = line_hash("   }", 5);
+    let both = line_hash("  }  ", 5);
+    assert_eq!(
+        trimmed, trailing,
+        "trailing whitespace must not change hash"
+    );
+    assert_eq!(trimmed, leading, "leading whitespace must not change hash");
+    assert_eq!(trimmed, both, "both-side whitespace must not change hash");
+}
+
+#[test]
+fn test_line_hash_trailing_whitespace_matches_trimmed_alphanumeric() {
+    // Same for alphanumeric lines: "// comment  " must hash same as "// comment"
+    let trimmed = line_hash("// comment", 5);
+    let trailing = line_hash("// comment  ", 5);
+    let leading = line_hash("  // comment", 5);
+    let both = line_hash("  // comment  ", 5);
+    assert_eq!(
+        trimmed, trailing,
+        "trailing whitespace must not change hash"
+    );
+    assert_eq!(trimmed, leading, "leading whitespace must not change hash");
+    assert_eq!(trimmed, both, "both-side whitespace must not change hash");
+}
+
+#[test]
+fn test_line_hash_trailing_whitespace_on_empty_looking_line() {
+    // An all-whitespace line should trim to empty string.
+    // Empty string has no alphanumeric chars → uses line_num seed.
+    let h1 = line_hash("", 3);
+    let h2 = line_hash("   ", 3);
+    let h3 = line_hash("\t  ", 3);
+    assert_eq!(h1, h2, "whitespace-only line must hash same as empty line");
+    assert_eq!(h1, h3, "tab-whitespace line must hash same as empty line");
+}
+
+#[test]
+fn test_resolve_anchor_matches_hash_with_trailing_whitespace() {
+    // Integration check: resolve_anchor must match a hash produced from
+    // a line with trailing whitespace, just like from the read tool output.
+    let raw_line = "}  ".to_string(); // line as read from disk
+    let lines = vec![raw_line.clone()];
+
+    // Simulate what the read tool outputs: hash of the untrimmed line
+    let read_hash = line_hash(&raw_line, 1);
+    let anchor = format!("1#{read_hash}");
+
+    // resolve_anchor calls line_hash on the stored line (which trims internally)
+    let result = resolve_anchor(&anchor, &lines);
+    assert!(
+        result.is_some(),
+        "anchor '{anchor}' for line with trailing whitespace '{}' must resolve",
+        raw_line.trim()
+    );
+    assert_eq!(result.unwrap(), 0);
+}
+
 // ── contains_patch_markers tests ──────────────────────────────
 
 #[test]
