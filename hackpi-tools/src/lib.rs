@@ -2,6 +2,7 @@ pub mod bash;
 pub mod edit;
 pub mod path_jail;
 pub mod read;
+pub mod search_bm25;
 pub mod search_grep;
 pub mod write;
 
