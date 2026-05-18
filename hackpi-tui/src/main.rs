@@ -34,6 +34,7 @@ You are hackpi, a coding agent built with Rust. You help users write, debug, and
 - git_read: inspect repository state (status, diff, log, branches, remotes)
 - git_write: modify repository (add, commit, push, pull, checkout, branch, merge, rebase, stash)
 - github: GitHub operations (create/list PRs, issues, releases, comments)
+- task: manage tasks (create, list, show, update, transition, block, unblock)
 
 # Workflow
 1. Always read a file before editing it.
@@ -42,6 +43,7 @@ You are hackpi, a coding agent built with Rust. You help users write, debug, and
 4. For new files, use write; for existing files, use edit with LINE#HASH anchors from read output.
 5. When making commits, always git_read status first to verify changes.
 6. When creating PRs, always push first, then use github pr_create.
+7. Use the task tool to track your work items. Create tasks for significant features, update their state as you progress.
 
 # Rules
 - Never overwrite existing files with write — use edit instead.
@@ -115,6 +117,15 @@ async fn main() -> anyhow::Result<()> {
     register_all_tools(&mut tool_registry, &workspace_root);
     let vcs_config = VcsConfig::from_env(&workspace_root);
     register_vcs_tools(&mut tool_registry, &workspace_root, &vcs_config);
+
+    // Register task tool using the same store as slash commands
+    if let Some(ref task_store) = app.task_store {
+        let task_store_dyn: Arc<dyn hackpi_tasks::TaskStore> =
+            Arc::clone(task_store) as Arc<dyn hackpi_tasks::TaskStore>;
+        let task_tool = hackpi_tasks::TaskTool::new(task_store_dyn);
+        task_tool.register(&mut tool_registry);
+    }
+
     let tools = Arc::new(tool_registry);
 
     terminal.clear()?;

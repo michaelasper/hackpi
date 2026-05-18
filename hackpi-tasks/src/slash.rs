@@ -259,7 +259,7 @@ pub async fn handle_task_command(cmd: &TaskCommand, store: &dyn TaskStore) -> Re
 }
 
 /// Format a task for full detail display.
-fn format_task_detail(task: &crate::task::Task) -> String {
+pub fn format_task_detail(task: &crate::task::Task) -> String {
     let mut lines = Vec::new();
     lines.push(format!("═══ {} ═══", task.id));
     lines.push(format!("Title:   {}", task.title));
