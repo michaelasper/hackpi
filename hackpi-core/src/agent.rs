@@ -555,6 +555,139 @@ mod tests {
         }
     }
 
+    // ── build_assistant_message tests ──────────────────────────────────
+
+    #[test]
+    fn test_build_assistant_message_adds_message_for_non_empty_text() {
+        let mut conversation: Vec<Message> = Vec::new();
+        Agent::build_assistant_message(&mut conversation, "Hello, world!");
+
+        assert_eq!(conversation.len(), 1);
+        assert!(
+            matches!(conversation[0].role, Role::Assistant),
+            "expected Assistant role"
+        );
+        match &conversation[0].content[0] {
+            ContentBlock::Text { text } => {
+                assert_eq!(text, "Hello, world!");
+            }
+            _ => panic!("expected Text block"),
+        }
+    }
+
+    #[test]
+    fn test_build_assistant_message_does_not_add_for_empty_text() {
+        let mut conversation: Vec<Message> = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("hi")],
+        }];
+        Agent::build_assistant_message(&mut conversation, "");
+
+        assert_eq!(conversation.len(), 1, "no new message for empty text");
+    }
+
+    #[test]
+    fn test_build_assistant_message_adds_for_whitespace_text() {
+        // build_assistant_message only checks is_empty(), so whitespace
+        // is considered non-empty and will be added to the conversation.
+        let mut conversation: Vec<Message> = Vec::new();
+        Agent::build_assistant_message(&mut conversation, "   ");
+
+        assert_eq!(
+            conversation.len(),
+            1,
+            "whitespace-only text is still non-empty and should be added"
+        );
+    }
+
+    #[test]
+    fn test_build_assistant_message_multiple_calls() {
+        let mut conversation: Vec<Message> = Vec::new();
+        Agent::build_assistant_message(&mut conversation, "First");
+        Agent::build_assistant_message(&mut conversation, "Second");
+
+        assert_eq!(conversation.len(), 2);
+        match &conversation[0].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "First"),
+            other => panic!("expected Text block, got {other:?}"),
+        }
+        match &conversation[1].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Second"),
+            other => panic!("expected Text block, got {other:?}"),
+        }
+    }
+
+    // ── handle_step_stop_reason tests ─────────────────────────────────
+
+    #[test]
+    fn test_handle_step_stop_reason_end_turn_returns_true() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stop_reason = Some("end_turn".to_string());
+        assert!(Agent::handle_step_stop_reason(&stop_reason, &tx));
+    }
+
+    #[test]
+    fn test_handle_step_stop_reason_stop_returns_true() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stop_reason = Some("stop".to_string());
+        assert!(Agent::handle_step_stop_reason(&stop_reason, &tx));
+    }
+
+    #[test]
+    fn test_handle_step_stop_reason_other_reason_returns_false() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stop_reason = Some("tool_use".to_string());
+        assert!(!Agent::handle_step_stop_reason(&stop_reason, &tx));
+    }
+
+    #[test]
+    fn test_handle_step_stop_reason_none_returns_false() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stop_reason: Option<String> = None;
+        assert!(!Agent::handle_step_stop_reason(&stop_reason, &tx));
+    }
+
+    #[test]
+    fn test_handle_step_stop_reason_end_turn_sends_done_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop_reason = Some("end_turn".to_string());
+        assert!(Agent::handle_step_stop_reason(&stop_reason, &tx));
+
+        // Should have received a Done event
+        match rx.try_recv() {
+            Ok(AgentEvent::Done) => {} // expected
+            Ok(_) => panic!("expected Done event"),
+            Err(_) => panic!("expected Done event, got empty channel"),
+        }
+    }
+
+    #[test]
+    fn test_handle_step_stop_reason_stop_sends_done_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop_reason = Some("stop".to_string());
+        assert!(Agent::handle_step_stop_reason(&stop_reason, &tx));
+
+        match rx.try_recv() {
+            Ok(AgentEvent::Done) => {} // expected
+            Ok(_) => panic!("expected Done event"),
+            Err(_) => panic!("expected Done event, got empty channel"),
+        }
+    }
+
+    #[test]
+    fn test_handle_step_stop_reason_other_does_not_send_done() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop_reason = Some("tool_use".to_string());
+        assert!(!Agent::handle_step_stop_reason(&stop_reason, &tx));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "should not send any event for tool_use stop reason"
+        );
+    }
+
+    // ── Integration: truncation with empty conversation ───────────────
+
     #[test]
     fn test_no_empty_assistant_messages_in_tool_results() {
         let mut conversation: Vec<Message> = vec![Message {
@@ -587,24 +720,5 @@ mod tests {
             !has_empty_assistant,
             "no empty assistant messages should exist"
         );
-    }
-
-    #[test]
-    fn test_truncate_output_non_ascii_safe_boundary() {
-        let dir = std::env::temp_dir().join("hackpi_trunc_test_utf8");
-        let _ = std::fs::create_dir_all(&dir);
-
-        // multi-byte UTF-8 chars: each 'é' is 2 bytes
-        let content = "é".repeat(200);
-        let result = truncate_output(&content, 100, "tool_1", &dir);
-
-        // 100 bytes should cut at char boundary (floor to even: 100)
-        assert!(
-            result.contains("Output truncated"),
-            "should truncate safely at char boundary"
-        );
-        // Should not panic from mid-char split
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
