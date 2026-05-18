@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -41,10 +42,11 @@ async fn test_agent_basic_conversation() {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (_cancel_tx, signal) = watch::channel(false);
+    let cancelled = Arc::new(AtomicBool::new(false));
 
     tokio::time::timeout(Duration::from_secs(30), async {
         agent
-            .run("Say hello in one word.", &mut conversation, tx, signal)
+            .run("Say hello in one word.", &mut conversation, tx, signal, cancelled)
             .await;
     })
     .await

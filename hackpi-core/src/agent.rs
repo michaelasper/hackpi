@@ -4,6 +4,7 @@ use crate::types::{ContentBlock, Message, Role, Usage};
 use hackpi_guardrails::{GuardReason, PermissionDecision};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -123,7 +124,7 @@ impl Agent {
     async fn process_sse_events(
         api_rx: &mut mpsc::UnboundedReceiver<ApiEvent>,
         tx: &mpsc::UnboundedSender<AgentEvent>,
-        signal: &tokio::sync::watch::Receiver<bool>,
+        cancelled: &AtomicBool,
     ) -> Option<SseEvents> {
         let mut current_text = String::new();
         let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
@@ -134,7 +135,7 @@ impl Agent {
         let mut usage: Option<Usage> = None;
 
         while let Some(event) = api_rx.recv().await {
-            if *signal.borrow() {
+            if cancelled.load(Ordering::Relaxed) {
                 tx.send(AgentEvent::Done).ok();
                 return None;
             }
@@ -337,6 +338,7 @@ impl Agent {
         conversation: &mut Vec<Message>,
         tx: mpsc::UnboundedSender<AgentEvent>,
         signal: tokio::sync::watch::Receiver<bool>,
+        cancelled: Arc<AtomicBool>,
     ) {
         conversation.push(Message {
             role: Role::User,
@@ -344,7 +346,7 @@ impl Agent {
         });
 
         for _turn in 0..MAX_TURNS {
-            if *signal.borrow() {
+            if cancelled.load(Ordering::Relaxed) {
                 tx.send(AgentEvent::Done).ok();
                 return;
             }
@@ -367,7 +369,7 @@ impl Agent {
             }
 
             // Process SSE events from the API stream
-            let events = match Self::process_sse_events(&mut api_rx, &tx, &signal).await {
+            let events = match Self::process_sse_events(&mut api_rx, &tx, &cancelled).await {
                 Some(events) => events,
                 None => return,
             };

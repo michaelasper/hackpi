@@ -17,6 +17,7 @@ use hackpi_tui::ui;
 use hackpi_vcs::{register_vcs_tools, VcsConfig};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
@@ -89,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (permission_tx, mut permission_rx) = mpsc::unbounded_channel::<PermissionRequest>();
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+    let cancelled = Arc::new(AtomicBool::new(false));
 
     let mut app = App::new();
 
@@ -276,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
                             KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                                 if matches!(app.state, AppState::Generating) {
                                     signal_tx.send(true).ok();
+                                    cancelled.store(true, Ordering::Relaxed);
                                     app.state = AppState::Interrupted;
                                 }
                             }
@@ -381,6 +384,7 @@ async fn main() -> anyhow::Result<()> {
                                 tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
 
                                 let signal_rx_clone = signal_rx.clone();
+                                let cancelled_clone = Arc::clone(&cancelled);
                                 let agent_tx_clone = agent_tx.clone();
 
                                 let agent_instance = Agent::new(
@@ -396,7 +400,13 @@ async fn main() -> anyhow::Result<()> {
                                 tokio::spawn(async move {
                                     let mut conv_guard = conversation_clone.lock().await;
                                     agent_instance
-                                        .run(&submitted, &mut conv_guard, tx_for_agent, signal_rx_clone)
+                                        .run(
+                                            &submitted,
+                                            &mut conv_guard,
+                                            tx_for_agent,
+                                            signal_rx_clone,
+                                            cancelled_clone,
+                                        )
                                         .await;
                                 });
                             }
