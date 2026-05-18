@@ -15,23 +15,18 @@ pub enum Role {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "type")]
 pub enum ContentBlock {
-    Text {
-        #[serde(rename = "type")]
-        block_type: String,
-        text: String,
-    },
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
     ToolUse {
-        #[serde(rename = "type")]
-        block_type: String,
         id: String,
         name: String,
         input: Value,
     },
+    #[serde(rename = "tool_result")]
     ToolResult {
-        #[serde(rename = "type")]
-        block_type: String,
         tool_use_id: String,
         content: String,
     },
@@ -39,15 +34,11 @@ pub enum ContentBlock {
 
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
-        ContentBlock::Text {
-            block_type: "text".into(),
-            text: text.into(),
-        }
+        ContentBlock::Text { text: text.into() }
     }
 
     pub fn tool_call(id: impl Into<String>, name: impl Into<String>, input: Value) -> Self {
         ContentBlock::ToolUse {
-            block_type: "tool_use".into(),
             id: id.into(),
             name: name.into(),
             input,
@@ -56,7 +47,6 @@ impl ContentBlock {
 
     pub fn tool_result(id: impl Into<String>, content: impl Into<String>) -> Self {
         ContentBlock::ToolResult {
-            block_type: "tool_result".into(),
             tool_use_id: id.into(),
             content: content.into(),
         }
