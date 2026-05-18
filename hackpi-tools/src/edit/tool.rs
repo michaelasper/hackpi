@@ -6,7 +6,6 @@ use tokio::fs;
 
 use super::anchor::{
     contains_patch_markers, generate_anchor_hint, make_updated_anchors, resolve_anchor,
-    resolve_anchor_range,
 };
 use super::hash::line_hash;
 use super::ops::{deserialize_edit_ops, op_anchor_line, AppliedEdit, EditOp};
@@ -139,7 +138,7 @@ impl Tool for EditTool {
                         };
                     }
                     if let Some(end_pos) = end {
-                        if resolve_anchor_range(end_pos, &lines).is_none() {
+                        if resolve_anchor(end_pos, &lines).is_none() {
                             let hint = generate_anchor_hint(&lines, pos);
                             return ToolResult::SystemError {
                                 message: format!(
