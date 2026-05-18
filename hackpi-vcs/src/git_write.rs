@@ -19,16 +19,36 @@ impl GitWriteTool {
     }
 
     /// Create remote callbacks for push/pull/fetch with SSH agent and HTTPS fallback.
+    ///
+    /// Credential resolution order:
+    /// 1. SSH agent (for SSH_KEY credential types)
+    /// 2. `GIT_USERNAME` / `GIT_PASSWORD` environment variables (for HTTPS)
+    /// 3. Clear error — never falls through to `Cred::default()` which would
+    ///    prompt on stdin and hang the TUI in raw mode.
     fn create_remote_callbacks<'a>() -> git2::RemoteCallbacks<'a> {
         let mut callbacks = git2::RemoteCallbacks::new();
         callbacks.credentials(|_url, username_from_url, allowed_types| {
             if allowed_types.contains(git2::CredentialType::SSH_KEY) {
-                git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-            } else if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
-                git2::Cred::default()
-            } else {
-                Err(git2::Error::from_str("No authentication method available"))
+                return git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"));
             }
+
+            if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+                let username = std::env::var("GIT_USERNAME")
+                    .ok()
+                    .or_else(|| username_from_url.map(|s| s.to_string()));
+                let password = std::env::var("GIT_PASSWORD").ok();
+
+                if let (Some(user), Some(pass)) = (username, password) {
+                    return git2::Cred::userpass_plaintext(&user, &pass);
+                }
+
+                return Err(git2::Error::from_str(
+                    "No credentials available. Set GIT_USERNAME and GIT_PASSWORD \
+                     environment variables for HTTPS authentication, or use SSH agent.",
+                ));
+            }
+
+            Err(git2::Error::from_str("No authentication method available"))
         });
         callbacks
     }
