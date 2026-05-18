@@ -1,5 +1,5 @@
 [workspace]
-members = ["hackpi-core", "hackpi-tools", "hackpi-tui", "hackpi-guardrails", "hackpi-vcs"]
+members = ["hackpi-core", "hackpi-tools", "hackpi-tui", "hackpi-guardrails", "hackpi-vcs", "hackpi-tasks"]
 resolver = "2"
 
 [workspace.package]
@@ -24,3 +24,4 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 walkdir = "2"
 git2 = "0.19"
+chrono = { version = "0.4", features = ["serde"] }
