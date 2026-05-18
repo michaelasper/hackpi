@@ -17,7 +17,6 @@ const MAX_CONTEXT: usize = 10;
 
 pub struct SearchGrepTool {
     workspace_root: std::path::PathBuf,
-    cached_files: std::sync::Mutex<Option<Vec<std::path::PathBuf>>>,
     bm25: std::sync::Mutex<Option<Bm25Index>>,
 }
 
@@ -25,46 +24,8 @@ impl SearchGrepTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
         Self {
             workspace_root,
-            cached_files: std::sync::Mutex::new(None),
             bm25: std::sync::Mutex::new(None),
         }
-    }
-
-    /// Build (or retrieve from cache) the list of files in the workspace.
-    /// Cached only when no glob filter is used (full workspace searches).
-    fn get_file_list(&self, include_glob: Option<&str>) -> Vec<std::path::PathBuf> {
-        // When a glob filter is active, always walk (different glob = different results)
-        if include_glob.is_some() {
-            let mut files = Vec::new();
-            let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
-            walkdir(&self.workspace_root, &mut files, None, &gitignore_patterns);
-            // Still apply glob filtering for non-cached path
-            if let Some(glob) = include_glob {
-                let matcher = globset::Glob::new(glob).map(|g| g.compile_matcher()).ok();
-                if let Some(m) = matcher {
-                    files.retain(|p| m.is_match(p));
-                }
-            }
-            return files;
-        }
-
-        // For unqualified searches, use cached file list
-        if let Ok(mut cache) = self.cached_files.lock() {
-            if let Some(ref files) = *cache {
-                return files.clone();
-            }
-            let mut files = Vec::new();
-            let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
-            walkdir(&self.workspace_root, &mut files, None, &gitignore_patterns);
-            *cache = Some(files.clone());
-            return files;
-        }
-
-        // Fallback: no cache available
-        let mut files = Vec::new();
-        let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
-        walkdir(&self.workspace_root, &mut files, None, &gitignore_patterns);
-        files
     }
 }
 
@@ -152,10 +113,34 @@ impl Tool for SearchGrepTool {
         let mut match_count = 0;
         let mut truncated = false;
 
-        // get_file_list handles caching and loads gitignore patterns once
-        let paths = self.get_file_list(include_glob.as_deref());
+        let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
 
-        for file_path in &paths {
+        // Walk the directory tree lazily, searching files as they are discovered
+        // instead of collecting all paths into memory first.
+        let glob_matcher = include_glob
+            .as_ref()
+            .and_then(|g| globset::Glob::new(g).ok())
+            .map(|g| g.compile_matcher());
+
+        let walk_root = self.workspace_root.clone();
+        for entry in walkdir::WalkDir::new(&walk_root)
+            .into_iter()
+            .filter_entry(|e| filter_entry(e, &gitignore_patterns))
+            .flatten()
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let file_path = entry.path().to_path_buf();
+
+            // Apply glob filter
+            if let Some(ref m) = glob_matcher {
+                if !m.is_match(&file_path) {
+                    continue;
+                }
+            }
+
             if match_count >= MAX_MATCHES {
                 truncated = true;
                 break;
@@ -166,7 +151,7 @@ impl Tool for SearchGrepTool {
 
             let result = searcher.search_path(
                 &matcher,
-                file_path,
+                &file_path,
                 UTF8(|lnum, line| {
                     if match_count >= MAX_MATCHES {
                         return Ok(false);
@@ -202,7 +187,7 @@ impl Tool for SearchGrepTool {
             }
 
             if file_has_match {
-                file_matches.insert(file_path.clone(), file_output);
+                file_matches.insert(file_path, file_output);
             }
         }
 
@@ -219,24 +204,34 @@ impl Tool for SearchGrepTool {
                 let rust_chunker = RustChunker::new();
                 let generic_chunker = GenericChunker::new();
 
-                for file_path in &paths {
+                // Walk again to build the BM25 index (infrequent operation)
+                let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
+                for entry in walkdir::WalkDir::new(&self.workspace_root)
+                    .into_iter()
+                    .filter_entry(|e| filter_entry(e, &gitignore_patterns))
+                    .flatten()
+                {
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    let file_path = entry.path();
+
                     if let Ok(content) = std::fs::read_to_string(file_path) {
-                        // Use chunker for .rs files, generic chunker for others
-                        let is_rust = file_path.extension().map(|e| e == "rs").unwrap_or(false);
+                        let is_rust =
+                            file_path.extension().map(|e| e == "rs").unwrap_or(false);
                         if is_rust {
                             let chunks = rust_chunker.chunk_file(file_path, &content);
                             if !chunks.is_empty() {
                                 new_index.add_chunked_document(file_path, &chunks);
-                                continue; // skip whole-file indexing when chunked
+                                continue;
                             }
                         } else {
                             let chunks = generic_chunker.chunk_file(file_path, &content);
                             if !chunks.is_empty() {
                                 new_index.add_chunked_document(file_path, &chunks);
-                                continue; // skip whole-file indexing when chunked
+                                continue;
                             }
                         }
-                        // Fallback: index the whole file if chunking produced no chunks
                         new_index.add_document(file_path, &content);
                     }
                 }
@@ -287,28 +282,26 @@ impl Tool for SearchGrepTool {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
-                // Build ordered list: scored files first by BM25 score, then unscored
+                // Build ordered list: scored files first by BM25 score,
+                // then unscored files from file_matches
                 let mut ordered: Vec<(std::path::PathBuf, String)> = Vec::new();
 
-                // Add scored files first (already sorted by best-chunk score descending)
+                // Add scored files first
                 for (src_path, _) in &ranked_sources {
                     if let Some(content) = file_matches.remove(src_path) {
                         ordered.push((src_path.clone(), content));
                     }
                 }
 
-                // Add remaining (unscored) files in walk order
-                for file_path in &paths {
-                    if let Some(content) = file_matches.remove(file_path) {
-                        ordered.push((file_path.clone(), content));
-                    }
+                // Add remaining (unscored) files
+                for (path, content) in file_matches.drain() {
+                    ordered.push((path, content));
                 }
 
                 // Format output with re-ranked order
                 let mut output = String::new();
                 let mut first_file = true;
                 for (src_path, (_, chunk_type, chunk_name)) in &ranked_sources {
-                    // Find the content for this source file
                     let content = ordered
                         .iter()
                         .find(|(p, _)| p == src_path)
@@ -320,7 +313,6 @@ impl Tool for SearchGrepTool {
                     }
                     first_file = false;
 
-                    // Include chunk info in header when available
                     let header = match (chunk_type, chunk_name) {
                         (Some(typ), Some(name)) if !name.is_empty() => {
                             format!("--- {}: {} {}() ---", src_path.display(), typ, name)
@@ -359,16 +351,35 @@ impl Tool for SearchGrepTool {
             }
         }
 
-        // Without BM25: format output in walk order (original behavior)
+        // Without BM25: format output in walk order
         let mut output = String::new();
         let mut first_file = true;
-        for file_path in &paths {
-            if let Some(content) = file_matches.remove(file_path) {
+
+        // Determine walk order for output formatting
+        let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
+        let walk_root = self.workspace_root.clone();
+        for entry in walkdir::WalkDir::new(&walk_root)
+            .into_iter()
+            .filter_entry(|e| filter_entry(e, &gitignore_patterns))
+            .flatten()
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            // Apply glob filter
+            if let Some(ref m) = glob_matcher {
+                if !m.is_match(entry.path()) {
+                    continue;
+                }
+            }
+
+            if let Some(content) = file_matches.remove(entry.path()) {
                 if !first_file {
                     output.push('\n');
                 }
                 first_file = false;
-                output.push_str(&format!("--- {} ---\n", file_path.display()));
+                output.push_str(&format!("--- {} ---\n", entry.path().display()));
                 output.push_str(&content);
             }
         }
@@ -414,41 +425,24 @@ fn load_gitignore_patterns(root: &Path) -> Vec<globset::GlobMatcher> {
         .collect()
 }
 
-fn walkdir(
-    root: &Path,
-    results: &mut Vec<std::path::PathBuf>,
-    glob: Option<&globset::GlobMatcher>,
+/// Apply the standard filter_entry logic used by all walkdir iterations.
+fn filter_entry(
+    e: &walkdir::DirEntry,
     gitignore_patterns: &[globset::GlobMatcher],
-) {
-    for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_str().unwrap_or("");
-            if name.starts_with('.') && name != "." {
-                return false;
-            }
-            if name == "node_modules" || name == "target" || name == "dist" || name == "build" {
-                return false;
-            }
-            if !gitignore_patterns.is_empty()
-                && gitignore_patterns.iter().any(|p| p.is_match(e.path()))
-            {
-                return false;
-            }
-            true
-        })
-        .flatten()
-    {
-        if entry.file_type().is_file() {
-            if let Some(g) = glob {
-                if g.is_match(entry.path()) {
-                    results.push(entry.path().to_path_buf());
-                }
-            } else {
-                results.push(entry.path().to_path_buf());
-            }
-        }
+) -> bool {
+    let name = e.file_name().to_str().unwrap_or("");
+    if name.starts_with('.') && name != "." {
+        return false;
     }
+    if name == "node_modules" || name == "target" || name == "dist" || name == "build" {
+        return false;
+    }
+    if !gitignore_patterns.is_empty()
+        && gitignore_patterns.iter().any(|p| p.is_match(e.path()))
+    {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -481,73 +475,81 @@ mod tests {
     }
 
     #[test]
-    fn test_walkdir_skips_dist() {
+    fn test_filter_entry_skips_dist() {
         let dir = temp_dir();
         create_file(&dir, "src/lib.rs", "fn foo() {}");
         create_file(&dir, "dist/bundle.js", "var x = 1;");
 
-        let mut results = Vec::new();
-        let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
+        let dist_entry = walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .flatten()
+            .find(|e| e.path().to_string_lossy().contains("dist"));
+        assert!(dist_entry.is_some(), "dist entry should exist in walk");
 
-        let has_dist = results.iter().any(|p| p.to_string_lossy().contains("dist"));
-        assert!(
-            !has_dist,
-            "walkdir should skip dist/ directory, found: {results:?}"
+        // filter_entry should reject dist
+        let allowed = filter_entry(
+            &walkdir::WalkDir::new(&dir)
+                .into_iter()
+                .flatten()
+                .find(|e| e.path().to_string_lossy().contains("dist"))
+                .unwrap(),
+            &no_gitignore(),
         );
+        assert!(!allowed, "filter_entry should reject dist/ directory");
     }
 
     #[test]
-    fn test_walkdir_skips_build() {
+    fn test_filter_entry_skips_build() {
         let dir = temp_dir();
         create_file(&dir, "src/lib.rs", "fn foo() {}");
         create_file(&dir, "build/out.o", "binary");
 
-        let mut results = Vec::new();
-        let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
-
-        let has_build = results
-            .iter()
-            .any(|p| p.to_string_lossy().contains("build"));
-        assert!(
-            !has_build,
-            "walkdir should skip build/ directory, found: {results:?}"
+        let allowed = filter_entry(
+            &walkdir::WalkDir::new(&dir)
+                .into_iter()
+                .flatten()
+                .find(|e| e.path().to_string_lossy().contains("build"))
+                .unwrap(),
+            &no_gitignore(),
         );
+        assert!(!allowed, "filter_entry should reject build/ directory");
     }
 
     #[test]
-    fn test_walkdir_includes_src() {
-        let dir = temp_dir();
-        create_file(&dir, "src/lib.rs", "fn foo() {}");
-        create_file(&dir, "src/main.rs", "fn main() {}");
-
-        let mut results = Vec::new();
-        let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
-
-        assert!(
-            results.len() >= 2,
-            "walkdir should include src files, found: {results:?}"
-        );
-    }
-
-    #[test]
-    fn test_walkdir_skips_node_modules() {
+    fn test_filter_entry_skips_node_modules() {
         let dir = temp_dir();
         create_file(&dir, "src/lib.rs", "fn foo() {}");
         create_file(&dir, "node_modules/pkg/index.js", "module.exports = 1;");
 
-        let mut results = Vec::new();
-        let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
-
-        let has_nm = results
-            .iter()
-            .any(|p| p.to_string_lossy().contains("node_modules"));
+        let allowed = filter_entry(
+            &walkdir::WalkDir::new(&dir)
+                .into_iter()
+                .flatten()
+                .find(|e| e.path().to_string_lossy().contains("node_modules"))
+                .unwrap(),
+            &no_gitignore(),
+        );
         assert!(
-            !has_nm,
-            "walkdir should skip node_modules/, found: {results:?}"
+            !allowed,
+            "filter_entry should reject node_modules/ directory"
+        );
+    }
+
+    #[test]
+    fn test_filter_entry_allows_src() {
+        let dir = temp_dir();
+        create_file(&dir, "src/lib.rs", "fn foo() {}");
+        create_file(&dir, "src/main.rs", "fn main() {}");
+
+        let allowed_count = walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .flatten()
+            .filter(|e| filter_entry(e, &no_gitignore()))
+            .filter(|e| e.file_type().is_file())
+            .count();
+        assert!(
+            allowed_count >= 2,
+            "filter_entry should allow src files, got: {allowed_count}"
         );
     }
 
@@ -625,7 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_grep_cache_reuses_file_list() {
+    async fn test_search_grep_repeated_search_still_finds_files() {
         let dir = temp_dir();
         create_file(&dir, "src/foo.rs", "fn foo() {}");
         create_file(&dir, "src/bar.rs", "fn bar() {}");
@@ -638,14 +640,14 @@ mod tests {
             signal: tokio::sync::watch::channel(false).1,
         };
 
-        // First call populates cache
+        // First call
         let result1 = tool.execute(params.clone(), &ctx).await;
         assert!(
             matches!(result1, hackpi_core::tools::ToolResult::Success { .. }),
             "first search should succeed"
         );
 
-        // Second call uses cache
+        // Second call (no caching now — lazy walk each time)
         let result2 = tool.execute(params, &ctx).await;
         let content2 = match result2 {
             hackpi_core::tools::ToolResult::Success { content } => content,
@@ -653,7 +655,7 @@ mod tests {
         };
         assert!(
             content2.contains("foo") && content2.contains("bar"),
-            "cached search should still find files, got: {content2}"
+            "repeated search should still find files, got: {content2}"
         );
     }
 
