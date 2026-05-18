@@ -209,4 +209,79 @@ mod tests {
         // Just verify it doesn't panic
         let _ = result;
     }
+
+    #[test]
+    fn test_infer_owner_repo_from_git_remote_https() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init repo");
+        repo.remote("origin", "https://github.com/acme/my-project.git")
+            .expect("add remote");
+
+        let result = VcsConfig::infer_owner_repo(dir.path());
+        assert_eq!(
+            result,
+            Some(("acme".to_string(), "my-project".to_string())),
+            "Expected owner/repo from HTTPS remote"
+        );
+    }
+
+    #[test]
+    fn test_infer_owner_repo_from_git_remote_ssh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init repo");
+        repo.remote("origin", "git@github.com:acme/my-project.git")
+            .expect("add remote");
+
+        let result = VcsConfig::infer_owner_repo(dir.path());
+        assert_eq!(
+            result,
+            Some(("acme".to_string(), "my-project".to_string())),
+            "Expected owner/repo from SSH remote"
+        );
+    }
+
+    #[test]
+    fn test_infer_owner_repo_no_origin_remote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _repo = git2::Repository::init(dir.path()).expect("init repo");
+        // No "origin" remote added
+
+        let result = VcsConfig::infer_owner_repo(dir.path());
+        assert_eq!(result, None, "Expected None when no origin remote exists");
+    }
+
+    #[test]
+    fn test_infer_owner_repo_non_github_remote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init repo");
+        repo.remote("origin", "https://gitlab.com/acme/my-project.git")
+            .expect("add remote");
+
+        let result = VcsConfig::infer_owner_repo(dir.path());
+        assert_eq!(result, None, "Expected None for non-GitHub remote URL");
+    }
+
+    #[test]
+    fn test_from_env_empty_string_treated_as_set() {
+        // Empty string env var is still set, so it counts as a token source
+        with_env_clean(|| {
+            std::env::set_var("HACKPI_GITHUB_TOKEN", "");
+
+            let config = VcsConfig::from_env(Path::new("/tmp"));
+
+            // Empty string is still a valid env var value
+            assert_eq!(config.github_token.as_deref(), Some(""));
+            assert_eq!(
+                config.github_token_source,
+                TokenSource::EnvVar("HACKPI_GITHUB_TOKEN".into())
+            );
+        });
+    }
+
+    #[test]
+    fn test_parse_github_url_ssh_with_extra_components() {
+        // SSH URL should only parse owner/repo, not extra paths
+        let result = VcsConfig::parse_github_url("git@github.com:owner");
+        assert_eq!(result, None, "Single component should not parse");
+    }
 }

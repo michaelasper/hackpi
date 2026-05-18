@@ -1033,4 +1033,161 @@ mod tests {
             "Expected SystemError for missing operation, got: {result:?}"
         );
     }
+
+    // ── Non-git directory error ──
+
+    #[tokio::test]
+    async fn test_status_on_non_git_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = make_tool(tmp.path().to_path_buf());
+        let result = execute(&tool, json!({ "operation": "status" })).await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Not a git repository")),
+            "Expected SystemError on non-git dir, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_on_non_git_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = make_tool(tmp.path().to_path_buf());
+        let result = execute(&tool, json!({ "operation": "diff" })).await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Not a git repository")),
+            "Expected SystemError on non-git dir, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_log_on_non_git_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = make_tool(tmp.path().to_path_buf());
+        let result = execute(&tool, json!({ "operation": "log" })).await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Not a git repository")),
+            "Expected SystemError on non-git dir, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_on_non_git_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = make_tool(tmp.path().to_path_buf());
+        let result = execute(&tool, json!({ "operation": "show", "revision": "HEAD" })).await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Not a git repository")),
+            "Expected SystemError on non-git dir, got: {result:?}"
+        );
+    }
+
+    // ── Remote branches ──
+
+    #[tokio::test]
+    async fn test_branch_list_with_remote_branches() {
+        let (_dir, repo) = init_repo_with_commit();
+
+        // Create a bare repo as remote
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = bare_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            bare_repo.find_tree(oid).unwrap().id()
+        };
+        {
+            let tree = bare_repo.find_tree(tree_id).unwrap();
+            bare_repo
+                .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        // Add remote and fetch
+        repo.remote("origin", bare_dir.path().to_str().unwrap())
+            .unwrap();
+
+        // Create a branch reference in the bare repo to simulate a remote branch
+        let head_commit = bare_repo.head().unwrap().peel_to_commit().unwrap();
+        bare_repo
+            .reference("refs/heads/feature-remote", head_commit.id(), true, "test")
+            .unwrap();
+
+        // Fetch to get remote tracking branches
+        let mut remote = repo.find_remote("origin").unwrap();
+        remote
+            .fetch(&["refs/heads/*:refs/remotes/origin/*"], None, None)
+            .unwrap();
+
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(&tool, json!({ "operation": "branch_list" })).await;
+        match &result {
+            ToolResult::Success { content } => {
+                // Should show local branch
+                assert!(
+                    content.contains("main") || content.contains("master"),
+                    "Expected local branch, got: {content}"
+                );
+                // Should show remote tracking branch
+                assert!(
+                    content.contains("origin/feature-remote"),
+                    "Expected remote branch 'origin/feature-remote', got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    // ── Show specific commit hash ──
+
+    #[tokio::test]
+    async fn test_show_by_commit_hash() {
+        let (dir, repo) = init_repo_with_commit();
+        add_commit(&repo, &dir, "second.txt", b"second", "Second commit");
+
+        // Get the second commit's hash
+        let head_id = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let short_hash = &head_id.to_string()[..7.min(head_id.to_string().len())];
+
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(
+            &tool,
+            json!({ "operation": "show", "revision": short_hash }),
+        )
+        .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("Second commit"),
+                    "Show should contain second commit message, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    // ── Diff truncation ──
+
+    #[tokio::test]
+    async fn test_diff_staged_large_output_truncated() {
+        let (dir, repo) = init_repo_with_commit();
+        // Create a large file and stage it to trigger truncation in diff_staged
+        let large_content = "x".repeat(512 * 1024); // 512KB > MAX_DIFF_BYTES (256KB)
+        std::fs::write(dir.path().join("large.txt"), large_content.as_bytes()).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("large.txt")).unwrap();
+        index.write().unwrap();
+
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(&tool, json!({ "operation": "diff_staged" })).await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("truncated"),
+                    "Large diff_staged should be truncated, got: {} bytes",
+                    content.len()
+                );
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
 }
