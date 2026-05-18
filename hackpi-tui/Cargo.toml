@@ -21,6 +21,7 @@ hackpi-core = { path = "../hackpi-core" }
 hackpi-tools = { path = "../hackpi-tools" }
 hackpi-guardrails = { path = "../hackpi-guardrails" }
 hackpi-vcs = { path = "../hackpi-vcs" }
+hackpi-tasks = { path = "../hackpi-tasks" }
 
 [dev-dependencies]
 tempfile = "3"

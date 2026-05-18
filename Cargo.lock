@@ -670,6 +670,7 @@ dependencies = [
  "futures",
  "hackpi-core",
  "hackpi-guardrails",
+ "hackpi-tasks",
  "hackpi-tools",
  "hackpi-vcs",
  "ratatui",
