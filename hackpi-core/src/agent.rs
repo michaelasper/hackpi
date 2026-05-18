@@ -69,6 +69,14 @@ pub enum AgentEvent {
     },
 }
 
+/// Result of processing SSE events from the API stream.
+struct SseEvents {
+    text: String,
+    pending_tool_calls: Vec<(String, String, Value)>,
+    stop_reason: Option<String>,
+    usage: Option<Usage>,
+}
+
 pub struct Agent {
     api: ApiClient,
     tools: Arc<ToolRegistry>,
@@ -89,6 +97,185 @@ impl Agent {
             system_prompt,
             workspace_root,
         }
+    }
+
+    /// Process SSE events from the API response stream.
+    /// Handles text deltas, tool call starts/stops, and message deltas.
+    /// Returns `None` if cancelled via signal.
+    async fn process_sse_events(
+        api_rx: &mut mpsc::UnboundedReceiver<ApiEvent>,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+        signal: &tokio::sync::watch::Receiver<bool>,
+    ) -> Option<SseEvents> {
+        let mut current_text = String::new();
+        let mut pending_tool_calls: Vec<(String, String, Value)> = Vec::new();
+        let mut current_tool_id = String::new();
+        let mut current_tool_name = String::new();
+        let mut current_tool_input = String::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+
+        while let Some(event) = api_rx.recv().await {
+            if *signal.borrow() {
+                tx.send(AgentEvent::Done).ok();
+                return None;
+            }
+
+            match event {
+                ApiEvent::Event(evt) => match evt.event_type.as_str() {
+                    "content_block_delta" => {
+                        if let Some(delta) = &evt.delta {
+                            if let Some(text) = &delta.text {
+                                current_text.push_str(text);
+                                tx.send(AgentEvent::TextChunk(text.clone())).ok();
+                            }
+                            if let Some(stop) = &delta.stop_reason {
+                                stop_reason = Some(stop.clone());
+                            }
+                        }
+                    }
+                    "content_block_start" => {
+                        if let Some(block) = &evt.content_block {
+                            if block.block_type == "tool_use" {
+                                current_tool_id = block.id.clone().unwrap_or_default();
+                                current_tool_name = block.name.clone().unwrap_or_default();
+                                current_tool_input = String::new();
+                                if let Some(input) = &block.input {
+                                    current_tool_input = input.to_string();
+                                }
+                            }
+                        }
+                    }
+                    "content_block_stop" if !current_tool_id.is_empty() => {
+                        let input: Value =
+                            serde_json::from_str(&current_tool_input).unwrap_or(Value::Null);
+                        pending_tool_calls.push((
+                            current_tool_id.clone(),
+                            current_tool_name.clone(),
+                            input,
+                        ));
+                        current_tool_id.clear();
+                        current_tool_name.clear();
+                        current_tool_input.clear();
+                    }
+                    "message_delta" => {
+                        if let Some(delta) = &evt.delta {
+                            if let Some(stop) = &delta.stop_reason {
+                                stop_reason = Some(stop.clone());
+                            }
+                        }
+                        if let Some(u) = &evt.usage {
+                            usage = Some(u.clone());
+                        }
+                    }
+                    _ => {}
+                },
+                ApiEvent::Done => break,
+            }
+        }
+
+        Some(SseEvents {
+            text: current_text,
+            pending_tool_calls,
+            stop_reason,
+            usage,
+        })
+    }
+
+    /// Build an assistant message from accumulated text content.
+    fn build_assistant_message(conversation: &mut Vec<Message>, text: &str) {
+        if !text.is_empty() {
+            conversation.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text(text)],
+            });
+        }
+    }
+
+    /// Execute all pending tool calls, dispatching each and collecting results.
+    /// Returns `None` if cancelled via `ToolResult::Cancelled`.
+    async fn execute_pending_tool_calls(
+        &self,
+        pending_tool_calls: &[(String, String, Value)],
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+        signal: &tokio::sync::watch::Receiver<bool>,
+    ) -> Option<Vec<ContentBlock>> {
+        let mut tool_results: Vec<ContentBlock> = Vec::new();
+
+        for (tool_id, tool_name, tool_input) in pending_tool_calls {
+            tx.send(AgentEvent::ToolCallStart {
+                id: tool_id.clone(),
+                name: tool_name.clone(),
+            })
+            .ok();
+
+            let ctx = ToolContext {
+                workspace_root: self.workspace_root.clone(),
+                conversation_id: String::new(),
+                signal: signal.clone(),
+            };
+
+            let result = self
+                .tools
+                .dispatch(tool_name, tool_input.clone(), &ctx)
+                .await;
+
+            let tool_result_for_event = match &result {
+                Some(ToolResult::Success { content }) => {
+                    let truncated = truncate_output(
+                        content,
+                        MAX_TOOL_RESULT_BYTES,
+                        tool_id,
+                        &self.workspace_root,
+                    );
+                    tool_results.push(ContentBlock::tool_result(tool_id, &truncated));
+                    ToolResult::Success { content: truncated }
+                }
+                Some(ToolResult::SystemError { message }) => {
+                    tool_results.push(ContentBlock::tool_result(tool_id, message));
+                    ToolResult::SystemError {
+                        message: message.clone(),
+                    }
+                }
+                Some(ToolResult::Timeout) => {
+                    tool_results.push(ContentBlock::tool_result(
+                        tool_id,
+                        "Tool execution timed out.",
+                    ));
+                    ToolResult::Timeout
+                }
+                Some(ToolResult::Cancelled) => {
+                    tx.send(AgentEvent::Done).ok();
+                    return None;
+                }
+                None => {
+                    let msg = format!("Unknown tool: {tool_name}");
+                    tool_results.push(ContentBlock::tool_result(tool_id, &msg));
+                    ToolResult::SystemError { message: msg }
+                }
+            };
+
+            tx.send(AgentEvent::ToolCallEnd {
+                id: tool_id.clone(),
+                result: tool_result_for_event,
+            })
+            .ok();
+        }
+
+        Some(tool_results)
+    }
+
+    /// Check if the stop reason indicates conversation should end.
+    /// Returns `true` if the turn should stop.
+    fn handle_step_stop_reason(
+        stop_reason: &Option<String>,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> bool {
+        let should_stop = matches!(stop_reason, Some(s) if s == "end_turn" || s == "stop");
+        if should_stop {
+            tx.send(AgentEvent::Done).ok();
+        }
+        should_stop
     }
 
     pub async fn run(
@@ -126,149 +313,36 @@ impl Agent {
                 break;
             }
 
-            let mut current_text = String::new();
-            let mut pending_tool_calls: Vec<(String, String, Value)> = Vec::new();
-            let mut current_tool_id = String::new();
-            let mut current_tool_name = String::new();
-            let mut current_tool_input = String::new();
-            let mut stop_reason: Option<String> = None;
-            let mut usage: Option<Usage> = None;
+            // Process SSE events from the API stream
+            let events = match Self::process_sse_events(&mut api_rx, &tx, &signal).await {
+                Some(events) => events,
+                None => return,
+            };
 
-            while let Some(event) = api_rx.recv().await {
-                if *signal.borrow() {
-                    tx.send(AgentEvent::Done).ok();
-                    return;
-                }
+            // Build assistant message from accumulated text
+            Self::build_assistant_message(conversation, &events.text);
 
-                match event {
-                    ApiEvent::Event(evt) => match evt.event_type.as_str() {
-                        "content_block_delta" => {
-                            if let Some(delta) = &evt.delta {
-                                if let Some(text) = &delta.text {
-                                    current_text.push_str(text);
-                                    tx.send(AgentEvent::TextChunk(text.clone())).ok();
-                                }
-                                if let Some(stop) = &delta.stop_reason {
-                                    stop_reason = Some(stop.clone());
-                                }
-                            }
-                        }
-                        "content_block_start" => {
-                            if let Some(block) = &evt.content_block {
-                                if block.block_type == "tool_use" {
-                                    current_tool_id = block.id.clone().unwrap_or_default();
-                                    current_tool_name = block.name.clone().unwrap_or_default();
-                                    current_tool_input = String::new();
-                                    if let Some(input) = &block.input {
-                                        current_tool_input = input.to_string();
-                                    }
-                                }
-                            }
-                        }
-                        "content_block_stop" if !current_tool_id.is_empty() => {
-                            let input: Value =
-                                serde_json::from_str(&current_tool_input).unwrap_or(Value::Null);
-                            pending_tool_calls.push((
-                                current_tool_id.clone(),
-                                current_tool_name.clone(),
-                                input,
-                            ));
-                            current_tool_id.clear();
-                            current_tool_name.clear();
-                            current_tool_input.clear();
-                        }
-                        "message_delta" => {
-                            if let Some(delta) = &evt.delta {
-                                if let Some(stop) = &delta.stop_reason {
-                                    stop_reason = Some(stop.clone());
-                                }
-                            }
-                            if let Some(u) = &evt.usage {
-                                usage = Some(u.clone());
-                            }
-                        }
-                        _ => {}
-                    },
-                    ApiEvent::Done => break,
-                }
-            }
-
-            if !current_text.is_empty() {
-                conversation.push(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::text(&current_text)],
-                });
-            }
-
-            if let Some(u) = usage {
+            // Report usage if available
+            if let Some(u) = events.usage {
                 tx.send(AgentEvent::Usage(u)).ok();
             }
 
-            if pending_tool_calls.is_empty() {
+            // If no tool calls, we're done
+            if events.pending_tool_calls.is_empty() {
                 tx.send(AgentEvent::Done).ok();
                 return;
             }
 
-            let mut tool_results: Vec<ContentBlock> = Vec::new();
+            // Execute pending tool calls
+            let tool_results = match self
+                .execute_pending_tool_calls(&events.pending_tool_calls, &tx, &signal)
+                .await
+            {
+                Some(results) => results,
+                None => return,
+            };
 
-            for (tool_id, tool_name, tool_input) in &pending_tool_calls {
-                tx.send(AgentEvent::ToolCallStart {
-                    id: tool_id.clone(),
-                    name: tool_name.clone(),
-                })
-                .ok();
-
-                let ctx = ToolContext {
-                    workspace_root: self.workspace_root.clone(),
-                    conversation_id: String::new(),
-                    signal: signal.clone(),
-                };
-
-                let result = self
-                    .tools
-                    .dispatch(tool_name, tool_input.clone(), &ctx)
-                    .await;
-
-                match &result {
-                    Some(ToolResult::Success { content }) => {
-                        let truncated = truncate_output(
-                            content,
-                            MAX_TOOL_RESULT_BYTES,
-                            tool_id,
-                            &self.workspace_root,
-                        );
-                        tool_results.push(ContentBlock::tool_result(tool_id, &truncated));
-                    }
-                    Some(ToolResult::SystemError { message }) => {
-                        tool_results.push(ContentBlock::tool_result(tool_id, message));
-                    }
-                    Some(ToolResult::Timeout) => {
-                        tool_results.push(ContentBlock::tool_result(
-                            tool_id,
-                            "Tool execution timed out.",
-                        ));
-                    }
-                    Some(ToolResult::Cancelled) => {
-                        tx.send(AgentEvent::Done).ok();
-                        return;
-                    }
-                    None => {
-                        tool_results.push(ContentBlock::tool_result(
-                            tool_id,
-                            format!("Unknown tool: {tool_name}"),
-                        ));
-                    }
-                }
-
-                tx.send(AgentEvent::ToolCallEnd {
-                    id: tool_id.clone(),
-                    result: result.unwrap_or(ToolResult::SystemError {
-                        message: "Unknown tool".into(),
-                    }),
-                })
-                .ok();
-            }
-
+            // Push tool results back to conversation
             if !tool_results.is_empty() {
                 conversation.push(Message {
                     role: Role::User,
@@ -276,10 +350,8 @@ impl Agent {
                 });
             }
 
-            let should_stop = matches!(&stop_reason, Some(s) if s == "end_turn" || s == "stop");
-
-            if should_stop {
-                tx.send(AgentEvent::Done).ok();
+            // Check if we should stop based on stop reason
+            if Self::handle_step_stop_reason(&events.stop_reason, &tx) {
                 return;
             }
         }
