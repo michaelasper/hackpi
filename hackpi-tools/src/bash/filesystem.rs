@@ -284,7 +284,11 @@ impl FileSystem for InMemoryFs {
     }
 
     fn append(&self, path: &Path, content: &[u8]) -> std::io::Result<()> {
-        let mut existing = self.read(path).unwrap_or_default();
+        let mut existing = match self.read(path) {
+            Ok(data) => data,
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e),
+        };
         existing.extend_from_slice(content);
         self.write(path, &existing)
     }
@@ -338,9 +342,80 @@ impl FileSystem for InMemoryFs {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        let content = self.read(from)?;
-        self.write(to, &content)?;
-        self.remove(from)?;
+        if from == to {
+            return Ok(());
+        }
+
+        let mut guard = self.root.write().unwrap_or_else(|e| e.into_inner());
+
+        // Helper to normalize path into segments
+        let parse_segments = |path: &Path| -> Vec<String> {
+            let components: Vec<_> = path.components().collect();
+            let mut segments: Vec<String> = Vec::new();
+            for comp in &components {
+                let name = comp.as_os_str().to_str().unwrap_or("");
+                match name {
+                    "/" | "." => continue,
+                    ".." => {
+                        segments.pop();
+                    }
+                    _ => segments.push(name.to_string()),
+                }
+            }
+            segments
+        };
+
+        let from_segs = parse_segments(from);
+        let to_segs = parse_segments(to);
+
+        let from_name = from_segs
+            .last()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
+        let to_name = to_segs
+            .last()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
+
+        // Navigate to source parent and remove the node
+        let mut current: &mut FileNode = &mut guard;
+        for name in &from_segs[..from_segs.len().saturating_sub(1)] {
+            current = current
+                .children
+                .get_mut(name.as_str())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
+        }
+
+        let mut node = current
+            .children
+            .remove(from_name.as_str())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
+
+        // Update modification time
+        node.modified = SystemTime::now();
+
+        // Navigate to destination parent, creating directories as needed
+        let mut current: &mut FileNode = &mut guard;
+        for name in &to_segs[..to_segs.len().saturating_sub(1)] {
+            if !current.children.contains_key(name.as_str()) {
+                current.children.insert(
+                    name.clone(),
+                    FileNode {
+                        content: Vec::new(),
+                        mode: 0o755,
+                        is_dir: true,
+                        is_symlink: false,
+                        symlink_target: None,
+                        children: BTreeMap::new(),
+                        created: SystemTime::now(),
+                        modified: SystemTime::now(),
+                    },
+                );
+            }
+            current = current.children.get_mut(name.as_str()).unwrap();
+        }
+
+        // Insert the node at the destination
+        current.children.insert(to_name.clone(), node);
+
         Ok(())
     }
 
@@ -645,5 +720,90 @@ mod tests {
         let result = fs.remove(Path::new("/test.txt"));
         assert!(result.is_ok());
         assert!(!fs.exists(Path::new("/test.txt")));
+    }
+
+    // --- COR-26: Append error handling ---
+
+    #[test]
+    fn test_append_on_directory_returns_error() {
+        let fs = InMemoryFs::default();
+        // /tmp exists as a directory — read() returns IsADirectory
+        let result = fs.append(Path::new("/tmp"), b"content");
+        assert!(result.is_err(), "append on directory should fail");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::IsADirectory,
+            "should propagate IsADirectory error, not silently discard"
+        );
+    }
+
+    #[test]
+    fn test_append_new_file_creates_and_appends() {
+        let fs = InMemoryFs::default();
+        let result = fs.append(Path::new("/newfile.txt"), b"hello");
+        assert!(result.is_ok(), "append to new file should succeed");
+        assert_eq!(fs.read(Path::new("/newfile.txt")).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_append_existing_file_appends_content() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/existing.txt"), b"hello").unwrap();
+        fs.append(Path::new("/existing.txt"), b" world").unwrap();
+        assert_eq!(fs.read(Path::new("/existing.txt")).unwrap(), b"hello world");
+    }
+
+    // --- COR-26: Atomic rename ---
+
+    #[test]
+    fn test_rename_moves_content_and_removes_source() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/source.txt"), b"hello").unwrap();
+        fs.rename(Path::new("/source.txt"), Path::new("/dest.txt"))
+            .unwrap();
+        assert!(
+            !fs.exists(Path::new("/source.txt")),
+            "source should not exist after rename"
+        );
+        assert_eq!(fs.read(Path::new("/dest.txt")).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_rename_nonexistent_source_returns_error() {
+        let fs = InMemoryFs::default();
+        let result = fs.rename(Path::new("/nonexistent"), Path::new("/dest.txt"));
+        assert!(result.is_err(), "rename of nonexistent source should fail");
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_rename_to_existing_overwrites() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/source.txt"), b"hello").unwrap();
+        fs.write(Path::new("/dest.txt"), b"world").unwrap();
+        fs.rename(Path::new("/source.txt"), Path::new("/dest.txt"))
+            .unwrap();
+        assert!(
+            !fs.exists(Path::new("/source.txt")),
+            "source should not exist after rename"
+        );
+        assert_eq!(
+            fs.read(Path::new("/dest.txt")).unwrap(),
+            b"hello",
+            "dest should contain source content after rename"
+        );
+    }
+
+    #[test]
+    fn test_rename_within_directory_preserves_metadata() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/a.txt"), b"data").unwrap();
+        let meta_before = fs.metadata(Path::new("/a.txt")).unwrap();
+        fs.rename(Path::new("/a.txt"), Path::new("/b.txt")).unwrap();
+        let meta_after = fs.metadata(Path::new("/b.txt")).unwrap();
+        assert_eq!(
+            meta_after.size, meta_before.size,
+            "file size should be preserved after rename"
+        );
     }
 }
