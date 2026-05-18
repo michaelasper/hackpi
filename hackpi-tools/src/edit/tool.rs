@@ -4,9 +4,22 @@ use serde_json::Value;
 use std::fmt::Write;
 use tokio::fs;
 
+/// Try to parse `pos` as a range anchor in the format `start#HASH-end#HASH`.
+/// Returns `Some((start_idx, end_idx))` where end_idx is exclusive (1 past the end).
+/// Returns `None` if the string doesn't match the range anchor format.
+fn resolve_range_anchor(pos: &str, lines: &[String]) -> Option<(usize, usize)> {
+    // Match pattern: digits#XX-digits#XX where XX are 2-char hashes
+    let (left, right) = pos.split_once('-')?;
+    let start_idx = super::anchor::resolve_anchor(left, lines)?;
+    let end_idx = super::anchor::resolve_anchor(right, lines)?;
+    if start_idx > end_idx {
+        return None;
+    }
+    Some((start_idx, end_idx + 1))
+}
+
 use super::anchor::{
     contains_patch_markers, generate_anchor_hint, make_updated_anchors, resolve_anchor,
-    resolve_anchor_range,
 };
 use super::hash::line_hash;
 use super::ops::{deserialize_edit_ops, op_anchor_line, AppliedEdit, EditOp};
@@ -70,6 +83,11 @@ impl Tool for EditTool {
                             "newText": {
                                 "type": "string",
                                 "description": "For replace_text: the replacement text."
+                            },
+                            "lines": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "For replace_text: replacement lines array (alternative to newText)."
                             }
                         },
                         "required": ["op"],
@@ -139,7 +157,7 @@ impl Tool for EditTool {
                         };
                     }
                     if let Some(end_pos) = end {
-                        if resolve_anchor_range(end_pos, &lines).is_none() {
+                        if resolve_anchor(end_pos, &lines).is_none() {
                             let hint = generate_anchor_hint(&lines, pos);
                             return ToolResult::SystemError {
                                 message: format!(
@@ -149,7 +167,9 @@ impl Tool for EditTool {
                             };
                         }
                     }
-                    if resolve_anchor(pos, &lines).is_none() {
+                    if resolve_range_anchor(pos, &lines).is_none()
+                        && resolve_anchor(pos, &lines).is_none()
+                    {
                         let hint = generate_anchor_hint(&lines, pos);
                         return ToolResult::SystemError {
                             message: format!(
@@ -229,7 +249,21 @@ impl Tool for EditTool {
                         };
                     }
                 }
-                EditOp::ReplaceText { old_text, .. } => {
+                EditOp::ReplaceText {
+                    old_text,
+                    lines: replacement_lines,
+                    ..
+                } => {
+                    if let Some(ref rep_lines) = replacement_lines {
+                        if contains_patch_markers(rep_lines) {
+                            return ToolResult::SystemError {
+                                message: format!(
+                                    "[E_INVALID_PATCH] Edit rejected: `lines` contains LINE#HASH: prefixes or +/- markers. \
+                                     Send plain file content only. File: {file_path}"
+                                ),
+                            };
+                        }
+                    }
                     if old_text.is_empty() {
                         return ToolResult::SystemError {
                             message: "replace_text: oldText must not be empty.".into(),
@@ -273,13 +307,28 @@ impl Tool for EditTool {
                     end,
                     lines: new_lines,
                 } => {
-                    let start_lineno = resolve_anchor(pos, &lines).unwrap();
-                    let end_idx = if let Some(end_pos) = end {
-                        resolve_anchor(end_pos, &lines)
-                            .map(|e| e + 1)
-                            .unwrap_or(start_lineno + 1)
+                    let (start_lineno, end_idx) = if let Some((s, e)) =
+                        resolve_range_anchor(pos, &lines)
+                    {
+                        (s, e)
                     } else {
-                        start_lineno + 1
+                        let s = resolve_anchor(pos, &lines).unwrap();
+                        let e = if let Some(end_pos) = end {
+                            match resolve_anchor(end_pos, &lines) {
+                                Some(ee) => ee + 1,
+                                None => {
+                                    return ToolResult::SystemError {
+                                        message: format!(
+                                            "[E_STALE_ANCHOR] End anchor '{end_pos}' not found in {file_path}. \
+                                             The file may have changed since you read it."
+                                        ),
+                                    }
+                                }
+                            }
+                        } else {
+                            s + 1
+                        };
+                        (s, e)
                     };
                     let old_snippet: Vec<String> = lines[start_lineno..end_idx].to_vec();
                     let old_start = start_lineno;
@@ -351,9 +400,17 @@ impl Tool for EditTool {
                         end_line: new_end,
                     });
                 }
-                EditOp::ReplaceText { old_text, new_text } => {
+                EditOp::ReplaceText {
+                    old_text,
+                    new_text,
+                    lines,
+                } => {
                     let content = current_lines.join("\n");
-                    let new_content = content.replace(old_text, new_text);
+                    let replacement = match lines {
+                        Some(l) => l.join("\n"),
+                        None => new_text.clone(),
+                    };
+                    let new_content = content.replace(old_text, &replacement);
                     let new_lines_vec: Vec<String> =
                         new_content.lines().map(|l| l.to_string()).collect();
 
@@ -409,6 +466,16 @@ impl Tool for EditTool {
             if !ae.old_snippet.is_empty() || !ae.new_snippet.is_empty() {
                 let mut diff = String::new();
                 writeln!(diff, "Diff preview:").ok();
+                let old_count = ae.old_snippet.len();
+                let new_count = ae.new_snippet.len();
+                let old_start = ae.start_line + 1;
+                let new_start = ae.start_line + 1;
+                writeln!(
+                    diff,
+                    "@@ -{},{} +{},{} @@",
+                    old_start, old_count, new_start, new_count
+                )
+                .ok();
                 for line in &ae.old_snippet {
                     writeln!(diff, "- {line}").ok();
                 }

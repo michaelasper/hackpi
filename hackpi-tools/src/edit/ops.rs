@@ -17,6 +17,7 @@ pub(crate) enum EditOp {
     ReplaceText {
         old_text: String,
         new_text: String,
+        lines: Option<Vec<String>>,
     },
 }
 
@@ -97,7 +98,16 @@ pub(crate) fn deserialize_edit_ops(edits: &[Value]) -> Result<Vec<EditOp>, Strin
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                ops.push(EditOp::ReplaceText { old_text, new_text });
+                let lines = edit.get("lines").and_then(|v| v.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                });
+                ops.push(EditOp::ReplaceText {
+                    old_text,
+                    new_text,
+                    lines,
+                });
             }
             _ => return Err(format!("Unknown edit operation: '{op}'.")),
         }
@@ -107,7 +117,16 @@ pub(crate) fn deserialize_edit_ops(edits: &[Value]) -> Result<Vec<EditOp>, Strin
 
 pub(crate) fn op_anchor_line(op: &EditOp, lines: &[String]) -> Option<usize> {
     match op {
-        EditOp::Replace { pos, .. } => super::anchor::resolve_anchor(pos, lines),
+        EditOp::Replace { pos, .. } => {
+            // For range anchors (start#HASH-end#HASH), use the left anchor for ordering
+            if let Some((left, _)) = pos.split_once('-') {
+                // Only treat as range anchor if the left part looks like LINE#HASH
+                if left.contains('#') {
+                    return super::anchor::resolve_anchor(left, lines);
+                }
+            }
+            super::anchor::resolve_anchor(pos, lines)
+        }
         EditOp::Append { pos: Some(p), .. } => super::anchor::resolve_anchor(p, lines),
         EditOp::Append { pos: None, .. } => Some(lines.len()),
         EditOp::Prepend { pos: Some(p), .. } => super::anchor::resolve_anchor(p, lines),
