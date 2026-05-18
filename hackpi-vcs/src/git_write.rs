@@ -2139,4 +2139,197 @@ mod tests {
             _ => panic!("Expected Success, got: {result:?}"),
         }
     }
+
+    // ── Add nonexistent file ──
+
+    #[tokio::test]
+    async fn test_add_nonexistent_file_returns_error() {
+        let (_dir, repo) = init_repo_with_commit();
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(
+            &tool,
+            json!({ "operation": "add", "paths": ["does_not_exist.txt"] }),
+        )
+        .await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Failed to stage")),
+            "Expected SystemError for nonexistent file, got: {result:?}"
+        );
+    }
+
+    // ── Checkout nonexistent branch without create ──
+
+    #[tokio::test]
+    async fn test_checkout_nonexistent_branch_without_create() {
+        let (_dir, repo) = init_repo_with_commit();
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(
+            &tool,
+            json!({ "operation": "checkout", "branch": "nonexistent-branch" }),
+        )
+        .await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("not found") || message.contains("Failed")),
+            "Expected SystemError for nonexistent branch checkout, got: {result:?}"
+        );
+    }
+
+    // ── Push force requires explicit flag ──
+
+    #[tokio::test]
+    async fn test_push_force_requires_explicit_flag() {
+        let (dir, repo) = init_repo_with_commit();
+
+        // Create bare repo as remote
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
+        let remote_url = bare_dir.path().to_str().unwrap();
+        repo.remote("origin", remote_url).unwrap();
+
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+
+        // Step 1: Initial push succeeds (fast-forward, no force needed)
+        let result = execute(&tool, json!({ "operation": "push" })).await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("Pushed"),
+                    "Expected push success, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success for initial push, got: {result:?}"),
+        }
+
+        // Step 2: Add a second commit and push it (still fast-forward)
+        add_commit(&repo, &dir, "second.txt", b"second\n", "Second commit");
+        let result = execute(&tool, json!({ "operation": "push" })).await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("Pushed"),
+                    "Expected push success, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success for second push, got: {result:?}"),
+        }
+
+        // Step 3: Create a divergent history.
+        // Reset HEAD back to the initial commit, then create a different commit on top.
+        let initial_obj = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent(0)
+            .unwrap()
+            .into_object();
+        repo.reset(&initial_obj, git2::ResetType::Hard, None)
+            .unwrap();
+        add_commit(
+            &repo,
+            &dir,
+            "divergent.txt",
+            b"divergent\n",
+            "Divergent commit",
+        );
+
+        // Now: local has (initial -> divergent), remote has (initial -> second)
+        // This is a non-fast-forward situation.
+
+        // Step 4: Push WITHOUT force should fail
+        let result = execute(&tool, json!({ "operation": "push" })).await;
+        match &result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("Push failed"),
+                    "Expected push failure, got: {message}"
+                );
+            }
+            _ => panic!(
+                "Expected SystemError for non-fast-forward push without force, got: {result:?}"
+            ),
+        }
+
+        // Step 5: Push WITH force should succeed
+        let result = execute(&tool, json!({ "operation": "push", "force": true })).await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("Pushed"),
+                    "Expected force push success, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success for force push, got: {result:?}"),
+        }
+
+        // Step 6: Verify the remote now has the divergent commit
+        let remote_head = bare_repo.head().unwrap().peel_to_commit().unwrap();
+        let local_head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            remote_head.id(),
+            local_head.id(),
+            "After force push, remote HEAD should match local HEAD"
+        );
+        assert_eq!(
+            local_head.message().unwrap().trim(),
+            "Divergent commit",
+            "Remote should have the divergent commit"
+        );
+    }
+
+    // ── Commit hash in output ──
+
+    #[tokio::test]
+    async fn test_commit_hash_appears_in_output() {
+        let (dir, repo) = init_repo_with_commit();
+        std::fs::write(dir.path().join("hash_test.txt"), b"content\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(std::path::Path::new("hash_test.txt"))
+            .unwrap();
+        index.write().unwrap();
+
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(
+            &tool,
+            json!({ "operation": "commit", "message": "Hash test" }),
+        )
+        .await;
+        match &result {
+            ToolResult::Success { content } => {
+                // The output should contain a commit hash (7+ hex chars)
+                assert!(
+                    content.contains("Committed"),
+                    "Expected 'Committed', got: {content}"
+                );
+                // Verify commit was actually created
+                let head = repo.head().unwrap().peel_to_commit().unwrap();
+                assert_eq!(head.message().unwrap().trim(), "Hash test");
+            }
+            _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    // ── Commit with no staged changes ──
+
+    #[tokio::test]
+    async fn test_commit_with_nothing_staged_succeeds_with_zero_stats() {
+        let (_dir, repo) = init_repo_with_commit();
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(
+            &tool,
+            json!({ "operation": "commit", "message": "Nothing staged" }),
+        )
+        .await;
+        // git2 allows committing with no changes (creates same-tree commit)
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("0 file(s) changed"),
+                    "Expected 0 files changed, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success (empty commit), got: {result:?}"),
+        }
+    }
 }

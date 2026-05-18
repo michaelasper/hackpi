@@ -1614,4 +1614,243 @@ mod tests {
         let labels = result.unwrap();
         assert_eq!(labels.len(), 2);
     }
+
+    // ── Draft PR creation ──
+
+    #[tokio::test]
+    async fn test_pr_create_draft() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/pulls"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "number": 55,
+                "title": "Draft PR",
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/55",
+                "body": "Draft description",
+                "head": { "label": "owner:draft-feature", "ref": "draft-feature", "sha": "abc123" },
+                "base": { "label": "owner:main", "ref": "main", "sha": "def456" },
+                "draft": true,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "user": { "login": "testuser" }
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client
+            .pr_create(
+                "owner",
+                "repo",
+                "Draft PR",
+                "draft-feature",
+                "main",
+                Some("Draft description"),
+                Some(true), // draft = true
+            )
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let pr = result.unwrap();
+        assert_eq!(pr.number, 55);
+        assert_eq!(pr.title, "Draft PR");
+    }
+
+    // ── Issue list with pagination ──
+
+    #[tokio::test]
+    async fn test_issue_list_with_pagination() {
+        let server = MockServer::start().await;
+
+        // Page 2 (mount first so it has lower priority — wiremock uses last-mounted-first)
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/issues"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "number": 2,
+                    "title": "Issue Two",
+                    "state": "open",
+                    "html_url": "https://github.com/owner/repo/issues/2",
+                    "body": null,
+                    "labels": [],
+                    "created_at": "2024-01-02T00:00:00Z",
+                    "updated_at": "2024-01-02T00:00:00Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        // Page 1 with Link header pointing to page 2 (mounted second = higher priority)
+        let page1_link = format!(
+            r#"<{}/repos/owner/repo/issues?page=2>; rel="next""#,
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/issues"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", page1_link.as_str())
+                    .set_body_json(serde_json::json!([
+                        {
+                            "number": 1,
+                            "title": "Issue One",
+                            "state": "open",
+                            "html_url": "https://github.com/owner/repo/issues/1",
+                            "body": null,
+                            "labels": [],
+                            "created_at": "2024-01-01T00:00:00Z",
+                            "updated_at": "2024-01-01T00:00:00Z"
+                        }
+                    ])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+
+        let result = client.issue_list("owner", "repo", None).await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let issues = result.unwrap();
+        assert_eq!(issues.len(), 2, "Expected 2 issues across pages");
+        assert_eq!(issues[0].number, 1);
+        assert_eq!(issues[1].number, 2);
+    }
+
+    // ── PR list with pagination ──
+
+    #[tokio::test]
+    async fn test_pr_list_with_pagination() {
+        let server = MockServer::start().await;
+
+        // Page 2
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/pulls"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "number": 2,
+                    "title": "PR Two",
+                    "state": "closed",
+                    "html_url": "https://github.com/owner/repo/pull/2",
+                    "body": null,
+                    "head": { "label": "owner:f2", "ref": "f2", "sha": "c" },
+                    "base": { "label": "owner:main", "ref": "main", "sha": "d" },
+                    "draft": false,
+                    "created_at": "2024-01-02T00:00:00Z",
+                    "updated_at": "2024-01-02T00:00:00Z",
+                    "user": { "login": "user2" }
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        // Page 1
+        let page1_link = format!(
+            r#"<{}/repos/owner/repo/pulls?page=2>; rel="next""#,
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/pulls"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", page1_link.as_str())
+                    .set_body_json(serde_json::json!([
+                        {
+                            "number": 1,
+                            "title": "PR One",
+                            "state": "open",
+                            "html_url": "https://github.com/owner/repo/pull/1",
+                            "body": null,
+                            "head": { "label": "owner:f1", "ref": "f1", "sha": "a" },
+                            "base": { "label": "owner:main", "ref": "main", "sha": "b" },
+                            "draft": false,
+                            "created_at": "2024-01-01T00:00:00Z",
+                            "updated_at": "2024-01-01T00:00:00Z",
+                            "user": { "login": "user1" }
+                        }
+                    ])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+        let result = client.pr_list("owner", "repo", None).await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let prs = result.unwrap();
+        assert_eq!(prs.len(), 2, "Expected 2 PRs across pages");
+    }
+
+    // ── Network timeout handling ──
+
+    #[tokio::test]
+    async fn test_timeout_handling() {
+        // Use a non-routable address with a very short timeout
+        let client = GitHubClient::new("test-token", "http://192.0.2.1:1").unwrap();
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.validate_token()).await;
+
+        // Should complete (either timeout or error) within our outer timeout
+        match result {
+            Ok(inner) => {
+                // Inner result should be an error
+                assert!(inner.is_err(), "Expected error, got: {inner:?}");
+            }
+            Err(_) => {
+                // Outer timeout is also acceptable — the request took too long
+            }
+        }
+    }
+
+    // ── Issue create with labels verification ──
+
+    #[tokio::test]
+    async fn test_issue_create_with_labels_in_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/issues"))
+            // Verify the request body contains the labels array
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "title": "Labeled Issue",
+                "body": "desc",
+                "labels": ["bug", "priority:high"]
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "number": 200,
+                "title": "Labeled Issue",
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/issues/200",
+                "body": "desc",
+                "labels": [
+                    { "name": "bug", "color": "d73a4a" },
+                    { "name": "priority:high", "color": "b60205" }
+                ],
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        let result = client
+            .issue_create(
+                "owner",
+                "repo",
+                "Labeled Issue",
+                Some("desc"),
+                Some(vec!["bug", "priority:high"]),
+            )
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let issue = result.unwrap();
+        assert_eq!(issue.number, 200);
+        assert_eq!(issue.labels.len(), 2);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert_eq!(issue.labels[1].name, "priority:high");
+    }
 }
