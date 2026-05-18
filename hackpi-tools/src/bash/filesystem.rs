@@ -154,7 +154,7 @@ impl InMemoryFs {
 
 impl FileSystem for InMemoryFs {
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        let root_guard = self.root.read().unwrap();
+        let root_guard = self.root.read().unwrap_or_else(|e| e.into_inner());
         if let Some(node) = resolve_path_ref(&root_guard, path) {
             if node.is_dir {
                 return Err(std::io::Error::new(
@@ -173,7 +173,7 @@ impl FileSystem for InMemoryFs {
 
     fn write(&self, path: &Path, content: &[u8]) -> std::io::Result<()> {
         self.ensure_parents(path)?;
-        let mut guard = self.root.write().unwrap();
+        let mut guard = self.root.write().unwrap_or_else(|e| e.into_inner());
         let root = &mut *guard;
         let components: Vec<_> = path.components().collect();
         let file_name = components
@@ -237,7 +237,7 @@ impl FileSystem for InMemoryFs {
     }
 
     fn remove(&self, path: &Path) -> std::io::Result<()> {
-        let mut guard = self.root.write().unwrap();
+        let mut guard = self.root.write().unwrap_or_else(|e| e.into_inner());
         let root = &mut *guard;
         let components: Vec<_> = path.components().collect();
 
@@ -297,26 +297,26 @@ impl FileSystem for InMemoryFs {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        let root = self.root.read().unwrap();
+        let root = self.root.read().unwrap_or_else(|e| e.into_inner());
         resolve_path_ref(&root, path).is_some()
     }
 
     fn is_dir(&self, path: &Path) -> bool {
-        let root = self.root.read().unwrap();
+        let root = self.root.read().unwrap_or_else(|e| e.into_inner());
         resolve_path_ref(&root, path)
             .map(|n| n.is_dir)
             .unwrap_or(false)
     }
 
     fn is_file(&self, path: &Path) -> bool {
-        let root = self.root.read().unwrap();
+        let root = self.root.read().unwrap_or_else(|e| e.into_inner());
         resolve_path_ref(&root, path)
             .map(|n| !n.is_dir)
             .unwrap_or(false)
     }
 
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<DirEntry>> {
-        let root = self.root.read().unwrap();
+        let root = self.root.read().unwrap_or_else(|e| e.into_inner());
         let node = resolve_path_ref(&root, path)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
 
@@ -338,7 +338,7 @@ impl FileSystem for InMemoryFs {
     }
 
     fn create_dir(&self, path: &Path, recursive: bool) -> std::io::Result<()> {
-        let mut guard = self.root.write().unwrap();
+        let mut guard = self.root.write().unwrap_or_else(|e| e.into_inner());
         let root = &mut *guard;
         let components: Vec<_> = path.components().collect();
 
@@ -396,7 +396,7 @@ impl FileSystem for InMemoryFs {
     }
 
     fn metadata(&self, path: &Path) -> std::io::Result<FileMeta> {
-        let root = self.root.read().unwrap();
+        let root = self.root.read().unwrap_or_else(|e| e.into_inner());
         let node = resolve_path_ref(&root, path)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
         Ok(FileMeta {
@@ -420,5 +420,113 @@ impl FileSystem for InMemoryFs {
             std::io::ErrorKind::Unsupported,
             "symlinks not supported in InMemoryFs",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic;
+    use std::path::Path;
+
+    #[test]
+    fn test_lock_poison_recovery_write() {
+        let fs = InMemoryFs::default();
+
+        // Poison the write lock by panicking while holding it
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _guard = fs.root.write().unwrap();
+            panic!("intentional panic to poison lock");
+        }));
+
+        // With a poisoned lock, .write().unwrap() panics.
+        // After the fix (.unwrap_or_else(|e| e.into_inner())), this should recover.
+        let result = fs.write(Path::new("/test.txt"), b"hello");
+        assert!(result.is_ok());
+        let content = fs.read(Path::new("/test.txt")).unwrap();
+        assert_eq!(content, b"hello");
+    }
+
+    #[test]
+    fn test_lock_poison_recovery_read() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/existing.txt"), b"data").unwrap();
+
+        // Poison the write lock
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _guard = fs.root.write().unwrap();
+            panic!("intentional panic to poison lock");
+        }));
+
+        // With a poisoned lock, .read().unwrap() panics.
+        // After the fix, this should recover and return the data.
+        let result = fs.read(Path::new("/existing.txt"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"data");
+    }
+
+    #[test]
+    fn test_lock_poison_recovery_exists() {
+        let fs = InMemoryFs::default();
+
+        // Poison the write lock
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _guard = fs.root.write().unwrap();
+            panic!("intentional panic to poison lock");
+        }));
+
+        // exists() calls .read().unwrap() — should recover after fix
+        let result = fs.exists(Path::new("/"));
+        assert!(result);
+    }
+
+    #[test]
+    fn test_lock_poison_recovery_metadata() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/test.txt"), b"data").unwrap();
+
+        // Poison the write lock
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _guard = fs.root.write().unwrap();
+            panic!("intentional panic to poison lock");
+        }));
+
+        // metadata() calls .read().unwrap() — should recover after fix
+        let result = fs.metadata(Path::new("/test.txt"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().size, 4);
+    }
+
+    #[test]
+    fn test_lock_poison_recovery_create_dir() {
+        let fs = InMemoryFs::default();
+
+        // Poison the write lock
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _guard = fs.root.write().unwrap();
+            panic!("intentional panic to poison lock");
+        }));
+
+        // create_dir() calls .write().unwrap() — should recover after fix
+        let result = fs.create_dir(Path::new("/newdir"), true);
+        assert!(result.is_ok());
+        assert!(fs.is_dir(Path::new("/newdir")));
+    }
+
+    #[test]
+    fn test_lock_poison_recovery_remove() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/test.txt"), b"data").unwrap();
+
+        // Poison the write lock
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _guard = fs.root.write().unwrap();
+            panic!("intentional panic to poison lock");
+        }));
+
+        // remove() calls .write().unwrap() — should recover after fix
+        let result = fs.remove(Path::new("/test.txt"));
+        assert!(result.is_ok());
+        assert!(!fs.exists(Path::new("/test.txt")));
     }
 }
