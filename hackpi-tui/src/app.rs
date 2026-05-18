@@ -2,7 +2,9 @@ use crate::events::TuiEvent;
 use hackpi_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use hackpi_core::types::Usage;
 use hackpi_guardrails::{GuardEvaluator, GuardReason, PermissionDecision};
+use hackpi_tasks::TaskCommand;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// Represents a pending permission prompt awaiting user decision.
 pub struct PermissionPrompt {
@@ -53,6 +55,7 @@ pub struct App {
     pub status_message: String,
     pub quit_requested: bool,
     pub pending_permission: Option<PermissionPrompt>,
+    pub task_store: Option<Arc<hackpi_tasks::JsonTaskStore>>,
 }
 
 impl Default for App {
@@ -72,6 +75,7 @@ impl App {
             status_message: String::new(),
             quit_requested: false,
             pending_permission: None,
+            task_store: None,
         }
     }
 
@@ -241,7 +245,17 @@ Available commands:
    /guardrails:onboarding [preset] - Write a preset guardrails config
    /git:status - Show git status (via git_read)
    /git:log - Show recent git log (via git_read)
-   /github:pr-list - List open pull requests (via github)";
+   /github:pr-list - List open pull requests (via github)
+   /task create <title> - Create a new task
+   /task list - List all tasks
+   /task show <id> - Show task details
+   /task move <id> <state> - Move task to a new state
+   /task done <id> - Mark task as done
+   /task block <id> <blocked_by> - Add blocking dependency
+   /task unblock <id> <blocked_by> - Remove blocking dependency
+   /task label <id> <label> - Add a label to a task
+   /task assign <id> <assignee> - Assign task to someone
+   /tasks - Alias for /task list";
             tui_tx
                 .send(TuiEvent::StreamChunk(help_text.to_string()))
                 .ok();
@@ -378,6 +392,67 @@ Guardrails Onboarding Presets:
                 tui_tx,
             )
             .await
+        }
+        "/tasks" => {
+            // /tasks is a shortcut for /task list
+            match &app.task_store {
+                Some(store) => {
+                    let cmd = TaskCommand::List;
+                    match hackpi_tasks::handle_task_command(&cmd, store.as_ref()).await {
+                        Ok(output) => {
+                            tui_tx.send(TuiEvent::StreamChunk(output)).ok();
+                            tui_tx.send(TuiEvent::Done).ok();
+                        }
+                        Err(e) => {
+                            tui_tx.send(TuiEvent::Error(e.to_string())).ok();
+                        }
+                    }
+                    true
+                }
+                None => {
+                    tui_tx
+                        .send(TuiEvent::Error(
+                            "Task store not initialized. Task commands are unavailable.".into(),
+                        ))
+                        .ok();
+                    true
+                }
+            }
+        }
+        cmd if cmd.starts_with("/task") => {
+            // Parse "/task <subcommand> [args]" or "/task" alone
+            // `command` is "/task", `rest` from parts contains the subcommand + args
+            let task_input = parts.get(1).copied().unwrap_or("").trim();
+            match &app.task_store {
+                Some(store) => {
+                    match hackpi_tasks::parse_slash_task_command(task_input) {
+                        Ok(task_cmd) => {
+                            match hackpi_tasks::handle_task_command(&task_cmd, store.as_ref()).await
+                            {
+                                Ok(output) => {
+                                    tui_tx.send(TuiEvent::StreamChunk(output)).ok();
+                                    tui_tx.send(TuiEvent::Done).ok();
+                                }
+                                Err(e) => {
+                                    tui_tx.send(TuiEvent::Error(e.to_string())).ok();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tui_tx.send(TuiEvent::Error(e)).ok();
+                        }
+                    }
+                    true
+                }
+                None => {
+                    tui_tx
+                        .send(TuiEvent::Error(
+                            "Task store not initialized. Task commands are unavailable.".into(),
+                        ))
+                        .ok();
+                    true
+                }
+            }
         }
         _ => {
             let err = format!("Unknown command: {command}. Type /help for available commands.");
@@ -1193,5 +1268,345 @@ mod tests {
         assert_eq!(permission_decision_from_key('6'), None);
         assert_eq!(permission_decision_from_key('a'), None);
         assert_eq!(permission_decision_from_key(' '), None);
+    }
+
+    // ── Task slash command tests ──────────────────────────────────────────
+
+    /// Helper to create an App with a task store backed by a temp directory.
+    async fn make_app_with_task_store() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = dir.path().join("tasks");
+        let store = hackpi_tasks::JsonTaskStore::new(tasks_dir)
+            .await
+            .expect("create task store");
+        let mut app = App::new();
+        app.task_store = Some(std::sync::Arc::new(store));
+        (app, dir)
+    }
+
+    #[tokio::test]
+    async fn test_task_create_via_slash() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+        let handled = handle_slash_command(
+            "/task create Add logging",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+        assert!(handled);
+
+        let mut found_output = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_output = true;
+                assert!(text.contains("Created TSK-001"));
+                assert!(text.contains("Add logging"));
+            }
+        }
+        assert!(found_output, "should have output from /task create");
+    }
+
+    #[tokio::test]
+    async fn test_task_list_via_slash() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        // Create a task first
+        handle_slash_command("/task create My task", &mut app, &tx, &mut ge, &registry).await;
+        // Drain events
+        while rx.try_recv().is_ok() {}
+
+        // List tasks
+        let handled = handle_slash_command("/task list", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_output = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_output = true;
+                assert!(text.contains("TSK-001"));
+                assert!(text.contains("My task"));
+            }
+        }
+        assert!(found_output);
+    }
+
+    #[tokio::test]
+    async fn test_tasks_alias_lists() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        // Create a task first
+        handle_slash_command("/task create Test", &mut app, &tx, &mut ge, &registry).await;
+        while rx.try_recv().is_ok() {}
+
+        // Use /tasks alias
+        let handled = handle_slash_command("/tasks", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_output = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_output = true;
+                assert!(text.contains("TSK-001"));
+            }
+        }
+        assert!(found_output);
+    }
+
+    #[tokio::test]
+    async fn test_task_show_via_slash() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        handle_slash_command(
+            "/task create Auth module",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+        while rx.try_recv().is_ok() {}
+
+        let handled =
+            handle_slash_command("/task show TSK-001", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_output = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_output = true;
+                assert!(text.contains("TSK-001"));
+                assert!(text.contains("Auth module"));
+            }
+        }
+        assert!(found_output);
+    }
+
+    #[tokio::test]
+    async fn test_task_move_via_slash() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        while rx.try_recv().is_ok() {}
+
+        let handled = handle_slash_command(
+            "/task move TSK-001 in_progress",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+        assert!(handled);
+
+        let mut found_output = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_output = true;
+                assert!(text.contains("Transitioned TSK-001"));
+                assert!(text.contains("todo → in_progress"));
+            }
+        }
+        assert!(found_output);
+    }
+
+    #[tokio::test]
+    async fn test_task_done_via_slash() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        while rx.try_recv().is_ok() {}
+
+        // Move to in_progress first
+        handle_slash_command(
+            "/task move TSK-001 in_progress",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+        while rx.try_recv().is_ok() {}
+
+        let handled =
+            handle_slash_command("/task done TSK-001", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_output = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_output = true;
+                assert!(text.contains("in_progress → done"));
+            }
+        }
+        assert!(found_output);
+    }
+
+    #[tokio::test]
+    async fn test_task_assign_via_slash() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        while rx.try_recv().is_ok() {}
+
+        let handled = handle_slash_command(
+            "/task assign TSK-001 alice",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+        assert!(handled);
+
+        let mut found_output = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_output = true;
+                assert!(text.contains("Assigned TSK-001 to alice"));
+            }
+        }
+        assert!(found_output);
+    }
+
+    #[tokio::test]
+    async fn test_task_command_without_store_shows_error() {
+        let mut app = App::new();
+        assert!(app.task_store.is_none());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        let handled = handle_slash_command("/task list", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::Error(msg) = event {
+                found_error = true;
+                assert!(msg.contains("Task store not initialized"));
+            }
+        }
+        assert!(found_error);
+    }
+
+    #[tokio::test]
+    async fn test_tasks_without_store_shows_error() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        let handled = handle_slash_command("/tasks", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::Error(msg) = event {
+                found_error = true;
+                assert!(msg.contains("Task store not initialized"));
+            }
+        }
+        assert!(found_error);
+    }
+
+    #[tokio::test]
+    async fn test_task_invalid_transition_shows_error() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        while rx.try_recv().is_ok() {}
+
+        // Try todo → done (invalid in default workflow)
+        let handled =
+            handle_slash_command("/task move TSK-001 done", &mut app, &tx, &mut ge, &registry)
+                .await;
+        assert!(handled);
+
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::Error(msg) = event {
+                found_error = true;
+                assert!(msg.contains("Invalid transition"));
+            }
+        }
+        assert!(found_error);
+    }
+
+    #[tokio::test]
+    async fn test_task_parse_error_shows_error() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        let handled = handle_slash_command("/task create", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::Error(msg) = event {
+                found_error = true;
+                assert!(msg.contains("Missing title"));
+            }
+        }
+        assert!(found_error);
+    }
+
+    #[tokio::test]
+    async fn test_help_includes_task_commands() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+        let _handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
+
+        let mut found_chunk = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_chunk = true;
+                assert!(
+                    text.contains("/task create"),
+                    "help should list /task create"
+                );
+                assert!(text.contains("/task list"), "help should list /task list");
+                assert!(text.contains("/task show"), "help should list /task show");
+                assert!(text.contains("/task move"), "help should list /task move");
+                assert!(text.contains("/task done"), "help should list /task done");
+                assert!(text.contains("/task block"), "help should list /task block");
+                assert!(text.contains("/task label"), "help should list /task label");
+                assert!(
+                    text.contains("/task assign"),
+                    "help should list /task assign"
+                );
+                assert!(text.contains("/tasks"), "help should list /tasks");
+            }
+        }
+        assert!(found_chunk);
     }
 }

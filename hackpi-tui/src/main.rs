@@ -90,6 +90,20 @@ async fn main() -> anyhow::Result<()> {
     let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
 
     let mut app = App::new();
+
+    // Initialize task store
+    let tasks_dir = workspace_root.join(".hackpi").join("tasks");
+    match hackpi_tasks::JsonTaskStore::new(tasks_dir).await {
+        Ok(store) => {
+            app.task_store = Some(Arc::new(store));
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to initialize task store: {e}. Task commands will be unavailable."
+            );
+        }
+    }
+
     let mut input = InputHandler::new();
     let conversation_mut = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
