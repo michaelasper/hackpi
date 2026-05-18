@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Standard BM25 parameters
 const K1: f64 = 1.5;
@@ -16,6 +17,9 @@ pub struct Bm25Result {
 ///
 /// Builds term frequency / document frequency tables for BM25 scoring,
 /// then ranks query results by relevance.
+///
+/// Tracks file modification times for cache invalidation. Call `is_stale()`
+/// to check whether any indexed file has changed on disk since the index was built.
 pub struct Bm25Index {
     /// term -> doc_id -> count within that doc
     term_freq: HashMap<String, HashMap<usize, u32>>,
@@ -29,6 +33,8 @@ pub struct Bm25Index {
     doc_paths: Vec<PathBuf>,
     /// whether the index has been finalized
     built: bool,
+    /// file modification timestamps for cache invalidation
+    file_mtimes: HashMap<PathBuf, SystemTime>,
 }
 
 impl Bm25Index {
@@ -41,14 +47,26 @@ impl Bm25Index {
             avg_doc_length: 0.0,
             doc_paths: Vec::new(),
             built: false,
+            file_mtimes: HashMap::new(),
         }
     }
 
     /// Add a document to the index. The document is tokenized internally.
     /// Call `build()` after all documents are added to finalize the index.
+    ///
+    /// Also records the file's modification timestamp for cache invalidation.
+    /// If the file's mtime cannot be read (e.g. in tests with virtual paths),
+    /// the file is still indexed but mtime tracking is skipped for that path.
     pub fn add_document(&mut self, path: &Path, content: &str) {
         let doc_id = self.doc_paths.len();
         self.doc_paths.push(path.to_path_buf());
+
+        // Record file modification time for cache invalidation
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if let Ok(mtime) = metadata.modified() {
+                self.file_mtimes.insert(path.to_path_buf(), mtime);
+            }
+        }
 
         let tokens = tokenize(content);
         self.doc_lengths.push(tokens.len());
@@ -160,6 +178,23 @@ impl Bm25Index {
     /// Returns true if the index contains no documents.
     pub fn is_empty(&self) -> bool {
         self.doc_paths.is_empty()
+    }
+
+    /// Check whether any indexed file has been modified since the index was built.
+    ///
+    /// Returns `false` if no files were tracked for mtime (e.g. all files were
+    /// added from in-memory content with virtual paths), or if no files have changed.
+    pub fn is_stale(&self) -> bool {
+        for (path, stored_mtime) in &self.file_mtimes {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                if let Ok(current_mtime) = metadata.modified() {
+                    if current_mtime != *stored_mtime {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -521,6 +556,130 @@ mod tests {
         assert!(
             short.unwrap() > long.unwrap(),
             "Short doc should rank higher than long doc for same term frequency"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mtime-based cache invalidation tests
+    // -----------------------------------------------------------------------
+
+    fn temp_dir() -> std::path::PathBuf {
+        static COUNTER: std::sync::OnceLock<std::sync::atomic::AtomicU32> =
+            std::sync::OnceLock::new();
+        let c = COUNTER.get_or_init(|| std::sync::atomic::AtomicU32::new(0));
+        let id = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("hackpi_bm25_mtime_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn create_file(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_is_stale_fresh_index_not_stale() {
+        let dir = temp_dir();
+        let file_path = create_file(&dir, "test.rs", "hello world rust");
+
+        let mut index = Bm25Index::new();
+        index.add_document(&file_path, "hello world rust");
+        index.build();
+
+        assert!(!index.is_stale(), "Freshly built index should not be stale");
+    }
+
+    #[test]
+    fn test_is_stale_returns_true_after_file_modification() {
+        let dir = temp_dir();
+        let file_path = create_file(&dir, "test.rs", "hello world rust");
+
+        let mut index = Bm25Index::new();
+        index.add_document(&file_path, "hello world rust");
+        index.build();
+
+        // Before modification: not stale
+        assert!(!index.is_stale(), "Index should not be stale yet");
+
+        // Now modify the file
+        std::fs::write(&file_path, "hello world rust modified").unwrap();
+
+        // After modification: should be stale
+        assert!(
+            index.is_stale(),
+            "Index should be stale after file modification"
+        );
+    }
+
+    #[test]
+    fn test_is_stale_empty_index_not_stale() {
+        let index = Bm25Index::new();
+        assert!(!index.is_stale(), "Empty index should not be stale");
+    }
+
+    #[test]
+    fn test_is_stale_unchanged_files_not_stale() {
+        let dir = temp_dir();
+        let path_a = create_file(&dir, "a.rs", "hello world");
+        let path_b = create_file(&dir, "b.rs", "rust code");
+
+        let mut index = Bm25Index::new();
+        index.add_document(&path_a, "hello world");
+        index.add_document(&path_b, "rust code");
+        index.build();
+
+        // No modifications — should not be stale
+        assert!(
+            !index.is_stale(),
+            "Index should not be stale when files are unchanged"
+        );
+    }
+
+    #[test]
+    fn test_is_stale_partial_modification_detected() {
+        let dir = temp_dir();
+        let path_a = create_file(&dir, "a.rs", "hello world");
+        let path_b = create_file(&dir, "b.rs", "rust code");
+
+        let mut index = Bm25Index::new();
+        index.add_document(&path_a, "hello world");
+        index.add_document(&path_b, "rust code");
+        index.build();
+
+        // Modify only one file
+        std::fs::write(&path_a, "hello world modified").unwrap();
+
+        assert!(
+            index.is_stale(),
+            "Index should be stale when any file is modified"
+        );
+    }
+
+    #[test]
+    fn test_is_stale_back_to_fresh_after_rebuild() {
+        let dir = temp_dir();
+        let file_path = create_file(&dir, "test.rs", "hello world rust");
+
+        let mut index = Bm25Index::new();
+        index.add_document(&file_path, "hello world rust");
+        index.build();
+
+        // Modify and confirm stale
+        std::fs::write(&file_path, "hello world rust modified").unwrap();
+        assert!(index.is_stale());
+
+        // Rebuild the index with same content (mtime of unchanged file)
+        std::fs::write(&file_path, "hello world rust modified").unwrap();
+        let mut new_index = Bm25Index::new();
+        new_index.add_document(&file_path, "hello world rust modified");
+        new_index.build();
+
+        assert!(
+            !new_index.is_stale(),
+            "After rebuild, index should not be stale"
         );
     }
 }

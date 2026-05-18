@@ -4,7 +4,10 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::SearcherBuilder;
 use hackpi_core::tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
+
+use crate::search_bm25::Bm25Index;
 
 const MAX_MATCHES: usize = 50;
 const MAX_LINE_LENGTH: usize = 500;
@@ -14,6 +17,7 @@ const MAX_CONTEXT: usize = 10;
 pub struct SearchGrepTool {
     workspace_root: std::path::PathBuf,
     cached_files: std::sync::Mutex<Option<Vec<std::path::PathBuf>>>,
+    bm25: std::sync::Mutex<Option<Bm25Index>>,
 }
 
 impl SearchGrepTool {
@@ -21,6 +25,7 @@ impl SearchGrepTool {
         Self {
             workspace_root,
             cached_files: std::sync::Mutex::new(None),
+            bm25: std::sync::Mutex::new(None),
         }
     }
 
@@ -87,6 +92,10 @@ impl Tool for SearchGrepTool {
                 "context_lines": {
                     "type": "integer",
                     "description": "Number of context lines before and after each match. Max 10. Default 2."
+                },
+                "use_bm25": {
+                    "type": "boolean",
+                    "description": "When true, use BM25 ranking to order results by relevance"
                 }
             },
             "required": ["pattern"],
@@ -115,6 +124,11 @@ impl Tool for SearchGrepTool {
             .unwrap_or(DEFAULT_CONTEXT as u64)
             .min(MAX_CONTEXT as u64) as usize;
 
+        let use_bm25 = params
+            .get("use_bm25")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let matcher = match RegexMatcher::new(pattern) {
             Ok(m) => m,
             Err(e) => {
@@ -132,16 +146,15 @@ impl Tool for SearchGrepTool {
 
         let mut searcher = builder.build();
 
-        let mut output = String::new();
+        // Collect per-file matches so we can optionally re-rank with BM25
+        let mut file_matches: HashMap<std::path::PathBuf, String> = HashMap::new();
         let mut match_count = 0;
         let mut truncated = false;
-
-        let mut first_file = true;
 
         // get_file_list handles caching and loads gitignore patterns once
         let paths = self.get_file_list(include_glob.as_deref());
 
-        for file_path in paths {
+        for file_path in &paths {
             if match_count >= MAX_MATCHES {
                 truncated = true;
                 break;
@@ -152,7 +165,7 @@ impl Tool for SearchGrepTool {
 
             let result = searcher.search_path(
                 &matcher,
-                &file_path,
+                file_path,
                 UTF8(|lnum, line| {
                     if match_count >= MAX_MATCHES {
                         return Ok(false);
@@ -188,12 +201,86 @@ impl Tool for SearchGrepTool {
             }
 
             if file_has_match {
+                file_matches.insert(file_path.clone(), file_output);
+            }
+        }
+
+        // Optionally re-rank results using BM25
+        if use_bm25 {
+            let mut bm25_guard = self.bm25.lock().unwrap();
+            let should_rebuild = match &*bm25_guard {
+                Some(index) => index.is_stale() || index.is_empty(),
+                None => true,
+            };
+
+            if should_rebuild {
+                let mut new_index = Bm25Index::new();
+                for file_path in &paths {
+                    if let Ok(content) = std::fs::read_to_string(file_path) {
+                        new_index.add_document(file_path, &content);
+                    }
+                }
+                new_index.build();
+                *bm25_guard = Some(new_index);
+            }
+
+            if let Some(ref index) = *bm25_guard {
+                let scored = index.search(pattern, file_matches.len());
+
+                // Build ordered list: scored files first by BM25 score, then unscored
+                let mut ordered: Vec<(std::path::PathBuf, String)> = Vec::new();
+
+                // Add scored files first (already sorted by score descending)
+                for result in &scored {
+                    if let Some(content) = file_matches.remove(&result.path) {
+                        ordered.push((result.path.clone(), content));
+                    }
+                }
+
+                // Add remaining (unscored) files in walk order
+                for file_path in &paths {
+                    if let Some(content) = file_matches.remove(file_path) {
+                        ordered.push((file_path.clone(), content));
+                    }
+                }
+
+                // Format output with re-ranked order
+                let mut output = String::new();
+                let mut first_file = true;
+                for (path, content) in &ordered {
+                    if !first_file {
+                        output.push('\n');
+                    }
+                    first_file = false;
+                    output.push_str(&format!("--- {} ---\n", path.display()));
+                    output.push_str(content);
+                }
+
+                if truncated {
+                    output.push_str(&format!(
+                        "\n[Search truncated. Over {MAX_MATCHES} matches found. Refine your pattern or use include_glob.]"
+                    ));
+                }
+
+                if output.is_empty() {
+                    output = "No matches found.".to_string();
+                }
+
+                return ToolResult::Success { content: output };
+            }
+        }
+
+        // Without BM25: format output in walk order (original behavior)
+        let mut output = String::new();
+        let mut first_file = true;
+        for file_path in &paths {
+            if let Some(content) = file_matches.remove(file_path) {
                 if !first_file {
                     output.push('\n');
                 }
                 first_file = false;
                 output.push_str(&format!("--- {} ---\n", file_path.display()));
-                output.push_str(&file_output);
+                output.push_str(&content);
             }
         }
 
@@ -478,6 +565,194 @@ mod tests {
         assert!(
             content2.contains("foo") && content2.contains("bar"),
             "cached search should still find files, got: {content2}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BM25 integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_search_grep_schema_has_use_bm25_parameter() {
+        let tool = SearchGrepTool::new(std::path::PathBuf::from("/tmp"));
+        let schema = tool.input_schema();
+
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert!(
+            props.contains_key("use_bm25"),
+            "input_schema should include 'use_bm25' parameter, got keys: {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
+
+        let use_bm25 = props.get("use_bm25").unwrap();
+        assert_eq!(
+            use_bm25.get("type").and_then(|v| v.as_str()),
+            Some("boolean"),
+            "use_bm25 should be a boolean"
+        );
+        assert_eq!(
+            use_bm25.get("description").and_then(|v| v.as_str()),
+            Some("When true, use BM25 ranking to order results by relevance"),
+            "use_bm25 should have a description"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_bm25_default_behavior_unchanged() {
+        let dir = temp_dir();
+        create_file(&dir, "src/a.rs", "fn alpha() { let x = 1; }");
+        create_file(&dir, "src/b.rs", "fn beta() { let y = 2; }");
+
+        let tool = SearchGrepTool::new(dir.clone());
+        let params = serde_json::json!({ "pattern": "fn" });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+        let content = match result {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        // Both files should still be found
+        assert!(content.contains("a.rs"), "Should find a.rs: {content}");
+        assert!(content.contains("b.rs"), "Should find b.rs: {content}");
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_bm25_ranks_relevant_files_first() {
+        let dir = temp_dir();
+        // File with the word "auth" appearing many times as a standalone token
+        // (each `auth;` line produces a separate "auth" token after tokenization)
+        create_file(
+            &dir,
+            "src/auth_impl.rs",
+            "use auth;
+             use auth::middleware;
+             use auth::oauth;
+             use auth::session;
+             fn handle_auth(token: &str) -> bool { true }",
+        );
+        // File with just one mention of "auth"
+        create_file(
+            &dir,
+            "src/db.rs",
+            "use crate::auth::AuthStrategy;
+             fn query_db() -> Vec<String> { vec![] }",
+        );
+
+        let tool = SearchGrepTool::new(dir.clone());
+        let params = serde_json::json!({
+            "pattern": "auth",
+            "use_bm25": true
+        });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+        let content = match result {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        // Both files should be found
+        assert!(
+            content.contains("auth_impl.rs"),
+            "Should find auth_impl.rs: {content}"
+        );
+        assert!(content.contains("db.rs"), "Should find db.rs: {content}");
+
+        // auth_impl.rs should appear before db.rs (higher BM25 relevance)
+        let auth_pos = content.find("auth_impl.rs").unwrap();
+        let db_pos = content.find("db.rs").unwrap();
+        assert!(
+            auth_pos < db_pos,
+            "auth_impl.rs should be ranked before db.rs (auth_impl at {auth_pos}, db at {db_pos})\n{content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_bm25_without_match_falls_back() {
+        let dir = temp_dir();
+        create_file(&dir, "src/a.rs", "fn alpha() {}");
+        create_file(&dir, "src/b.rs", "fn beta() {}");
+
+        let tool = SearchGrepTool::new(dir.clone());
+        let params = serde_json::json!({
+            "pattern": "nonexistent",
+            "use_bm25": true
+        });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+        let content = match result {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        // Should still show "No matches found."
+        assert!(
+            content.contains("No matches found"),
+            "Should say no matches: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_bm25_rebuilds_on_stale_index() {
+        let dir = temp_dir();
+        create_file(&dir, "src/a.rs", "fn alpha() { auth(); }");
+        create_file(&dir, "src/b.rs", "fn beta() { auth(); auth(); }");
+        let file_a = dir.join("src/a.rs");
+
+        let tool = SearchGrepTool::new(dir.clone());
+        let params = serde_json::json!({
+            "pattern": "auth",
+            "use_bm25": true
+        });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        // First search builds index
+        let result1 = tool.execute(params.clone(), &ctx).await;
+        assert!(matches!(
+            result1,
+            hackpi_core::tools::ToolResult::Success { .. }
+        ));
+
+        // Modify file_a so the BM25 index becomes stale
+        std::fs::write(&file_a, "fn alpha() { auth(); auth(); auth(); }").unwrap();
+
+        // Second search should detect staleness and rebuild
+        let result2 = tool.execute(params, &ctx).await;
+        let content = match result2 {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        // Both files should be found
+        assert!(
+            content.contains("a.rs"),
+            "Should find a.rs after rebuild: {content}"
+        );
+        assert!(
+            content.contains("b.rs"),
+            "Should find b.rs after rebuild: {content}"
         );
     }
 }
