@@ -65,25 +65,21 @@ impl Tool for WriteTool {
             }
         };
 
-        let path = self.workspace_root.join(file_path);
-
-        // Path jail: prevent writing outside workspace
-        let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
-        if !canonical.starts_with(&self.workspace_root) {
-            return ToolResult::SystemError {
-                message: "Security Error: Attempted to write outside workspace.".into(),
+        let canonical =
+            match crate::path_jail::resolve_workspace_path(&self.workspace_root, file_path) {
+                Ok(p) => p,
+                Err(e) => return e,
             };
-        }
 
         // Overwrite trap
-        if path.exists() {
+        if canonical.exists() {
             return ToolResult::SystemError {
                 message: "Error: File already exists. Use edit to modify.".into(),
             };
         }
 
         // Phantom directory handler
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = canonical.parent() {
             if !parent.exists() {
                 if let Err(e) = fs::create_dir_all(parent).await {
                     return ToolResult::SystemError {
@@ -96,8 +92,11 @@ impl Tool for WriteTool {
         }
 
         // Atomic write: temp file then rename
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-        let tmp_path = path.with_file_name(format!(".{file_name}.tmp"));
+        let file_name = canonical
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        let tmp_path = canonical.with_file_name(format!(".{file_name}.tmp"));
 
         if let Err(e) = fs::write(&tmp_path, content.as_bytes()).await {
             let msg = match e.kind() {
@@ -109,7 +108,7 @@ impl Tool for WriteTool {
             return ToolResult::SystemError { message: msg };
         }
 
-        if let Err(e) = fs::rename(&tmp_path, &path).await {
+        if let Err(e) = fs::rename(&tmp_path, &canonical).await {
             let _ = fs::remove_file(&tmp_path).await;
             let msg = match e.kind() {
                 std::io::ErrorKind::PermissionDenied => {

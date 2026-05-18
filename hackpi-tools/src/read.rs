@@ -60,7 +60,10 @@ impl Tool for ReadTool {
             }
         };
 
-        let path = self.workspace_root.join(file_path);
+        let path = match crate::path_jail::resolve_workspace_path(&self.workspace_root, file_path) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
 
         if !path.exists() {
             return ToolResult::SystemError {
@@ -315,5 +318,55 @@ mod tests {
             content.contains("file") && content.contains("file.txt"),
             "directory listing should show file.txt, got: {content}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_absolute_path_is_rejected() {
+        let dir = temp_dir();
+
+        let tool = ReadTool::new(dir.clone());
+        let params = serde_json::json!({ "path": "/etc/passwd" });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("Absolute path") || message.contains("outside workspace"),
+                    "expected security error, got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for absolute path, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_path_traversal_outside_workspace_is_rejected() {
+        let dir = temp_dir();
+
+        let tool = ReadTool::new(dir.clone());
+        let params = serde_json::json!({ "path": "../outside.txt" });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("outside workspace") || message.contains("outside workspace"),
+                    "expected security error, got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for path traversal, got {other:?}"),
+        }
     }
 }

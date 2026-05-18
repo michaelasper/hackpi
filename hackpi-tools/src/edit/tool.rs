@@ -102,8 +102,11 @@ impl Tool for EditTool {
             }
         };
 
-        let path = self.workspace_root.join(file_path);
-        let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        let canonical =
+            match crate::path_jail::resolve_workspace_path(&self.workspace_root, file_path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
 
         let original = match fs::read_to_string(&canonical).await {
             Ok(c) => c,
@@ -430,6 +433,17 @@ impl Tool for EditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    fn temp_dir() -> std::path::PathBuf {
+        static COUNTER: OnceLock<std::sync::atomic::AtomicU32> = OnceLock::new();
+        let c = COUNTER.get_or_init(|| std::sync::atomic::AtomicU32::new(0));
+        let id = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("hackpi_edit_test_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn test_input_schema_has_additional_properties_false() {
@@ -446,5 +460,63 @@ mod tests {
             Some(&serde_json::json!(false)),
             "edit tool items schema missing additionalProperties: false"
         );
+    }
+
+    #[tokio::test]
+    async fn test_edit_absolute_path_is_rejected() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("test.txt"), b"hello").unwrap();
+
+        let tool = EditTool::new(dir.clone());
+        let params = serde_json::json!({
+            "path": "/etc/passwd",
+            "edits": [{"op": "append", "lines": ["extra"]}]
+        });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("Absolute path") || message.contains("outside workspace"),
+                    "expected security error, got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for absolute path, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_edit_path_traversal_outside_workspace_is_rejected() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("test.txt"), b"hello").unwrap();
+
+        let tool = EditTool::new(dir.clone());
+        let params = serde_json::json!({
+            "path": "../outside.txt",
+            "edits": [{"op": "append", "lines": ["extra"]}]
+        });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("outside workspace"),
+                    "expected security error, got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for path traversal, got {other:?}"),
+        }
     }
 }
