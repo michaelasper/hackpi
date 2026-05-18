@@ -429,7 +429,7 @@ impl TaskTool {
         let mut blockers = existing.blocked_by.clone();
         if !blockers.contains(&blocked_by.to_string()) {
             return ToolResult::Success {
-                content: format!("Removed {blocked_by} from {id} blockers"),
+                content: format!("{id} is not blocked by {blocked_by}"),
             };
         }
         blockers.retain(|b| b != blocked_by);
@@ -1093,7 +1093,7 @@ mod tests {
         .await;
         match &result {
             ToolResult::Success { content } => {
-                assert_eq!(content, "Removed TSK-002 from TSK-001 blockers");
+                assert_eq!(content, "TSK-001 is not blocked by TSK-002");
             }
             _ => panic!("Expected Success, got: {result:?}"),
         }
