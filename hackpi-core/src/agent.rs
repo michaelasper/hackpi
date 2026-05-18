@@ -76,10 +76,21 @@ pub enum AgentEvent {
     },
 }
 
+/// A pending tool call collected during SSE event processing.
+/// If `parse_error` is `Some`, the tool call's input JSON was malformed
+/// and `input` will be `Value::Null`. The `execute_pending_tool_calls`
+/// method will return a `ToolResult::SystemError` instead of dispatching.
+struct PendingToolCall {
+    id: String,
+    name: String,
+    input: Value,
+    parse_error: Option<String>,
+}
+
 /// Result of processing SSE events from the API stream.
 struct SseEvents {
     text: String,
-    pending_tool_calls: Vec<(String, String, Value)>,
+    pending_tool_calls: Vec<PendingToolCall>,
     stop_reason: Option<String>,
     usage: Option<Usage>,
 }
@@ -115,7 +126,7 @@ impl Agent {
         signal: &tokio::sync::watch::Receiver<bool>,
     ) -> Option<SseEvents> {
         let mut current_text = String::new();
-        let mut pending_tool_calls: Vec<(String, String, Value)> = Vec::new();
+        let mut pending_tool_calls: Vec<PendingToolCall> = Vec::new();
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_input = String::new();
@@ -154,13 +165,22 @@ impl Agent {
                         }
                     }
                     "content_block_stop" if !current_tool_id.is_empty() => {
-                        let input: Value =
-                            serde_json::from_str(&current_tool_input).unwrap_or(Value::Null);
-                        pending_tool_calls.push((
-                            current_tool_id.clone(),
-                            current_tool_name.clone(),
+                        let (input, parse_error) = match serde_json::from_str(&current_tool_input) {
+                            Ok(v) => (v, None),
+                            Err(e) => {
+                                let err_msg = format!(
+                                        "Failed to parse tool '{}' input JSON: {e}\nRaw input: {current_tool_input}",
+                                        current_tool_name,
+                                    );
+                                (Value::Null, Some(err_msg))
+                            }
+                        };
+                        pending_tool_calls.push(PendingToolCall {
+                            id: current_tool_id.clone(),
+                            name: current_tool_name.clone(),
                             input,
-                        ));
+                            parse_error,
+                        });
                         current_tool_id.clear();
                         current_tool_name.clear();
                         current_tool_input.clear();
@@ -177,6 +197,9 @@ impl Agent {
                     }
                     _ => {}
                 },
+                ApiEvent::Error(err) => {
+                    tx.send(AgentEvent::Error(err)).ok();
+                }
                 ApiEvent::Done => break,
             }
         }
@@ -201,18 +224,41 @@ impl Agent {
 
     /// Execute all pending tool calls, dispatching each and collecting results.
     /// Returns `None` if cancelled via `ToolResult::Cancelled`.
+    /// If a `PendingToolCall` has a `parse_error`, a `ToolResult::SystemError`
+    /// is returned directly without dispatching, so the LLM gets feedback
+    /// about malformed JSON.
     async fn execute_pending_tool_calls(
         &self,
-        pending_tool_calls: &[(String, String, Value)],
+        pending_tool_calls: &[PendingToolCall],
         tx: &mpsc::UnboundedSender<AgentEvent>,
         signal: &tokio::sync::watch::Receiver<bool>,
     ) -> Option<Vec<ContentBlock>> {
         let mut tool_results: Vec<ContentBlock> = Vec::new();
 
-        for (tool_id, tool_name, tool_input) in pending_tool_calls {
+        for pending_call in pending_tool_calls {
+            // If JSON parsing failed, return SystemError directly without dispatching
+            if let Some(error_msg) = &pending_call.parse_error {
+                tx.send(AgentEvent::ToolCallStart {
+                    id: pending_call.id.clone(),
+                    name: pending_call.name.clone(),
+                })
+                .ok();
+
+                tool_results.push(ContentBlock::tool_result(&pending_call.id, error_msg));
+
+                tx.send(AgentEvent::ToolCallEnd {
+                    id: pending_call.id.clone(),
+                    result: ToolResult::SystemError {
+                        message: error_msg.clone(),
+                    },
+                })
+                .ok();
+                continue;
+            }
+
             tx.send(AgentEvent::ToolCallStart {
-                id: tool_id.clone(),
-                name: tool_name.clone(),
+                id: pending_call.id.clone(),
+                name: pending_call.name.clone(),
             })
             .ok();
 
@@ -224,7 +270,7 @@ impl Agent {
 
             let result = self
                 .tools
-                .dispatch(tool_name, tool_input.clone(), &ctx)
+                .dispatch(&pending_call.name, pending_call.input.clone(), &ctx)
                 .await;
 
             let tool_result_for_event = match &result {
@@ -232,21 +278,21 @@ impl Agent {
                     let truncated = truncate_output(
                         content,
                         MAX_TOOL_RESULT_BYTES,
-                        tool_id,
+                        &pending_call.id,
                         &self.workspace_root,
                     );
-                    tool_results.push(ContentBlock::tool_result(tool_id, &truncated));
+                    tool_results.push(ContentBlock::tool_result(&pending_call.id, &truncated));
                     ToolResult::Success { content: truncated }
                 }
                 Some(ToolResult::SystemError { message }) => {
-                    tool_results.push(ContentBlock::tool_result(tool_id, message));
+                    tool_results.push(ContentBlock::tool_result(&pending_call.id, message));
                     ToolResult::SystemError {
                         message: message.clone(),
                     }
                 }
                 Some(ToolResult::Timeout) => {
                     tool_results.push(ContentBlock::tool_result(
-                        tool_id,
+                        &pending_call.id,
                         "Tool execution timed out.",
                     ));
                     ToolResult::Timeout
@@ -256,14 +302,14 @@ impl Agent {
                     return None;
                 }
                 None => {
-                    let msg = format!("Unknown tool: {tool_name}");
-                    tool_results.push(ContentBlock::tool_result(tool_id, &msg));
+                    let msg = format!("Unknown tool: {}", pending_call.name);
+                    tool_results.push(ContentBlock::tool_result(&pending_call.id, &msg));
                     ToolResult::SystemError { message: msg }
                 }
             };
 
             tx.send(AgentEvent::ToolCallEnd {
-                id: tool_id.clone(),
+                id: pending_call.id.clone(),
                 result: tool_result_for_event,
             })
             .ok();
@@ -374,6 +420,96 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ApiConfig;
+
+    #[tokio::test]
+    async fn test_malformed_tool_json_returns_system_error() {
+        // A PendingToolCall with a parse_error should produce a SystemError
+        // instead of silently using Value::Null.
+        let api = ApiClient::new(ApiConfig::default()).unwrap();
+        let tools = Arc::new(ToolRegistry::new());
+        let agent = Agent::new(api, tools, "system".into(), PathBuf::from("/tmp"));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+
+        let pending = vec![PendingToolCall {
+            id: "tool_1".into(),
+            name: "bash".into(),
+            input: Value::Null,
+            parse_error: Some(
+                "Failed to parse tool 'bash' input JSON: expected value at line 1 column 2\nRaw input: {broken}".into(),
+            ),
+        }];
+
+        let result = agent
+            .execute_pending_tool_calls(&pending, &tx, &signal_rx)
+            .await;
+
+        assert!(result.is_some(), "should return tool results");
+        let tool_results = result.unwrap();
+        assert_eq!(tool_results.len(), 1, "should have one tool result");
+
+        match &tool_results[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+            } => {
+                assert_eq!(tool_use_id, "tool_1", "should preserve tool_use_id");
+                assert!(
+                    content.contains("Failed to parse"),
+                    "SystemError message should describe parse failure: {content}"
+                );
+                assert!(
+                    content.contains("Raw input: {broken}"),
+                    "SystemError should include raw input: {content}"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_valid_tool_json_passes_through() {
+        // A PendingToolCall without a parse_error should be dispatched normally.
+        // Note: this tool call will fail because the tool doesn't exist,
+        // but it should be a SystemError for "unknown tool", not a parse error.
+        let api = ApiClient::new(ApiConfig::default()).unwrap();
+        let tools = Arc::new(ToolRegistry::new());
+        let agent = Agent::new(api, tools, "system".into(), PathBuf::from("/tmp"));
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+
+        let pending = vec![PendingToolCall {
+            id: "tool_1".into(),
+            name: "nonexistent_tool".into(),
+            input: serde_json::json!({"key": "value"}),
+            parse_error: None,
+        }];
+
+        let result = agent
+            .execute_pending_tool_calls(&pending, &tx, &signal_rx)
+            .await;
+
+        assert!(result.is_some(), "should return tool results");
+        let tool_results = result.unwrap();
+        assert_eq!(tool_results.len(), 1, "should have one tool result");
+
+        match &tool_results[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+            } => {
+                assert_eq!(tool_use_id, "tool_1", "should preserve tool_use_id");
+                assert!(
+                    content.contains("Unknown tool"),
+                    "should report unknown tool, not parse error: {content}"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_truncate_output_under_limit_passthrough() {

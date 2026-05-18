@@ -111,6 +111,8 @@ where
                     }
                     Err(e) => {
                         tracing::warn!("Failed to parse SSE event: {e}, data: {data}");
+                        tx.send(ApiEvent::Error(format!("Failed to parse SSE event: {e}")))
+                            .ok();
                     }
                 }
             }
@@ -123,6 +125,7 @@ where
 #[derive(Debug, Clone)]
 pub enum ApiEvent {
     Event(Box<StreamEvent>),
+    Error(String),
     Done,
 }
 
@@ -159,6 +162,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -195,6 +199,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -211,6 +216,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_process_sse_stream_invalid_json_sends_error_event() {
+        // Invalid JSON in an SSE data line should send an ApiEvent::Error
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
+            Ok(b"data: {invalid json}\n".to_vec()),
+            Ok(b"data: [DONE]\n".to_vec()),
+        ];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed");
+
+        let mut errors = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Error(msg) => errors.push(msg),
+                ApiEvent::Done => break,
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "should have sent one error event for invalid JSON"
+        );
+        assert!(
+            errors[0].contains("Failed to parse"),
+            "error message should describe parse failure: {}",
+            errors[0]
+        );
+    }
+
+    #[tokio::test]
     async fn test_process_sse_stream_handles_done_only() {
         let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(b"data: [DONE]\n".to_vec())];
 
@@ -223,6 +262,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -253,6 +293,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -283,6 +324,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -328,6 +370,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
                 ApiEvent::Done => break,
             }
         }
