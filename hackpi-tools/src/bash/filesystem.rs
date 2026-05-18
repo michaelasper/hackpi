@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::SystemTime;
 
@@ -38,7 +39,7 @@ pub trait FileSystem: Send {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FileNode {
-    pub content: Vec<u8>,
+    pub content: Arc<Vec<u8>>,
     #[allow(dead_code)]
     pub mode: u32,
     pub is_dir: bool,
@@ -56,7 +57,7 @@ pub struct InMemoryFs {
 impl Default for InMemoryFs {
     fn default() -> Self {
         let mut root = FileNode {
-            content: Vec::new(),
+            content: Arc::new(Vec::new()),
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
@@ -67,7 +68,7 @@ impl Default for InMemoryFs {
         };
 
         let mut home = FileNode {
-            content: Vec::new(),
+            content: Arc::new(Vec::new()),
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
@@ -78,7 +79,7 @@ impl Default for InMemoryFs {
         };
 
         let tmp = FileNode {
-            content: Vec::new(),
+            content: Arc::new(Vec::new()),
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
@@ -89,7 +90,7 @@ impl Default for InMemoryFs {
         };
 
         let dev_null = FileNode {
-            content: Vec::new(),
+            content: Arc::new(Vec::new()),
             mode: 0o644,
             is_dir: false,
             is_symlink: false,
@@ -100,7 +101,7 @@ impl Default for InMemoryFs {
         };
 
         let bashrc = FileNode {
-            content: b"# ~/.bashrc - default bash configuration\n".to_vec(),
+            content: Arc::new(b"# ~/.bashrc - default bash configuration\n".to_vec()),
             mode: 0o644,
             is_dir: false,
             is_symlink: false,
@@ -111,7 +112,7 @@ impl Default for InMemoryFs {
         };
 
         let mut user = FileNode {
-            content: Vec::new(),
+            content: Arc::new(Vec::new()),
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
@@ -126,7 +127,7 @@ impl Default for InMemoryFs {
         root.children.insert("tmp".into(), tmp);
 
         let mut dev = FileNode {
-            content: Vec::new(),
+            content: Arc::new(Vec::new()),
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
@@ -213,7 +214,7 @@ impl FileSystem for InMemoryFs {
                     "Is a directory",
                 ));
             }
-            Ok(node.content.clone())
+            Ok((*node.content).clone())
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -252,7 +253,7 @@ impl FileSystem for InMemoryFs {
                 current.children.insert(
                     seg.to_string(),
                     FileNode {
-                        content: Vec::new(),
+                        content: Arc::new(Vec::new()),
                         mode: 0o755,
                         is_dir: true,
                         is_symlink: false,
@@ -269,7 +270,7 @@ impl FileSystem for InMemoryFs {
         current.children.insert(
             file_name.into(),
             FileNode {
-                content: content.to_vec(),
+                content: Arc::new(content.to_vec()),
                 mode: 0o644,
                 is_dir: false,
                 is_symlink: false,
@@ -399,7 +400,7 @@ impl FileSystem for InMemoryFs {
                 current.children.insert(
                     name.clone(),
                     FileNode {
-                        content: Vec::new(),
+                        content: Arc::new(Vec::new()),
                         mode: 0o755,
                         is_dir: true,
                         is_symlink: false,
@@ -494,7 +495,7 @@ impl FileSystem for InMemoryFs {
                 current.children.insert(
                     name.into(),
                     FileNode {
-                        content: Vec::new(),
+                        content: Arc::new(Vec::new()),
                         mode: 0o755,
                         is_dir: true,
                         is_symlink: false,
@@ -568,7 +569,7 @@ impl FileSystem for InMemoryFs {
                 current.children.insert(
                     seg.to_string(),
                     FileNode {
-                        content: Vec::new(),
+                        content: Arc::new(Vec::new()),
                         mode: 0o755,
                         is_dir: true,
                         is_symlink: false,
@@ -585,7 +586,7 @@ impl FileSystem for InMemoryFs {
         current.children.insert(
             file_name.into(),
             FileNode {
-                content: Vec::new(),
+                content: Arc::new(Vec::new()),
                 mode: 0o644,
                 is_dir: false,
                 is_symlink: true,
@@ -805,5 +806,57 @@ mod tests {
             meta_after.size, meta_before.size,
             "file size should be preserved after rename"
         );
+    }
+
+    // --- COR-25: Arc-optimized reads ---
+
+    #[test]
+    fn test_arc_read_returns_correct_content() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/arc_test.txt"), b"hello arc").unwrap();
+        let content = fs.read(Path::new("/arc_test.txt")).unwrap();
+        assert_eq!(content, b"hello arc");
+    }
+
+    #[test]
+    fn test_arc_read_large_content() {
+        let fs = InMemoryFs::default();
+        let large = vec![b'A'; 65536];
+        fs.write(Path::new("/large.txt"), &large).unwrap();
+        let content = fs.read(Path::new("/large.txt")).unwrap();
+        assert_eq!(content.len(), 65536);
+        assert_eq!(content, large);
+    }
+
+    #[test]
+    fn test_arc_overwrite_changes_content() {
+        let fs = InMemoryFs::default();
+        fs.write(Path::new("/overwrite.txt"), b"first").unwrap();
+        assert_eq!(fs.read(Path::new("/overwrite.txt")).unwrap(), b"first");
+        fs.write(Path::new("/overwrite.txt"), b"second").unwrap();
+        assert_eq!(fs.read(Path::new("/overwrite.txt")).unwrap(), b"second");
+    }
+
+    #[test]
+    fn test_arc_many_reads_produce_consistent_data() {
+        let fs = InMemoryFs::default();
+        let data = b"The quick brown fox jumps over the lazy dog";
+        fs.write(Path::new("/fox.txt"), data).unwrap();
+
+        // Read many times concurrently
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for _ in 0..20 {
+                handles.push(s.spawn(|| {
+                    for _ in 0..50 {
+                        let content = fs.read(Path::new("/fox.txt")).unwrap();
+                        assert_eq!(content, data);
+                    }
+                }));
+            }
+        });
+
+        // Verify still correct after concurrent reads
+        assert_eq!(fs.read(Path::new("/fox.txt")).unwrap(), data);
     }
 }
