@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::chunker::Chunk;
+
 /// Standard BM25 parameters
 const K1: f64 = 1.5;
 const B: f64 = 0.75;
@@ -11,6 +13,12 @@ const B: f64 = 0.75;
 pub struct Bm25Result {
     pub path: PathBuf,
     pub score: f64,
+    /// The structural type of the chunk this result came from (e.g., "fn", "struct").
+    /// Only set when results come from chunk-based indexing.
+    pub chunk_type: Option<String>,
+    /// The name of the chunk (e.g., function name, struct name).
+    /// Only set when results come from chunk-based indexing.
+    pub chunk_name: Option<String>,
 }
 
 /// In-memory BM25 search index over text documents.
@@ -35,6 +43,10 @@ pub struct Bm25Index {
     built: bool,
     /// file modification timestamps for cache invalidation
     file_mtimes: HashMap<PathBuf, SystemTime>,
+    /// chunk type metadata, indexed by doc_id (None for non-chunked docs)
+    chunk_types: Vec<Option<String>>,
+    /// chunk name metadata, indexed by doc_id (None for non-chunked docs)
+    chunk_names: Vec<Option<String>>,
 }
 
 impl Bm25Index {
@@ -48,6 +60,8 @@ impl Bm25Index {
             doc_paths: Vec::new(),
             built: false,
             file_mtimes: HashMap::new(),
+            chunk_types: Vec::new(),
+            chunk_names: Vec::new(),
         }
     }
 
@@ -88,6 +102,53 @@ impl Bm25Index {
             // Since we iterate unique terms from local_tf, each term from this doc
             // contributes exactly 1 to doc_freq
             *self.doc_freq.entry(term).or_insert(0) += 1;
+        }
+    }
+
+    /// Add a document to the index as separate chunks, one per structural item.
+    ///
+    /// Each chunk is indexed as an independent document with a path like
+    /// `filepath:chunk_type:name` (e.g., `src/server.rs:fn:handle_request`).
+    ///
+    /// Search results from chunked documents include `chunk_type` and `chunk_name`
+    /// metadata so consumers can display them alongside match results.
+    ///
+    /// This method does NOT track mtimes (the caller should manage cache
+    /// invalidation for the source file as a whole).
+    ///
+    /// Call `build()` after all documents (chunked or not) are added.
+    pub fn add_chunked_document(&mut self, path: &Path, chunks: &[Chunk]) {
+        for chunk in chunks {
+            let chunk_path = format!("{}:{}:{}", path.display(), chunk.chunk_type, chunk.name);
+            let doc_id = self.doc_paths.len();
+            self.doc_paths.push(PathBuf::from(&chunk_path));
+
+            let tokens = tokenize(&chunk.content);
+            self.doc_lengths.push(tokens.len());
+
+            let mut local_tf: HashMap<String, u32> = HashMap::new();
+            for token in &tokens {
+                *local_tf.entry(token.clone()).or_insert(0) += 1;
+            }
+
+            for (term, count) in local_tf {
+                self.term_freq
+                    .entry(term.clone())
+                    .or_default()
+                    .insert(doc_id, count);
+                *self.doc_freq.entry(term).or_insert(0) += 1;
+            }
+
+            // Store chunk metadata alongside the path
+            // We use a parallel vec since Bm25Result needs it at search time.
+            // Lazy-init the metadata vecs.
+            let meta_len = self.chunk_types.len();
+            if doc_id >= meta_len {
+                self.chunk_types.resize(doc_id + 1, None);
+                self.chunk_names.resize(doc_id + 1, None);
+            }
+            self.chunk_types[doc_id] = Some(chunk.chunk_type.clone());
+            self.chunk_names[doc_id] = Some(chunk.name.clone());
         }
     }
 
@@ -157,6 +218,8 @@ impl Bm25Index {
             .map(|(doc_id, score)| Bm25Result {
                 path: self.doc_paths[doc_id].clone(),
                 score,
+                chunk_type: self.chunk_types.get(doc_id).and_then(|c| c.clone()),
+                chunk_name: self.chunk_names.get(doc_id).and_then(|c| c.clone()),
             })
             .collect();
 
@@ -681,5 +744,176 @@ mod tests {
             !new_index.is_stale(),
             "After rebuild, index should not be stale"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Chunk-based indexing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_add_chunked_document_increases_count() {
+        let mut index = Bm25Index::new();
+        let path = Path::new("test.rs");
+        let chunks = vec![Chunk {
+            path: path.to_path_buf(),
+            start_line: 1,
+            end_line: 1,
+            chunk_type: "fn".to_string(),
+            name: "hello".to_string(),
+            content: "fn hello() { println!(\"hi\"); }".to_string(),
+        }];
+        index.add_chunked_document(path, &chunks);
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn test_add_chunked_document_multiple_chunks() {
+        let mut index = Bm25Index::new();
+        let path = Path::new("test.rs");
+        let chunks = vec![
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 1,
+                end_line: 1,
+                chunk_type: "fn".to_string(),
+                name: "hello".to_string(),
+                content: "fn hello() { println!(\"hi\"); }".to_string(),
+            },
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 3,
+                end_line: 5,
+                chunk_type: "struct".to_string(),
+                name: "Point".to_string(),
+                content: "struct Point {\n    x: i32,\n    y: i32,\n}".to_string(),
+            },
+        ];
+        index.add_chunked_document(path, &chunks);
+        assert_eq!(index.len(), 2);
+    }
+
+    #[test]
+    fn test_search_chunked_document_returns_chunk_info() {
+        let mut index = Bm25Index::new();
+        let path = Path::new("src/server.rs");
+        let chunks = vec![
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 1,
+                end_line: 3,
+                chunk_type: "fn".to_string(),
+                name: "handle_request".to_string(),
+                content: "fn handle_request() { process(); }".to_string(),
+            },
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 5,
+                end_line: 7,
+                chunk_type: "struct".to_string(),
+                name: "Config".to_string(),
+                content: "struct Config { port: u16 }".to_string(),
+            },
+        ];
+        index.add_chunked_document(path, &chunks);
+        index.build();
+
+        let results = index.search("handle_request", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_type.as_deref(), Some("fn"));
+        assert_eq!(results[0].chunk_name.as_deref(), Some("handle_request"));
+    }
+
+    #[test]
+    fn test_search_chunked_document_by_type() {
+        let mut index = Bm25Index::new();
+        let path = Path::new("src/lib.rs");
+        let chunks = vec![
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 1,
+                end_line: 2,
+                chunk_type: "fn".to_string(),
+                name: "run".to_string(),
+                content: "fn run() { loop {} }".to_string(),
+            },
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 4,
+                end_line: 6,
+                chunk_type: "struct".to_string(),
+                name: "App".to_string(),
+                content: "struct App { name: String }".to_string(),
+            },
+        ];
+        index.add_chunked_document(path, &chunks);
+        index.build();
+
+        // Search for "struct" — should match the struct chunk
+        let results = index.search("struct", 10);
+        assert!(!results.is_empty());
+
+        // The struct chunk should be in results with type "struct"
+        let struct_result = results
+            .iter()
+            .find(|r| r.chunk_type.as_deref() == Some("struct"));
+        assert!(struct_result.is_some(), "Should find struct chunk");
+        assert_eq!(struct_result.unwrap().chunk_name.as_deref(), Some("App"));
+    }
+
+    #[test]
+    fn test_search_chunked_document_ranks_individual_chunks() {
+        let mut index = Bm25Index::new();
+        let path = Path::new("src/lib.rs");
+        let chunks = vec![
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 1,
+                end_line: 1,
+                chunk_type: "fn".to_string(),
+                name: "auth".to_string(),
+                content: "fn auth() { authenticate(); }".to_string(),
+            },
+            Chunk {
+                path: path.to_path_buf(),
+                start_line: 3,
+                end_line: 3,
+                chunk_type: "fn".to_string(),
+                name: "other".to_string(),
+                content: "fn other() { println!(\"hi\"); }".to_string(),
+            },
+        ];
+        index.add_chunked_document(path, &chunks);
+        index.build();
+
+        // Search for "authenticate" — should only match the auth chunk
+        let results = index.search("authenticate", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_name.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn test_search_chunked_document_with_no_match() {
+        let mut index = Bm25Index::new();
+        let path = Path::new("test.rs");
+        let chunks = vec![Chunk {
+            path: path.to_path_buf(),
+            start_line: 1,
+            end_line: 1,
+            chunk_type: "fn".to_string(),
+            name: "hello".to_string(),
+            content: "fn hello() { println!(\"hi\"); }".to_string(),
+        }];
+        index.add_chunked_document(path, &chunks);
+        index.build();
+
+        let results = index.search("nonexistent", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_add_chunked_document_empty_chunks() {
+        let mut index = Bm25Index::new();
+        index.add_chunked_document(Path::new("test.rs"), &[]);
+        assert_eq!(index.len(), 0);
     }
 }

@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::chunker::{CodeChunker, GenericChunker, RustChunker};
 use crate::search_bm25::Bm25Index;
 
 const MAX_MATCHES: usize = 50;
@@ -215,8 +216,27 @@ impl Tool for SearchGrepTool {
 
             if should_rebuild {
                 let mut new_index = Bm25Index::new();
+                let rust_chunker = RustChunker::new();
+                let generic_chunker = GenericChunker::new();
+
                 for file_path in &paths {
                     if let Ok(content) = std::fs::read_to_string(file_path) {
+                        // Use chunker for .rs files, generic chunker for others
+                        let is_rust = file_path.extension().map(|e| e == "rs").unwrap_or(false);
+                        if is_rust {
+                            let chunks = rust_chunker.chunk_file(file_path, &content);
+                            if !chunks.is_empty() {
+                                new_index.add_chunked_document(file_path, &chunks);
+                                continue; // skip whole-file indexing when chunked
+                            }
+                        } else {
+                            let chunks = generic_chunker.chunk_file(file_path, &content);
+                            if !chunks.is_empty() {
+                                new_index.add_chunked_document(file_path, &chunks);
+                                continue; // skip whole-file indexing when chunked
+                            }
+                        }
+                        // Fallback: index the whole file if chunking produced no chunks
                         new_index.add_document(file_path, &content);
                     }
                 }
@@ -227,13 +247,53 @@ impl Tool for SearchGrepTool {
             if let Some(ref index) = *bm25_guard {
                 let scored = index.search(pattern, file_matches.len());
 
+                // Helper: convert a chunk path (filepath:type:name) back to its source file path
+                fn source_file_path(p: &std::path::Path) -> std::path::PathBuf {
+                    let s = p.to_string_lossy();
+                    if let Some(colon_pos) = s.rfind(':') {
+                        let before_colon = &s[..colon_pos];
+                        if let Some(second_colon) = before_colon.rfind(':') {
+                            return std::path::PathBuf::from(&s[..second_colon]);
+                        }
+                    }
+                    p.to_path_buf()
+                }
+
+                // Build a map: source_path -> (score, chunk_type, chunk_name) for best chunk
+                let mut best_chunk: HashMap<
+                    std::path::PathBuf,
+                    (f64, Option<String>, Option<String>),
+                > = HashMap::new();
+                for result in &scored {
+                    let src = source_file_path(&result.path);
+                    let entry = best_chunk.entry(src).or_insert((result.score, None, None));
+                    if result.score > entry.0 {
+                        *entry = (
+                            result.score,
+                            result.chunk_type.clone(),
+                            result.chunk_name.clone(),
+                        );
+                    }
+                }
+
+                // Sort source paths by their best chunk score
+                let mut ranked_sources: Vec<(
+                    std::path::PathBuf,
+                    (f64, Option<String>, Option<String>),
+                )> = best_chunk.into_iter().collect();
+                ranked_sources.sort_by(|a, b| {
+                    b.1 .0
+                        .partial_cmp(&a.1 .0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
                 // Build ordered list: scored files first by BM25 score, then unscored
                 let mut ordered: Vec<(std::path::PathBuf, String)> = Vec::new();
 
-                // Add scored files first (already sorted by score descending)
-                for result in &scored {
-                    if let Some(content) = file_matches.remove(&result.path) {
-                        ordered.push((result.path.clone(), content));
+                // Add scored files first (already sorted by best-chunk score descending)
+                for (src_path, _) in &ranked_sources {
+                    if let Some(content) = file_matches.remove(src_path) {
+                        ordered.push((src_path.clone(), content));
                     }
                 }
 
@@ -247,7 +307,36 @@ impl Tool for SearchGrepTool {
                 // Format output with re-ranked order
                 let mut output = String::new();
                 let mut first_file = true;
+                for (src_path, (_, chunk_type, chunk_name)) in &ranked_sources {
+                    // Find the content for this source file
+                    let content = ordered
+                        .iter()
+                        .find(|(p, _)| p == src_path)
+                        .map(|(_, c)| c.as_str())
+                        .unwrap_or("");
+
+                    if !first_file {
+                        output.push('\n');
+                    }
+                    first_file = false;
+
+                    // Include chunk info in header when available
+                    let header = match (chunk_type, chunk_name) {
+                        (Some(typ), Some(name)) if !name.is_empty() => {
+                            format!("--- {}: {} {}() ---", src_path.display(), typ, name)
+                        }
+                        _ => format!("--- {} ---", src_path.display()),
+                    };
+                    output.push_str(&header);
+                    output.push('\n');
+                    output.push_str(content);
+                }
+
+                // Add remaining (unscored) files without chunk info
                 for (path, content) in &ordered {
+                    if ranked_sources.iter().any(|(p, _)| p == path) {
+                        continue;
+                    }
                     if !first_file {
                         output.push('\n');
                     }

@@ -1,4 +1,5 @@
 pub mod bash;
+pub mod chunker;
 pub mod edit;
 pub mod path_jail;
 pub mod read;
