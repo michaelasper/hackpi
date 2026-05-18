@@ -10,7 +10,7 @@ use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
 use hackpi_guardrails::{GuardEvaluator, PermissionDecision, SettingsPaths};
 use hackpi_tools::register_all_tools;
-use hackpi_tui::app::{handle_slash_command, App, AppState};
+use hackpi_tui::app::{handle_slash_command, App, AppState, AppView};
 use hackpi_tui::events::TuiEvent;
 use hackpi_tui::input::InputHandler;
 use hackpi_tui::ui;
@@ -219,6 +219,41 @@ async fn main() -> anyhow::Result<()> {
                         KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                             break;
                         }
+                        KeyCode::Tab => {
+                            app.cycle_view();
+                            // Refresh cache when entering TaskBoard
+                            if matches!(app.active_view, AppView::TaskBoard) {
+                                app.refresh_task_cache();
+                            }
+                        }
+                        KeyCode::Up => {
+                            if matches!(app.active_view, AppView::TaskBoard) {
+                                app.task_cursor_up();
+                            } else {
+                                app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if matches!(app.active_view, AppView::TaskBoard) {
+                                app.task_cursor_down();
+                            } else {
+                                app.scroll_offset = app.scroll_offset.saturating_add(5);
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if matches!(app.active_view, AppView::TaskBoard) {
+                                app.enter_task_detail();
+                            }
+                        }
+                        KeyCode::Esc => {
+                            if !matches!(app.active_view, AppView::Conversation) {
+                                app.go_back();
+                                // Refresh cache when returning to TaskBoard
+                                if matches!(app.active_view, AppView::TaskBoard) {
+                                    app.refresh_task_cache();
+                                }
+                            }
+                        }
                         KeyCode::PageUp => {
                             app.scroll_offset = app.scroll_offset.saturating_sub(5);
                         }
@@ -247,6 +282,12 @@ async fn main() -> anyhow::Result<()> {
                                             &tools,
                                         )
                                         .await;
+                                        // Refresh task cache after task operations on TaskBoard
+                                        if submitted.starts_with("/task")
+                                            && matches!(app.active_view, AppView::TaskBoard)
+                                        {
+                                            app.refresh_task_cache();
+                                        }
                                     } else {
                                         tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
 

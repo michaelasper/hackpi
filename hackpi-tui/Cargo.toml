@@ -25,3 +25,4 @@ hackpi-tasks = { path = "../hackpi-tasks" }
 
 [dev-dependencies]
 tempfile = "3"
+chrono.workspace = true

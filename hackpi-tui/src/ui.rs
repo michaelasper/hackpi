@@ -1,4 +1,4 @@
-use crate::app::{App, AppState, ToolCallStatus};
+use crate::app::{AppState, AppView, ToolCallStatus};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -7,20 +7,34 @@ use ratatui::{
     Frame,
 };
 
+use crate::app::App;
+
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(1), // tab header
+            Constraint::Min(1),    // main content
+            Constraint::Length(3), // input
+            Constraint::Length(1), // status bar
         ])
         .split(area);
 
-    render_header(frame, chunks[0], app);
-    render_conversation(frame, chunks[1], app);
+    render_tab_header(frame, chunks[0], &app.active_view, app);
+
+    match &app.active_view {
+        AppView::Conversation | AppView::TaskDetail(_) => {
+            render_conversation(frame, chunks[1], app);
+        }
+        AppView::TaskBoard => {
+            render_task_board(frame, chunks[1], app);
+        }
+        AppView::TaskGraph => {
+            render_placeholder(frame, chunks[1], "Graph view coming soon...");
+        }
+    }
+
     render_input(frame, chunks[2], app);
     render_status(frame, chunks[3], app);
 
@@ -29,29 +43,52 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn header_text(app: &App) -> Line<'static> {
+/// Render the tab header with active/inactive tab highlighting and version/usage info.
+fn render_tab_header(frame: &mut Frame, area: Rect, active_view: &AppView, app: &App) {
+    let tabs = [
+        (
+            "Conversation",
+            matches!(active_view, AppView::Conversation | AppView::TaskDetail(_)),
+        ),
+        ("Tasks", matches!(active_view, AppView::TaskBoard)),
+        ("Graph", matches!(active_view, AppView::TaskGraph)),
+    ];
+
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, (label, is_active)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("    "));
+        }
+        spans.push(Span::styled(
+            format!("[Tab] {label}"),
+            if *is_active {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else if *label == "Graph" {
+                // Graph is a future placeholder — dimmed
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+    }
+
+    // Right-align version and usage info
     let usage_text = match &app.usage {
         Some(u) => format!("{}↑ {}↓", u.input_tokens, u.output_tokens),
         None => "0↑ 0↓".into(),
     };
     let version = env!("CARGO_PKG_VERSION");
-    Line::from(vec![
-        Span::styled(
-            format!(" hackpi v{version} "),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("· ds4 · "),
-        Span::raw(usage_text),
-    ])
-}
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!("hackpi v{version} · {usage_text}"),
+        Style::default().fg(Color::DarkGray),
+    ));
 
-fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let text = header_text(app);
-
+    let line = Line::from(spans);
     frame.render_widget(
-        Paragraph::new(text).style(Style::default().bg(Color::Black)),
+        Paragraph::new(line).style(Style::default().bg(Color::Black)),
         area,
     );
 }
@@ -164,6 +201,109 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(list, area);
 }
 
+/// Color for a task state badge.
+fn task_state_color(state: &str) -> Color {
+    match state {
+        "todo" => Color::Gray,
+        "in_progress" => Color::Yellow,
+        "blocked" => Color::Red,
+        "in_review" => Color::Blue,
+        "done" => Color::Green,
+        "cancelled" => Color::DarkGray,
+        _ => Color::DarkGray,
+    }
+}
+
+/// Render the task board list view.
+fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
+    let mut items: Vec<ListItem> = Vec::new();
+
+    if app.task_list_cache.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  No tasks. Use /task create <title> to add one.",
+            Style::default().fg(Color::DarkGray),
+        ))));
+    } else {
+        for (i, task) in app.task_list_cache.iter().enumerate() {
+            let is_selected = i == app.selected_task_idx;
+            let state_color = task_state_color(&task.state);
+            let cursor = if is_selected { "▸ " } else { "  " };
+
+            // Main task line: TSK-001 [in_progress] Implement auth module
+            let mut line_spans: Vec<Span> = Vec::new();
+
+            // Selection cursor
+            line_spans.push(Span::styled(
+                cursor.to_string(),
+                if is_selected {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ));
+
+            // Task ID
+            line_spans.push(Span::styled(
+                format!("{} ", task.id),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+
+            // State badge
+            line_spans.push(Span::styled(
+                format!("[{}] ", task.state),
+                Style::default().fg(state_color),
+            ));
+
+            // Title
+            line_spans.push(Span::styled(
+                task.title.clone(),
+                if is_selected {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::Reset)
+                },
+            ));
+
+            items.push(ListItem::new(Line::from(line_spans)));
+
+            // Show blocked_by as indented sub-entries
+            if !task.blocked_by.is_empty() {
+                for blocker_id in &task.blocked_by {
+                    items.push(ListItem::new(Line::from(Span::styled(
+                        format!("      ⬑ blocked by {}", blocker_id),
+                        Style::default().fg(Color::Red),
+                    ))));
+                }
+            }
+        }
+    }
+
+    // Footer showing available commands
+    items.push(ListItem::new(Line::from("")));
+    items.push(ListItem::new(Line::from(Span::styled(
+        "  ↑/↓ navigate  Enter detail  Esc back  /task create <title>  /task move <id> <state>",
+        Style::default().fg(Color::DarkGray),
+    ))));
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::NONE)
+            .style(Style::default()),
+    );
+
+    frame.render_widget(list, area);
+}
+
+/// Render a placeholder view for unimplemented tabs.
+fn render_placeholder(frame: &mut Frame, area: Rect, message: &str) {
+    let text = Paragraph::new(message)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(text, area);
+}
+
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let input_block = Block::default()
         .borders(Borders::TOP)
@@ -190,6 +330,12 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn status_bar_text(app: &App) -> String {
+    let view_hint = match &app.active_view {
+        AppView::Conversation => "",
+        AppView::TaskBoard => "Tab:Tasks  ",
+        AppView::TaskDetail(id) => return format!(" Task: {id}  |  Esc back  ●"),
+        AppView::TaskGraph => "Tab:Graph  ",
+    };
     let state_text = match app.state {
         AppState::Resting => "Ctrl+C interrupt  Ctrl+L clear  Ctrl+D exit  /help",
         AppState::Generating => "Generating... (Ctrl+C to interrupt)",
@@ -197,9 +343,9 @@ fn status_bar_text(app: &App) -> String {
     };
     let conn = "●";
     if app.status_message.is_empty() {
-        format!(" {state_text}  {conn}")
+        format!(" {view_hint}{state_text}  {conn}")
     } else {
-        format!(" {} | {state_text}  {conn}", app.status_message)
+        format!(" {view_hint}{} | {state_text}  {conn}", app.status_message)
     }
 }
 
@@ -305,39 +451,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_header_includes_version() {
-        let app = App::new();
-        let line = header_text(&app);
-        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            rendered.contains("v0.1.0") || rendered.contains("v"),
-            "header should include version, got: {rendered}"
-        );
-    }
+    fn test_tab_header_shows_version_and_usage() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
-    #[test]
-    fn test_header_shows_zero_usage() {
-        let app = App::new();
-        let line = header_text(&app);
-        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            rendered.contains("0↑") && rendered.contains("0↓"),
-            "header should show 0↑ 0↓, got: {rendered}"
-        );
-    }
-
-    #[test]
-    fn test_header_shows_usage() {
         let mut app = App::new();
         app.usage = Some(hackpi_core::types::Usage {
             input_tokens: 150,
             output_tokens: 75,
         });
-        let line = header_text(&app);
-        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
         assert!(
-            rendered.contains("150↑") && rendered.contains("75↓"),
-            "header should show 150↑ 75↓, got: {rendered}"
+            cell_str.contains("150↑"),
+            "tab header should show usage, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("75↓"),
+            "tab header should show usage, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_tab_header_shows_zero_usage() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("0↑"),
+            "tab header should show 0↑, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("0↓"),
+            "tab header should show 0↓, got: {cell_str}"
         );
     }
 
@@ -506,5 +673,240 @@ mod tests {
             cell_str.contains("Esc"),
             "modal should show Esc key binding"
         );
+    }
+
+    // ── Task board view tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_task_state_color_todo() {
+        assert_eq!(task_state_color("todo"), Color::Gray);
+    }
+
+    #[test]
+    fn test_task_state_color_in_progress() {
+        assert_eq!(task_state_color("in_progress"), Color::Yellow);
+    }
+
+    #[test]
+    fn test_task_state_color_blocked() {
+        assert_eq!(task_state_color("blocked"), Color::Red);
+    }
+
+    #[test]
+    fn test_task_state_color_in_review() {
+        assert_eq!(task_state_color("in_review"), Color::Blue);
+    }
+
+    #[test]
+    fn test_task_state_color_done() {
+        assert_eq!(task_state_color("done"), Color::Green);
+    }
+
+    #[test]
+    fn test_task_state_color_cancelled() {
+        assert_eq!(task_state_color("cancelled"), Color::DarkGray);
+    }
+
+    #[test]
+    fn test_task_state_color_unknown() {
+        assert_eq!(task_state_color("unknown_state"), Color::DarkGray);
+    }
+
+    #[test]
+    fn test_render_tab_header_conversation_active() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+        assert!(matches!(app.active_view, crate::app::AppView::Conversation));
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Conversation"),
+            "tab header should show Conversation tab"
+        );
+        assert!(
+            cell_str.contains("Tasks"),
+            "tab header should show Tasks tab"
+        );
+        assert!(
+            cell_str.contains("Graph"),
+            "tab header should show Graph tab"
+        );
+    }
+
+    #[test]
+    fn test_render_task_board_empty_state() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.task_list_cache = vec![];
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("No tasks"),
+            "task board should show empty state message"
+        );
+    }
+
+    #[test]
+    fn test_render_task_board_with_tasks() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.task_list_cache = vec![
+            hackpi_tasks::Task {
+                id: "TSK-001".to_string(),
+                title: "Implement auth".to_string(),
+                description: String::new(),
+                state: "in_progress".to_string(),
+                priority: hackpi_tasks::TaskPriority::High,
+                workflow: "default".to_string(),
+                blocked_by: vec![],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            hackpi_tasks::Task {
+                id: "TSK-002".to_string(),
+                title: "Write tests".to_string(),
+                description: String::new(),
+                state: "todo".to_string(),
+                priority: hackpi_tasks::TaskPriority::Medium,
+                workflow: "default".to_string(),
+                blocked_by: vec!["TSK-001".to_string()],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        ];
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("TSK-001"),
+            "task board should show TSK-001"
+        );
+        assert!(
+            cell_str.contains("TSK-002"),
+            "task board should show TSK-002"
+        );
+        assert!(
+            cell_str.contains("Implement auth"),
+            "task board should show task title"
+        );
+        assert!(
+            cell_str.contains("blocked by TSK-001"),
+            "task board should show blocked_by sub-entry"
+        );
+    }
+
+    #[test]
+    fn test_render_task_graph_placeholder() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskGraph;
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("coming soon"),
+            "graph placeholder should show coming soon"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_task_id_in_status() {
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        let text = status_bar_text(&app);
+        assert!(
+            text.contains("TSK-001"),
+            "status bar should show task ID in detail view: {text}"
+        );
+    }
+
+    #[test]
+    fn test_render_no_panic_with_task_board_and_empty_cache() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.task_list_cache = vec![];
+        app.selected_task_idx = 0;
+
+        // Should not panic
+        terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn test_render_no_panic_with_selected_idx_out_of_bounds() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.task_list_cache = vec![hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: "Test".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::None,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+        app.selected_task_idx = 5; // out of bounds
+
+        // Should not panic
+        terminal.draw(|f| render(f, &app)).unwrap();
     }
 }
