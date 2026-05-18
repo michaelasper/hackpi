@@ -247,6 +247,8 @@ async fn main() -> anyhow::Result<()> {
                         KeyCode::Enter => {
                             if matches!(app.active_view, AppView::TaskBoard) {
                                 app.enter_task_detail();
+                            } else if !matches!(app.state, AppState::Generating) {
+                                input.handle_key(key);
                             }
                         }
                         KeyCode::Esc => {
@@ -273,61 +275,62 @@ async fn main() -> anyhow::Result<()> {
                         _ => {
                             if !matches!(app.state, AppState::Generating) {
                                 input.handle_key(key);
-                                app.input = input.buffer.clone();
-                                if let Some(submitted) = input.last_submitted() {
-                                    // Check for slash commands first
-                                    if submitted.starts_with('/') {
-                                        let mut guard = guard_evaluator.write().unwrap();
-                                        handle_slash_command(
-                                            &submitted,
-                                            &mut app,
-                                            &tui_tx,
-                                            &mut *guard,
-                                            &tools,
-                                        )
-                                        .await;
-                                        // Refresh task cache after task operations on TaskBoard
-                                        if submitted.starts_with("/task") {
-                                            if matches!(app.active_view, AppView::TaskBoard) {
-                                                app.refresh_task_cache();
-                                            } else if let AppView::TaskDetail(_) = app.active_view {
-                                                let detail_id = match &app.active_view {
-                                                    AppView::TaskDetail(id) => id.clone(),
-                                                    _ => String::new(),
-                                                };
-                                                app.load_task_detail(&detail_id);
-                                            }
-                                        }
-                                    } else {
-                                        tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
+                            }
+                        }
+                    }
+                }
 
-                                        let signal_rx_clone = signal_rx.clone();
-                                        let agent_tx_clone = agent_tx.clone();
+                // Sync input buffer to app.input for display after every key event
+                app.input = input.buffer.clone();
 
-                                        let agent_instance = Agent::new(
-                                            ApiClient::new(api_config.clone())?,
-                                            tools.clone(),
-                                            SYSTEM_PROMPT.to_string(),
-                                            workspace_root.clone(),
-                                        );
-
-                                        let conversation_clone = Arc::clone(&conversation_mut);
-                                        let tx_for_agent = agent_tx_clone.clone();
-
-                                        tokio::spawn(async move {
-                                            let mut conv_guard = conversation_clone.lock().await;
-                                            agent_instance
-                                                .run(
-                                                    &submitted,
-                                                    &mut conv_guard,
-                                                    tx_for_agent,
-                                                    signal_rx_clone,
-                                                )
-                                                .await;
-                                        });
-                                    }
+                // Process any submitted text (from Enter or catch-all key handling)
+                if !matches!(app.state, AppState::Generating) {
+                    if let Some(submitted) = input.last_submitted() {
+                        // Check for slash commands first
+                        if submitted.starts_with('/') {
+                            let mut guard = guard_evaluator.write().unwrap();
+                            handle_slash_command(
+                                &submitted,
+                                &mut app,
+                                &tui_tx,
+                                &mut *guard,
+                                &tools,
+                            )
+                            .await;
+                            // Refresh task cache after task operations on TaskBoard
+                            if submitted.starts_with("/task") {
+                                if matches!(app.active_view, AppView::TaskBoard) {
+                                    app.refresh_task_cache();
+                                } else if let AppView::TaskDetail(_) = app.active_view {
+                                    let detail_id = match &app.active_view {
+                                        AppView::TaskDetail(id) => id.clone(),
+                                        _ => String::new(),
+                                    };
+                                    app.load_task_detail(&detail_id);
                                 }
                             }
+                        } else {
+                            tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
+
+                            let signal_rx_clone = signal_rx.clone();
+                            let agent_tx_clone = agent_tx.clone();
+
+                            let agent_instance = Agent::new(
+                                ApiClient::new(api_config.clone())?,
+                                tools.clone(),
+                                SYSTEM_PROMPT.to_string(),
+                                workspace_root.clone(),
+                            );
+
+                            let conversation_clone = Arc::clone(&conversation_mut);
+                            let tx_for_agent = agent_tx_clone.clone();
+
+                            tokio::spawn(async move {
+                                let mut conv_guard = conversation_clone.lock().await;
+                                agent_instance
+                                    .run(&submitted, &mut conv_guard, tx_for_agent, signal_rx_clone)
+                                    .await;
+                            });
                         }
                     }
                 }

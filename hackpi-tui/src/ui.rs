@@ -119,7 +119,7 @@ fn assistant_prefix() -> &'static str {
 }
 
 fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
-    let mut items: Vec<ListItem> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
 
     for entry in &app.conversation {
         let prefix = match entry.role.as_str() {
@@ -136,7 +136,7 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
 
         if !entry.text.is_empty() {
             let content = format!("{prefix}{}", entry.text);
-            items.push(ListItem::new(Line::from(Span::styled(content, role_style))));
+            lines.push(Line::from(Span::styled(content, role_style)));
         }
 
         for tc in &entry.tool_calls {
@@ -153,7 +153,6 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
 
             let title = format!(" {status_symbol} {name} ", name = tc.name);
 
-            let mut card_lines: Vec<Line> = Vec::new();
             if let ToolCallStatus::Done(result) = &tc.status {
                 let result_content = match result {
                     hackpi_core::tools::ToolResult::Success { content } => content.clone(),
@@ -163,17 +162,17 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                     hackpi_core::tools::ToolResult::Timeout => "Timed out.".into(),
                     hackpi_core::tools::ToolResult::Cancelled => "Cancelled.".into(),
                 };
-                for line in result_content.lines() {
-                    card_lines.push(Line::from(Span::raw(line.to_string())));
+                for line_content in result_content.lines() {
+                    lines.push(Line::from(Span::raw(line_content.to_string())));
                 }
             } else {
-                card_lines.push(Line::from(Span::styled(
+                lines.push(Line::from(Span::styled(
                     "Running...",
                     Style::default().fg(Color::Yellow),
                 )));
             }
 
-            card_lines.insert(
+            lines.insert(
                 0,
                 Line::from(Span::styled(
                     title,
@@ -182,26 +181,26 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                         .add_modifier(Modifier::BOLD),
                 )),
             );
-
-            items.push(ListItem::new(card_lines.clone()));
         }
 
-        items.push(ListItem::new(Line::from("")));
+        lines.push(Line::from(""));
     }
 
-    let visible_items: &[ListItem] = if app.scroll_offset > 0 && app.scroll_offset < items.len() {
-        &items[app.scroll_offset..]
+    let visible_lines: &[Line] = if app.scroll_offset > 0 && app.scroll_offset < lines.len() {
+        &lines[app.scroll_offset..]
     } else {
-        &items
+        &lines
     };
 
-    let list = List::new(visible_items.to_vec()).block(
-        Block::default()
-            .borders(Borders::NONE)
-            .style(Style::default()),
-    );
+    let paragraph = Paragraph::new(Text::from(visible_lines.to_vec()))
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default()),
+        )
+        .wrap(Wrap { trim: false });
 
-    frame.render_widget(list, area);
+    frame.render_widget(paragraph, area);
 }
 
 /// Color for a task state badge.
