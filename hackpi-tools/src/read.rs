@@ -101,8 +101,8 @@ impl Tool for ReadTool {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
 
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
+        // Count lines without allocating a Vec for all of them
+        let total_lines = content.lines().count();
 
         if total_lines == 0 {
             return ToolResult::Success {
@@ -116,14 +116,13 @@ impl Tool for ReadTool {
             None => total_lines,
         };
 
-        let display_lines = &lines[start..end];
-
         let mut output = String::new();
         let line_num_width = total_lines.to_string().len();
 
         if total_lines > MAX_LINES && offset == 1 && limit.is_none() {
+            // Iterator-based: only collect the first N lines instead of all lines
             let shown = INITIAL_DISPLAY.min(total_lines);
-            let truncated_lines = &lines[..shown];
+            let truncated_lines: Vec<&str> = content.lines().take(shown).collect();
             for (i, line) in truncated_lines.iter().enumerate() {
                 let lnum = i + 1;
                 let hash = line_hash(line, lnum);
@@ -141,6 +140,9 @@ impl Tool for ReadTool {
                 "... [truncated: {total_lines} lines, {file_size} bytes, {language}] ..."
             ));
         } else {
+            // Iterator-based: only collect the window we need
+            let window_size = end - start;
+            let display_lines: Vec<&str> = content.lines().skip(start).take(window_size).collect();
             for (i, line) in display_lines.iter().enumerate() {
                 let lnum = start + i + 1;
                 let hash = line_hash(line, lnum);

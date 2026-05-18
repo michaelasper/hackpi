@@ -331,6 +331,19 @@ fn cmd_grep(args: &[String], ctx: &mut CommandContext) -> i32 {
     let pattern = targets[0];
     let files = &targets[1..];
 
+    // Build regex with optional case-insensitive flag.
+    // The regex crate uses efficient (Boyer-Moore style) matching internally.
+    let re = match regex::RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+    {
+        Ok(re) => re,
+        Err(e) => {
+            let _ = writeln!(ctx.stderr, "grep: invalid pattern '{pattern}': {e}");
+            return 2;
+        }
+    };
+
     let content = if files.is_empty() {
         ctx.stdin.clone().unwrap_or_default()
     } else {
@@ -345,14 +358,10 @@ fn cmd_grep(args: &[String], ctx: &mut CommandContext) -> i32 {
     };
 
     for (i, line) in content.lines().enumerate() {
-        let matches = if ignore_case {
-            line.to_lowercase().contains(&pattern.to_lowercase())
-        } else {
-            line.contains(pattern)
-        };
-        if matches {
+        if re.is_match(line) {
             if files.len() > 1 {
-                let _ = writeln!(ctx.stdout, "{}:{}:{}", args[1], i + 1, line);
+                let prefix = targets.get(1).map(|s| s.as_str()).unwrap_or("");
+                let _ = writeln!(ctx.stdout, "{prefix}:{}:{line}", i + 1);
             } else {
                 let _ = writeln!(ctx.stdout, "{line}");
             }

@@ -15,5 +15,6 @@ globset.workspace = true
 tracing.workspace = true
 futures.workspace = true
 walkdir.workspace = true
+regex.workspace = true
 async-trait.workspace = true
 hackpi-core = { path = "../hackpi-core" }

@@ -13,11 +13,52 @@ const MAX_CONTEXT: usize = 10;
 
 pub struct SearchGrepTool {
     workspace_root: std::path::PathBuf,
+    cached_files: std::sync::Mutex<Option<Vec<std::path::PathBuf>>>,
 }
 
 impl SearchGrepTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+        Self {
+            workspace_root,
+            cached_files: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Build (or retrieve from cache) the list of files in the workspace.
+    /// Cached only when no glob filter is used (full workspace searches).
+    fn get_file_list(&self, include_glob: Option<&str>) -> Vec<std::path::PathBuf> {
+        // When a glob filter is active, always walk (different glob = different results)
+        if include_glob.is_some() {
+            let mut files = Vec::new();
+            let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
+            walkdir(&self.workspace_root, &mut files, None, &gitignore_patterns);
+            // Still apply glob filtering for non-cached path
+            if let Some(glob) = include_glob {
+                let matcher = globset::Glob::new(glob).map(|g| g.compile_matcher()).ok();
+                if let Some(m) = matcher {
+                    files.retain(|p| m.is_match(p));
+                }
+            }
+            return files;
+        }
+
+        // For unqualified searches, use cached file list
+        if let Ok(mut cache) = self.cached_files.lock() {
+            if let Some(ref files) = *cache {
+                return files.clone();
+            }
+            let mut files = Vec::new();
+            let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
+            walkdir(&self.workspace_root, &mut files, None, &gitignore_patterns);
+            *cache = Some(files.clone());
+            return files;
+        }
+
+        // Fallback: no cache available
+        let mut files = Vec::new();
+        let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
+        walkdir(&self.workspace_root, &mut files, None, &gitignore_patterns);
+        files
     }
 }
 
@@ -97,33 +138,13 @@ impl Tool for SearchGrepTool {
 
         let mut first_file = true;
 
-        let paths = match &include_glob {
-            Some(glob) => {
-                let pattern = globset::Glob::new(glob).map(|g| g.compile_matcher()).ok();
-                let mut matched = Vec::new();
-                if let Some(ref matcher) = pattern {
-                    let _ = walkdir(&self.workspace_root, &mut matched, matcher);
-                }
-                matched
-            }
-            None => {
-                let mut all = Vec::new();
-                let no_filter = globset::Glob::new("*").unwrap().compile_matcher();
-                let _ = walkdir(&self.workspace_root, &mut all, &no_filter);
-                all
-            }
-        };
-
-        let gitignore_patterns = load_gitignore_patterns(&self.workspace_root);
+        // get_file_list handles caching and loads gitignore patterns once
+        let paths = self.get_file_list(include_glob.as_deref());
 
         for file_path in paths {
             if match_count >= MAX_MATCHES {
                 truncated = true;
                 break;
-            }
-
-            if is_ignored_by_gitignore(&file_path, &gitignore_patterns) {
-                continue;
             }
 
             let mut file_has_match = false;
@@ -217,36 +238,41 @@ fn load_gitignore_patterns(root: &Path) -> Vec<globset::GlobMatcher> {
         .collect()
 }
 
-fn is_ignored_by_gitignore(path: &Path, patterns: &[globset::GlobMatcher]) -> bool {
-    patterns.iter().any(|p| p.is_match(path))
-}
-
 fn walkdir(
     root: &Path,
     results: &mut Vec<std::path::PathBuf>,
-    glob: &globset::GlobMatcher,
-) -> Result<(), std::io::Error> {
-    let gitignore_patterns = load_gitignore_patterns(root);
-
-    for entry in walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
-        let name = e.file_name().to_str().unwrap_or("");
-        if name.starts_with('.') && name != "." {
-            return false;
-        }
-        if name == "node_modules" || name == "target" || name == "dist" || name == "build" {
-            return false;
-        }
-        if is_ignored_by_gitignore(e.path(), &gitignore_patterns) {
-            return false;
-        }
-        true
-    }) {
-        let entry = entry?;
-        if entry.file_type().is_file() && glob.is_match(entry.path()) {
-            results.push(entry.path().to_path_buf());
+    glob: Option<&globset::GlobMatcher>,
+    gitignore_patterns: &[globset::GlobMatcher],
+) {
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_str().unwrap_or("");
+            if name.starts_with('.') && name != "." {
+                return false;
+            }
+            if name == "node_modules" || name == "target" || name == "dist" || name == "build" {
+                return false;
+            }
+            if !gitignore_patterns.is_empty()
+                && gitignore_patterns.iter().any(|p| p.is_match(e.path()))
+            {
+                return false;
+            }
+            true
+        })
+        .flatten()
+    {
+        if entry.file_type().is_file() {
+            if let Some(g) = glob {
+                if g.is_match(entry.path()) {
+                    results.push(entry.path().to_path_buf());
+                }
+            } else {
+                results.push(entry.path().to_path_buf());
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -274,6 +300,10 @@ mod tests {
         write!(f, "{content}").unwrap();
     }
 
+    fn no_gitignore() -> Vec<globset::GlobMatcher> {
+        Vec::new()
+    }
+
     #[test]
     fn test_walkdir_skips_dist() {
         let dir = temp_dir();
@@ -282,7 +312,7 @@ mod tests {
 
         let mut results = Vec::new();
         let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, &glob).unwrap();
+        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
 
         let has_dist = results.iter().any(|p| p.to_string_lossy().contains("dist"));
         assert!(
@@ -299,7 +329,7 @@ mod tests {
 
         let mut results = Vec::new();
         let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, &glob).unwrap();
+        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
 
         let has_build = results
             .iter()
@@ -318,7 +348,7 @@ mod tests {
 
         let mut results = Vec::new();
         let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, &glob).unwrap();
+        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
 
         assert!(
             results.len() >= 2,
@@ -334,7 +364,7 @@ mod tests {
 
         let mut results = Vec::new();
         let glob = globset::Glob::new("*").unwrap().compile_matcher();
-        walkdir(&dir, &mut results, &glob).unwrap();
+        walkdir(&dir, &mut results, Some(&glob), &no_gitignore());
 
         let has_nm = results
             .iter()
@@ -415,6 +445,39 @@ mod tests {
         assert!(
             content.contains("handle_auth"),
             "output should include matching line content, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_cache_reuses_file_list() {
+        let dir = temp_dir();
+        create_file(&dir, "src/foo.rs", "fn foo() {}");
+        create_file(&dir, "src/bar.rs", "fn bar() {}");
+
+        let tool = SearchGrepTool::new(dir.clone());
+        let params = serde_json::json!({ "pattern": "fn" });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        // First call populates cache
+        let result1 = tool.execute(params.clone(), &ctx).await;
+        assert!(
+            matches!(result1, hackpi_core::tools::ToolResult::Success { .. }),
+            "first search should succeed"
+        );
+
+        // Second call uses cache
+        let result2 = tool.execute(params, &ctx).await;
+        let content2 = match result2 {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+        assert!(
+            content2.contains("foo") && content2.contains("bar"),
+            "cached search should still find files, got: {content2}"
         );
     }
 }
