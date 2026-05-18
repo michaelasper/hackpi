@@ -18,7 +18,6 @@ use hackpi_vcs::{register_vcs_tools, VcsConfig};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 const SYSTEM_PROMPT: &str = "\
@@ -130,10 +129,287 @@ async fn main() -> anyhow::Result<()> {
 
     terminal.clear()?;
 
-    loop {
-        terminal.draw(|f| ui::render(f, &app))?;
+    // Spawn a background thread to read crossterm keyboard events.
+    // This avoids blocking the tokio runtime and lets the main loop
+    // use tokio::select! instead of busy-polling.
+    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Event>();
+    let key_tx_task = key_tx.clone();
+    tokio::task::spawn_blocking(move || {
+        loop {
+            match event::read() {
+                Ok(event) => {
+                    if key_tx_task.send(event).is_err() {
+                        break; // Main loop dropped the receiver
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Crossterm event read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
+    // key_tx is held here so the blocking task only exits
+    // when this function returns (dropping key_tx).
 
-        if let Ok(agent_event) = agent_rx.try_recv() {
+    let mut should_render = true;
+
+    loop {
+        // Only render when state actually changes.
+        // `should_render` is set to `true` in every `tokio::select!` branch
+        // and every drain loop below, so the initial render happens once and
+        // subsequent renders only occur after at least one event has arrived.
+        if should_render {
+            terminal.draw(|f| ui::render(f, &app))?;
+            should_render = false;
+        }
+
+        tokio::select! {
+            Some(agent_event) = agent_rx.recv() => {
+                match agent_event {
+                    AgentEvent::TextChunk(text) => {
+                        tui_tx.send(TuiEvent::StreamChunk(text)).ok();
+                    }
+                    AgentEvent::ToolCallStart { id, name } => {
+                        tui_tx.send(TuiEvent::ToolCall { id, name }).ok();
+                    }
+                    AgentEvent::ToolCallEnd { id, result } => {
+                        tui_tx.send(TuiEvent::ToolResult { id, result }).ok();
+                    }
+                    AgentEvent::Usage(usage) => {
+                        tui_tx.send(TuiEvent::Usage(usage)).ok();
+                    }
+                    AgentEvent::Error(err) => {
+                        tui_tx.send(TuiEvent::Error(err)).ok();
+                    }
+                    AgentEvent::Done => {
+                        tui_tx.send(TuiEvent::Done).ok();
+                    }
+                    AgentEvent::PermissionRequest {
+                        id,
+                        reason,
+                        response,
+                    } => {
+                        tui_tx
+                            .send(TuiEvent::PermissionRequest {
+                                id,
+                                reason,
+                                response,
+                            })
+                            .ok();
+                    }
+                }
+                should_render = true;
+            }
+            Some(permission_req) = permission_rx.recv() => {
+                let (id, reason, response) = permission_req;
+                tui_tx
+                    .send(TuiEvent::PermissionRequest {
+                        id,
+                        reason,
+                        response,
+                    })
+                    .ok();
+                should_render = true;
+            }
+            Some(event) = tui_rx.recv() => {
+                app.handle_event(event);
+                should_render = true;
+            }
+            Some(key_event) = key_rx.recv() => {
+                if let Event::Key(key) = key_event {
+                    // If a permission prompt is active, intercept all keys
+                    if app.pending_permission.is_some() {
+                        let decision = match key.code {
+                            KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
+                            KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
+                            KeyCode::Char('3') => Some(PermissionDecision::Deny),
+                            KeyCode::Char('4') => Some(PermissionDecision::AlwaysAllow),
+                            KeyCode::Char('5') => Some(PermissionDecision::AlwaysDeny),
+                            KeyCode::Esc => Some(PermissionDecision::Deny),
+                            _ => None,
+                        };
+
+                        if let Some(decision) = decision {
+                            if let Some(mut prompt) = app.pending_permission.take() {
+                                if let Some(sender) = prompt.response.take() {
+                                    sender.send(decision).ok();
+                                }
+                            }
+                        }
+                    } else if app.autocomplete_visible {
+                        // Autocomplete popover is active — intercept navigation/selection keys
+                        match key.code {
+                            KeyCode::Up => {
+                                app.autocomplete_prev();
+                            }
+                            KeyCode::Down => {
+                                app.autocomplete_next();
+                            }
+                            KeyCode::Tab => {
+                                if let Some(cmd) = app.autocomplete_select() {
+                                    let full_cmd = format!("{} ", cmd);
+                                    input.buffer = full_cmd;
+                                    input.cursor = input.buffer.len();
+                                    app.autocomplete_visible = false;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(cmd) = app.autocomplete_select() {
+                                    let full_cmd = cmd.to_string();
+                                    input.set_submit(full_cmd);
+                                    app.autocomplete_visible = false;
+                                } else {
+                                    // No selection — pass through to normal Enter handling
+                                    input.handle_key(key);
+                                }
+                            }
+                            KeyCode::Esc => {
+                                app.autocomplete_visible = false;
+                            }
+                            _ => {
+                                input.handle_key(key);
+                            }
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                                if matches!(app.state, AppState::Generating) {
+                                    signal_tx.send(true).ok();
+                                    app.state = AppState::Interrupted;
+                                }
+                            }
+                            KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
+                                app.clear();
+                            }
+                            KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                                break;
+                            }
+                            KeyCode::Tab => {
+                                app.cycle_view();
+                                // Refresh cache when entering TaskBoard
+                                if matches!(app.active_view, AppView::TaskBoard) {
+                                    app.refresh_task_cache();
+                                }
+                            }
+                            KeyCode::Up => {
+                                if matches!(app.active_view, AppView::TaskBoard) {
+                                    app.task_cursor_up();
+                                } else if matches!(app.active_view, AppView::TaskDetail(_)) {
+                                    app.task_detail_prev();
+                                } else {
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if matches!(app.active_view, AppView::TaskBoard) {
+                                    app.task_cursor_down();
+                                } else if matches!(app.active_view, AppView::TaskDetail(_)) {
+                                    app.task_detail_next();
+                                } else {
+                                    app.scroll_offset = app.scroll_offset.saturating_add(5);
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if matches!(app.active_view, AppView::TaskBoard) {
+                                    app.enter_task_detail();
+                                } else if !matches!(app.state, AppState::Generating) {
+                                    input.handle_key(key);
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if !matches!(app.active_view, AppView::Conversation) {
+                                    app.go_back();
+                                    // Refresh cache when returning to TaskBoard
+                                    if matches!(app.active_view, AppView::TaskBoard) {
+                                        app.refresh_task_cache();
+                                    }
+                                }
+                            }
+                            KeyCode::PageUp => {
+                                app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                            }
+                            KeyCode::PageDown => {
+                                app.scroll_offset = app.scroll_offset.saturating_add(5);
+                            }
+                            KeyCode::Home => {
+                                app.scroll_offset = 0;
+                            }
+                            KeyCode::End => {
+                                app.scroll_offset = usize::MAX;
+                            }
+                            _ => {
+                                if !matches!(app.state, AppState::Generating) {
+                                    input.handle_key(key);
+                                }
+                            }
+                        }
+                    }
+
+                    // Sync input buffer to app.input for display after every key event
+                    app.input = input.buffer.clone();
+                    // Update autocomplete visibility based on current input
+                    app.update_autocomplete_state();
+
+                    // Process any submitted text (from Enter or catch-all key handling)
+                    if !matches!(app.state, AppState::Generating) {
+                        if let Some(submitted) = input.last_submitted() {
+                            // Check for slash commands first
+                            if submitted.starts_with('/') {
+                                let mut guard = guard_evaluator.write().unwrap();
+                                handle_slash_command(
+                                    &submitted,
+                                    &mut app,
+                                    &tui_tx,
+                                    &mut *guard,
+                                    &tools,
+                                )
+                                .await;
+                                // Refresh task cache after task operations on TaskBoard
+                                if submitted.starts_with("/task") {
+                                    if matches!(app.active_view, AppView::TaskBoard) {
+                                        app.refresh_task_cache();
+                                    } else if let AppView::TaskDetail(_) = app.active_view {
+                                        let detail_id = match &app.active_view {
+                                            AppView::TaskDetail(id) => id.clone(),
+                                            _ => String::new(),
+                                        };
+                                        app.load_task_detail(&detail_id);
+                                    }
+                                }
+                            } else {
+                                tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
+
+                                let signal_rx_clone = signal_rx.clone();
+                                let agent_tx_clone = agent_tx.clone();
+
+                                let agent_instance = Agent::new(
+                                    ApiClient::new(api_config.clone())?,
+                                    tools.clone(),
+                                    SYSTEM_PROMPT.to_string(),
+                                    workspace_root.clone(),
+                                );
+
+                                let conversation_clone = Arc::clone(&conversation_mut);
+                                let tx_for_agent = agent_tx_clone.clone();
+
+                                tokio::spawn(async move {
+                                    let mut conv_guard = conversation_clone.lock().await;
+                                    agent_instance
+                                        .run(&submitted, &mut conv_guard, tx_for_agent, signal_rx_clone)
+                                        .await;
+                                });
+                            }
+                        }
+                    }
+                }
+                should_render = true;
+            }
+        }
+
+        // Drain any additional pending events after select to batch
+        // multiple events that arrived before the render cycle.
+        while let Ok(agent_event) = agent_rx.try_recv() {
             match agent_event {
                 AgentEvent::TextChunk(text) => {
                     tui_tx.send(TuiEvent::StreamChunk(text)).ok();
@@ -167,10 +443,9 @@ async fn main() -> anyhow::Result<()> {
                         .ok();
                 }
             }
+            should_render = true;
         }
-
-        // Check for permission requests from the dispatch permission channel
-        if let Ok((id, reason, response)) = permission_rx.try_recv() {
+        while let Ok((id, reason, response)) = permission_rx.try_recv() {
             tui_tx
                 .send(TuiEvent::PermissionRequest {
                     id,
@@ -178,199 +453,11 @@ async fn main() -> anyhow::Result<()> {
                     response,
                 })
                 .ok();
+            should_render = true;
         }
-
-        if let Ok(event) = tui_rx.try_recv() {
+        while let Ok(event) = tui_rx.try_recv() {
             app.handle_event(event);
-        }
-
-        if event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
-                // If a permission prompt is active, intercept all keys
-                if app.pending_permission.is_some() {
-                    let decision = match key.code {
-                        KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
-                        KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
-                        KeyCode::Char('3') => Some(PermissionDecision::Deny),
-                        KeyCode::Char('4') => Some(PermissionDecision::AlwaysAllow),
-                        KeyCode::Char('5') => Some(PermissionDecision::AlwaysDeny),
-                        KeyCode::Esc => Some(PermissionDecision::Deny),
-                        _ => None,
-                    };
-
-                    if let Some(decision) = decision {
-                        if let Some(mut prompt) = app.pending_permission.take() {
-                            if let Some(sender) = prompt.response.take() {
-                                sender.send(decision).ok();
-                            }
-                        }
-                    }
-                } else if app.autocomplete_visible {
-                    // Autocomplete popover is active — intercept navigation/selection keys
-                    match key.code {
-                        KeyCode::Up => {
-                            app.autocomplete_prev();
-                        }
-                        KeyCode::Down => {
-                            app.autocomplete_next();
-                        }
-                        KeyCode::Tab => {
-                            if let Some(cmd) = app.autocomplete_select() {
-                                let full_cmd = format!("{} ", cmd);
-                                input.buffer = full_cmd;
-                                input.cursor = input.buffer.len();
-                                app.autocomplete_visible = false;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if let Some(cmd) = app.autocomplete_select() {
-                                let full_cmd = cmd.to_string();
-                                input.set_submit(full_cmd);
-                                app.autocomplete_visible = false;
-                            } else {
-                                // No selection — pass through to normal Enter handling
-                                input.handle_key(key);
-                            }
-                        }
-                        KeyCode::Esc => {
-                            app.autocomplete_visible = false;
-                        }
-                        _ => {
-                            input.handle_key(key);
-                        }
-                    }
-                } else {
-                    match key.code {
-                        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                            if matches!(app.state, AppState::Generating) {
-                                signal_tx.send(true).ok();
-                                app.state = AppState::Interrupted;
-                            }
-                        }
-                        KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
-                            app.clear();
-                        }
-                        KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
-                            break;
-                        }
-                        KeyCode::Tab => {
-                            app.cycle_view();
-                            // Refresh cache when entering TaskBoard
-                            if matches!(app.active_view, AppView::TaskBoard) {
-                                app.refresh_task_cache();
-                            }
-                        }
-                        KeyCode::Up => {
-                            if matches!(app.active_view, AppView::TaskBoard) {
-                                app.task_cursor_up();
-                            } else if matches!(app.active_view, AppView::TaskDetail(_)) {
-                                app.task_detail_prev();
-                            } else {
-                                app.scroll_offset = app.scroll_offset.saturating_sub(5);
-                            }
-                        }
-                        KeyCode::Down => {
-                            if matches!(app.active_view, AppView::TaskBoard) {
-                                app.task_cursor_down();
-                            } else if matches!(app.active_view, AppView::TaskDetail(_)) {
-                                app.task_detail_next();
-                            } else {
-                                app.scroll_offset = app.scroll_offset.saturating_add(5);
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if matches!(app.active_view, AppView::TaskBoard) {
-                                app.enter_task_detail();
-                            } else if !matches!(app.state, AppState::Generating) {
-                                input.handle_key(key);
-                            }
-                        }
-                        KeyCode::Esc => {
-                            if !matches!(app.active_view, AppView::Conversation) {
-                                app.go_back();
-                                // Refresh cache when returning to TaskBoard
-                                if matches!(app.active_view, AppView::TaskBoard) {
-                                    app.refresh_task_cache();
-                                }
-                            }
-                        }
-                        KeyCode::PageUp => {
-                            app.scroll_offset = app.scroll_offset.saturating_sub(5);
-                        }
-                        KeyCode::PageDown => {
-                            app.scroll_offset = app.scroll_offset.saturating_add(5);
-                        }
-                        KeyCode::Home => {
-                            app.scroll_offset = 0;
-                        }
-                        KeyCode::End => {
-                            app.scroll_offset = usize::MAX;
-                        }
-                        _ => {
-                            if !matches!(app.state, AppState::Generating) {
-                                input.handle_key(key);
-                            }
-                        }
-                    }
-                }
-
-                // Sync input buffer to app.input for display after every key event
-                app.input = input.buffer.clone();
-                // Update autocomplete visibility based on current input
-                app.update_autocomplete_state();
-
-                // Process any submitted text (from Enter or catch-all key handling)
-                if !matches!(app.state, AppState::Generating) {
-                    if let Some(submitted) = input.last_submitted() {
-                        // Check for slash commands first
-                        if submitted.starts_with('/') {
-                            let mut guard = guard_evaluator.write().unwrap();
-                            handle_slash_command(
-                                &submitted,
-                                &mut app,
-                                &tui_tx,
-                                &mut *guard,
-                                &tools,
-                            )
-                            .await;
-                            // Refresh task cache after task operations on TaskBoard
-                            if submitted.starts_with("/task") {
-                                if matches!(app.active_view, AppView::TaskBoard) {
-                                    app.refresh_task_cache();
-                                } else if let AppView::TaskDetail(_) = app.active_view {
-                                    let detail_id = match &app.active_view {
-                                        AppView::TaskDetail(id) => id.clone(),
-                                        _ => String::new(),
-                                    };
-                                    app.load_task_detail(&detail_id);
-                                }
-                            }
-                        } else {
-                            tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
-
-                            let signal_rx_clone = signal_rx.clone();
-                            let agent_tx_clone = agent_tx.clone();
-
-                            let agent_instance = Agent::new(
-                                ApiClient::new(api_config.clone())?,
-                                tools.clone(),
-                                SYSTEM_PROMPT.to_string(),
-                                workspace_root.clone(),
-                            );
-
-                            let conversation_clone = Arc::clone(&conversation_mut);
-                            let tx_for_agent = agent_tx_clone.clone();
-
-                            tokio::spawn(async move {
-                                let mut conv_guard = conversation_clone.lock().await;
-                                agent_instance
-                                    .run(&submitted, &mut conv_guard, tx_for_agent, signal_rx_clone)
-                                    .await;
-                            });
-                        }
-                    }
-                }
-            }
+            should_render = true;
         }
     }
 
