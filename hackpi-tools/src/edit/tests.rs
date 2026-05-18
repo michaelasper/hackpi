@@ -331,6 +331,28 @@ async fn apply_edit(
     }
 }
 
+async fn apply_edit_expect_error(
+    workspace_root: &std::path::Path,
+    file_path: &str,
+    edits: serde_json::Value,
+) -> String {
+    let tool = super::tool::EditTool::new(workspace_root.to_path_buf());
+    let params = serde_json::json!({
+        "path": file_path,
+        "edits": edits,
+    });
+    let ctx = ToolContext {
+        workspace_root: workspace_root.to_path_buf(),
+        conversation_id: String::new(),
+        signal: tokio::sync::watch::channel(false).1,
+    };
+    let result = tool.execute(params, &ctx).await;
+    match result {
+        hackpi_core::tools::ToolResult::SystemError { message } => message,
+        other => panic!("Expected SystemError, got {other:?}"),
+    }
+}
+
 fn make_anchor(line: &str, lineno: usize) -> String {
     let h = super::hash::line_hash(line, lineno);
     format!("{lineno}#{h}")
@@ -399,6 +421,254 @@ async fn test_single_edit_diff_works() {
     assert!(
         result.contains("+ fn new() {}"),
         "diff should show new line"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── COR-88: Stale end anchor tests ───────────────────────────
+
+#[tokio::test]
+async fn test_replace_stale_end_anchor_returns_error() {
+    // COR-88: When a replace operation has a valid pos but stale end anchor,
+    // the tool must return a SystemError instead of silently defaulting.
+    let dir = std::env::temp_dir().join("hackpi_edit_test_stale_end");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "line1\nline2\nline3\nline4\nline5\n");
+
+    let anchor1 = make_anchor("line1", 1);
+    let stale_end = "4#ZZ".to_string(); // valid line number, wrong hash (stale)
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor1,
+            "end": stale_end,
+            "lines": ["replacement"]
+        }
+    ]);
+
+    let error = apply_edit_expect_error(&dir, "test.rs", edits).await;
+    assert!(
+        error.contains("E_STALE_ANCHOR"),
+        "stale end anchor should produce E_STALE_ANCHOR error, got: {error}"
+    );
+    assert!(
+        error.contains("End anchor"),
+        "error message should mention end anchor, got: {error}"
+    );
+
+    // Verify file was NOT modified (stale anchor rejected before write)
+    let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
+    assert_eq!(content, "line1\nline2\nline3\nline4\nline5\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_replace_with_valid_end_anchor_succeeds() {
+    // COR-88: Replace with valid pos AND valid end anchor should work
+    let dir = std::env::temp_dir().join("hackpi_edit_test_valid_end");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "line1\nline2\nline3\nline4\nline5\n");
+
+    let anchor1 = make_anchor("line1", 1);
+    let anchor3 = make_anchor("line3", 3);
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor1,
+            "end": anchor3,
+            "lines": ["new_a", "new_b", "new_c"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "test.rs", edits).await;
+    assert!(
+        result.contains("Applied 1 edit(s)"),
+        "should have applied 1 edit"
+    );
+
+    let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
+    assert_eq!(content, "new_a\nnew_b\nnew_c\nline4\nline5");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── COR-113.1: replace_text with lines array ─────────────────
+
+#[tokio::test]
+async fn test_replace_text_with_lines_array() {
+    // COR-113: replace_text with `lines` array payload replacing oldText
+    let dir = std::env::temp_dir().join("hackpi_edit_test_rt_lines");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "fn main() {\n    let x = 1;\n}\n");
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace_text",
+            "oldText": "    let x = 1;",
+            "lines": ["    let x = 42;", "    println!(\"{x}\");"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "test.rs", edits).await;
+    assert!(result.contains("Applied 1 edit(s)"));
+
+    let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
+    assert_eq!(
+        content,
+        "fn main() {\n    let x = 42;\n    println!(\"{x}\");\n}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_replace_text_with_lines_rejects_patch_markers() {
+    // COR-113: replace_text with `lines` containing patch markers should error
+    let dir = std::env::temp_dir().join("hackpi_edit_test_rt_patch");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "fn main() {\n    let x = 1;\n}\n");
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace_text",
+            "oldText": "    let x = 1;",
+            "lines": ["+    let x = 42;"]
+        }
+    ]);
+
+    let error = apply_edit_expect_error(&dir, "test.rs", edits).await;
+    assert!(
+        error.contains("E_INVALID_PATCH"),
+        "patch markers in lines should produce E_INVALID_PATCH, got: {error}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── COR-113.2: Range anchor syntax ────────────────────────────
+
+#[tokio::test]
+async fn test_range_anchor_syntax_in_pos() {
+    // COR-113: `pos: "3#HASH-5#HASH"` syntax for multi-line replace ranges
+    let dir = std::env::temp_dir().join("hackpi_edit_test_range_anchor");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "line1\nline2\nline3\nline4\nline5\n");
+
+    let anchor3 = make_anchor("line3", 3);
+    let anchor5 = make_anchor("line5", 5);
+    let range_pos = format!("{anchor3}-{anchor5}");
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": range_pos,
+            "lines": ["new_line3", "new_line4", "new_line5"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "test.rs", edits).await;
+    assert!(result.contains("Applied 1 edit(s)"));
+
+    let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
+    assert_eq!(content, "line1\nline2\nnew_line3\nnew_line4\nnew_line5");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_range_anchor_syntax_validates_hash() {
+    // COR-113: range anchor with wrong combined hash should error
+    let dir = std::env::temp_dir().join("hackpi_edit_test_range_stale");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "line1\nline2\nline3\nline4\nline5\n");
+
+    let anchor3 = make_anchor("line3", 3);
+    // Use correct end line number but modified content hash
+    let stale_anchor5 = "5#ZZ".to_string();
+    let range_pos = format!("{anchor3}-{stale_anchor5}");
+
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": range_pos,
+            "lines": ["new"]
+        }
+    ]);
+
+    let error = apply_edit_expect_error(&dir, "test.rs", edits).await;
+    assert!(
+        error.contains("E_STALE_ANCHOR") || error.contains("not found"),
+        "stale range anchor should produce error, got: {error}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── COR-113.3: E_INVALID_PATCH error code ────────────────────
+
+#[tokio::test]
+async fn test_e_invalid_patch_on_lines_with_read_prefix() {
+    // COR-113: lines containing read output prefix should get E_INVALID_PATCH
+    let dir = std::env::temp_dir().join("hackpi_edit_test_invalid_patch");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "line1\nline2\n");
+
+    let anchor1 = make_anchor("line1", 1);
+
+    // lines contains what looks like read output prefix
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor1,
+            "lines": ["  1#VR:line1"]
+        }
+    ]);
+
+    let error = apply_edit_expect_error(&dir, "test.rs", edits).await;
+    assert!(
+        error.contains("E_INVALID_PATCH"),
+        "read prefix in lines should give E_INVALID_PATCH, got: {error}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── COR-113.5: Atomic write ───────────────────────────────────
+
+#[tokio::test]
+async fn test_atomic_write_creates_file_with_correct_content() {
+    // COR-113: atomic write via temp-file-then-rename should work correctly
+    let dir = std::env::temp_dir().join("hackpi_edit_test_atomic");
+    let _ = std::fs::create_dir_all(&dir);
+    create_test_file(&dir, "test.rs", "original content\n");
+
+    let anchor = make_anchor("original content", 1);
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor,
+            "lines": ["modified content"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "test.rs", edits).await;
+    assert!(result.contains("Applied 1 edit(s)"));
+
+    // Verify file content
+    let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
+    assert_eq!(content, "modified content");
+
+    // Verify no temp file is left behind
+    let has_temp = std::fs::read_dir(&dir)
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().starts_with("."));
+    assert!(
+        !has_temp,
+        "temp file should be cleaned up after atomic write"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
