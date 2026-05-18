@@ -492,6 +492,9 @@ fn cmd_show(repo: &git2::Repository, revision: &str) -> ToolResult {
 
 /// Convert a Unix timestamp to YYYY-MM-DD date string.
 fn format_timestamp(seconds: i64) -> String {
+    if seconds < 0 {
+        return "pre-epoch".to_string();
+    }
     // Civil date algorithm by Howard Hinnant
     let z = seconds / 86400 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -1032,6 +1035,20 @@ mod tests {
             matches!(&result, ToolResult::SystemError { message } if message.contains("Missing 'operation'")),
             "Expected SystemError for missing operation, got: {result:?}"
         );
+    }
+
+    // ── format_timestamp ──
+
+    #[test]
+    fn test_format_timestamp_negative_seconds_returns_pre_epoch() {
+        let result = format_timestamp(-1);
+        assert_eq!(result, "pre-epoch", "negative timestamp should return pre-epoch, got: {result}");
+    }
+
+    #[test]
+    fn test_format_timestamp_negative_large_returns_pre_epoch() {
+        let result = format_timestamp(-999999999);
+        assert_eq!(result, "pre-epoch", "large negative timestamp should return pre-epoch, got: {result}");
     }
 
     // ── Non-git directory error ──
