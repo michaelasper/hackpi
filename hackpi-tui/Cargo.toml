@@ -17,6 +17,7 @@ crossterm.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 futures.workspace = true
+chrono.workspace = true
 hackpi-core = { path = "../hackpi-core" }
 hackpi-tools = { path = "../hackpi-tools" }
 hackpi-guardrails = { path = "../hackpi-guardrails" }
@@ -25,4 +26,3 @@ hackpi-tasks = { path = "../hackpi-tasks" }
 
 [dev-dependencies]
 tempfile = "3"
-chrono.workspace = true

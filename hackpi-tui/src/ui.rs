@@ -24,8 +24,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_tab_header(frame, chunks[0], &app.active_view, app);
 
     match &app.active_view {
-        AppView::Conversation | AppView::TaskDetail(_) => {
+        AppView::Conversation => {
             render_conversation(frame, chunks[1], app);
+        }
+        AppView::TaskDetail(_) => {
+            render_task_detail(frame, chunks[1], app);
         }
         AppView::TaskBoard => {
             render_task_board(frame, chunks[1], app);
@@ -46,11 +49,11 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// Render the tab header with active/inactive tab highlighting and version/usage info.
 fn render_tab_header(frame: &mut Frame, area: Rect, active_view: &AppView, app: &App) {
     let tabs = [
+        ("Conversation", matches!(active_view, AppView::Conversation)),
         (
-            "Conversation",
-            matches!(active_view, AppView::Conversation | AppView::TaskDetail(_)),
+            "Tasks",
+            matches!(active_view, AppView::TaskBoard | AppView::TaskDetail(_)),
         ),
-        ("Tasks", matches!(active_view, AppView::TaskBoard)),
         ("Graph", matches!(active_view, AppView::TaskGraph)),
     ];
 
@@ -304,6 +307,188 @@ fn render_placeholder(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(text, area);
 }
 
+/// Format a DateTime<Utc> as a local time string (YYYY-MM-DD HH:MM).
+fn format_timestamp(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    let local: chrono::DateTime<chrono::Local> = chrono::DateTime::from(*dt);
+    local.format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// Render the task detail view showing full task information.
+fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let task = match &app.task_detail_cache {
+        Some(t) => t,
+        None => {
+            let text = Paragraph::new("Task not found")
+                .style(Style::default().fg(Color::Red))
+                .alignment(Alignment::Center);
+            frame.render_widget(text, area);
+            return;
+        }
+    };
+
+    let id = match &app.active_view {
+        AppView::TaskDetail(id) => id.clone(),
+        _ => task.id.clone(),
+    };
+
+    let em_dash = "—";
+
+    // Build the detail lines
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title bar
+    lines.push(Line::from(Span::styled(
+        format!(" Task: {} ", id),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Title field
+    lines.push(Line::from(vec![
+        Span::styled("  Title:       ", Style::default().fg(Color::DarkGray)),
+        Span::styled(task.title.clone(), Style::default().fg(Color::White)),
+    ]));
+
+    // State field (colored)
+    let state_color = task_state_color(&task.state);
+    lines.push(Line::from(vec![
+        Span::styled("  State:       ", Style::default().fg(Color::DarkGray)),
+        Span::styled(task.state.clone(), Style::default().fg(state_color)),
+    ]));
+
+    // Priority field
+    let priority_str = format!("{:?}", task.priority).to_lowercase();
+    lines.push(Line::from(vec![
+        Span::styled("  Priority:    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(priority_str, Style::default().fg(Color::White)),
+    ]));
+
+    // Workflow field
+    lines.push(Line::from(vec![
+        Span::styled("  Workflow:    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(task.workflow.clone(), Style::default().fg(Color::White)),
+    ]));
+
+    // Created field
+    lines.push(Line::from(vec![
+        Span::styled("  Created:     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format_timestamp(&task.created_at),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    // Updated field
+    lines.push(Line::from(vec![
+        Span::styled("  Updated:     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format_timestamp(&task.updated_at),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    // Assignee field
+    let assignee_display = task.assignee.as_deref().unwrap_or(em_dash);
+    lines.push(Line::from(vec![
+        Span::styled("  Assignee:    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            assignee_display.to_string(),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    // Labels field
+    let labels_display = if task.labels.is_empty() {
+        em_dash.to_string()
+    } else {
+        task.labels.join(", ")
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Labels:      ", Style::default().fg(Color::DarkGray)),
+        Span::styled(labels_display, Style::default().fg(Color::White)),
+    ]));
+
+    // Blocked by field
+    let blocked_by_display = if app.task_detail_blocked_by.is_empty() {
+        em_dash.to_string()
+    } else {
+        app.task_detail_blocked_by
+            .iter()
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Blocked by:  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            blocked_by_display,
+            if app.task_detail_blocked_by.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Red)
+            },
+        ),
+    ]));
+
+    // Blocking field
+    let blocking_display = if app.task_detail_blocking.is_empty() {
+        em_dash.to_string()
+    } else {
+        app.task_detail_blocking
+            .iter()
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Blocking:    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            blocking_display,
+            if app.task_detail_blocking.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Yellow)
+            },
+        ),
+    ]));
+
+    lines.push(Line::from(""));
+
+    // Description section
+    lines.push(Line::from(Span::styled(
+        "  Description:",
+        Style::default().fg(Color::DarkGray),
+    )));
+    if task.description.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {em_dash}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for desc_line in task.description.lines() {
+            lines.push(Line::from(Span::raw(format!("  {desc_line}"))));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  /task move {id} done  or  /task block <id> {id}"),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .style(Style::default());
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, area);
+}
+
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let input_block = Block::default()
         .borders(Borders::TOP)
@@ -333,7 +518,7 @@ fn status_bar_text(app: &App) -> String {
     let view_hint = match &app.active_view {
         AppView::Conversation => "",
         AppView::TaskBoard => "Tab:Tasks  ",
-        AppView::TaskDetail(id) => return format!(" Task: {id}  |  Esc back  ●"),
+        AppView::TaskDetail(id) => return format!(" Task: {id}  |  Esc back  ↑/↓ navigate  ●"),
         AppView::TaskGraph => "Tab:Graph  ",
     };
     let state_text = match app.state {
@@ -908,5 +1093,416 @@ mod tests {
 
         // Should not panic
         terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    // ── Task detail view tests ──────────────────────────────────────────
+
+    /// Helper to create a fully populated task for detail view testing.
+    fn make_detail_task() -> hackpi_tasks::Task {
+        hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: "Implement auth module".to_string(),
+            description: "Implement JWT-based authentication with refresh tokens.".to_string(),
+            state: "in_progress".to_string(),
+            priority: hackpi_tasks::TaskPriority::High,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec!["backend".to_string(), "security".to_string()],
+            assignee: Some("alice".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_task_title() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Implement auth module"),
+            "detail view should show task title, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_state() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("in_progress"),
+            "detail view should show task state, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_priority() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("high"),
+            "detail view should show task priority, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_labels() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("backend"),
+            "detail view should show labels, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("security"),
+            "detail view should show labels, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_description() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("JWT"),
+            "detail view should show description, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_assignee() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("alice"),
+            "detail view should show assignee, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_empty_fields_show_dash() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = hackpi_tasks::Task {
+            id: "TSK-002".to_string(),
+            title: "Simple task".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::None,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-002".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        // Empty/None fields should show em dash
+        assert!(
+            cell_str.contains("—"),
+            "detail view should show em dash for empty fields, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_blocked_by() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = hackpi_tasks::Task {
+            id: "TSK-002".to_string(),
+            title: "Blocked task".to_string(),
+            description: String::new(),
+            state: "blocked".to_string(),
+            priority: hackpi_tasks::TaskPriority::High,
+            workflow: "default".to_string(),
+            blocked_by: vec!["TSK-001".to_string()],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-002".to_string());
+        app.task_detail_cache = Some(task);
+        app.task_detail_blocked_by = vec![hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: "Blocker".to_string(),
+            description: String::new(),
+            state: "in_progress".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("TSK-001"),
+            "detail view should show blocked by IDs, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_blocking() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+        app.task_detail_blocking = vec![hackpi_tasks::Task {
+            id: "TSK-003".to_string(),
+            title: "Dependent task".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec!["TSK-001".to_string()],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("TSK-003"),
+            "detail view should show blocking IDs, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_no_cached_task_shows_not_found() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-999".to_string());
+        app.task_detail_cache = None;
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("not found") || cell_str.contains("Not found"),
+            "detail view should show not found when task is missing, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_workflow() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("default"),
+            "detail view should show workflow, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_task_id_in_header() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("TSK-001"),
+            "detail view should show task ID in header, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_detail_shows_contextual_commands() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = make_detail_task();
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("/task"),
+            "detail view should show contextual commands, got: {cell_str}"
+        );
     }
 }
