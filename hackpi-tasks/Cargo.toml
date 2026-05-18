@@ -7,6 +7,7 @@ edition.workspace = true
 hackpi-core = { path = "../hackpi-core" }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 tokio = { version = "1", features = ["fs", "sync", "rt", "macros"] }
 async-trait.workspace = true
 anyhow.workspace = true
