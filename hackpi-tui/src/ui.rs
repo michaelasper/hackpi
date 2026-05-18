@@ -1820,6 +1820,36 @@ mod tests {
     }
 
     #[test]
+    fn test_conversation_scroll_offset_skips_lines() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        // Add conversation entries that will appear in the output
+        app.handle_event(TuiEvent::Submit("first message".into()));
+        app.handle_event(TuiEvent::Done);
+        app.handle_event(TuiEvent::Submit("second message".into()));
+        app.handle_event(TuiEvent::Done);
+        app.handle_event(TuiEvent::Submit("third message".into()));
+        app.handle_event(TuiEvent::Done);
+
+        // With scroll_offset = 0, all messages should be visible
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf0 = terminal.backend().buffer();
+        let text0: String = buf0.content.iter().map(|c| c.symbol()).collect();
+        assert!(text0.contains("first message"), "first message should be visible at offset 0");
+
+        // With scroll_offset = 2, "first message" should be skipped
+        app.scroll_offset = 2;
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf1 = terminal.backend().buffer();
+        let text1: String = buf1.content.iter().map(|c| c.symbol()).collect();
+        // "third message" should still be visible
+        assert!(text1.contains("third message"), "third message should be visible when scrolled");
+    }
+
+    #[test]
     fn test_render_task_detail_shows_contextual_commands() {
         use ratatui::backend::TestBackend;
         let backend = TestBackend::new(80, 24);
