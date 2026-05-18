@@ -72,6 +72,12 @@ pub struct App {
     pub task_list_cache: Vec<hackpi_tasks::Task>,
     /// Cursor position in the task board list.
     pub selected_task_idx: usize,
+    /// Cached task for the detail view.
+    pub task_detail_cache: Option<hackpi_tasks::Task>,
+    /// Cached blocked-by relationships for the detail view.
+    pub task_detail_blocked_by: Vec<hackpi_tasks::Task>,
+    /// Cached blocking relationships for the detail view.
+    pub task_detail_blocking: Vec<hackpi_tasks::Task>,
 }
 
 impl Default for App {
@@ -95,6 +101,9 @@ impl App {
             active_view: AppView::Conversation,
             task_list_cache: Vec::new(),
             selected_task_idx: 0,
+            task_detail_cache: None,
+            task_detail_blocked_by: Vec::new(),
+            task_detail_blocking: Vec::new(),
         }
     }
 
@@ -243,18 +252,95 @@ impl App {
         if let Some(task) = self.task_list_cache.get(self.selected_task_idx) {
             let id = task.id.clone();
             self.active_view = AppView::TaskDetail(id.clone());
+            self.load_task_detail(&id);
             Some(id)
         } else {
             None
         }
     }
 
+    /// Load the task detail data (task, blocked_by, blocking) from the store.
+    /// If the task is not found, sets cache to None and sets an error status message.
+    pub fn load_task_detail(&mut self, id: &str) {
+        if let Some(ref store) = self.task_store {
+            let store_clone: Arc<dyn hackpi_tasks::TaskStore> =
+                Arc::clone(store) as Arc<dyn hackpi_tasks::TaskStore>;
+            let id_owned = id.to_string();
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let task = store_clone.get(&id_owned).await?;
+                    let blocked_by = store_clone.blocked_by(&id_owned).await.unwrap_or_default();
+                    let blocking = store_clone.blocking(&id_owned).await.unwrap_or_default();
+                    Ok::<_, anyhow::Error>((task, blocked_by, blocking))
+                })
+            });
+            match result {
+                Ok((Some(task), blocked_by, blocking)) => {
+                    self.task_detail_cache = Some(task);
+                    self.task_detail_blocked_by = blocked_by;
+                    self.task_detail_blocking = blocking;
+                }
+                Ok((None, _, _)) => {
+                    self.task_detail_cache = None;
+                    self.task_detail_blocked_by = Vec::new();
+                    self.task_detail_blocking = Vec::new();
+                    self.status_message = format!("Task {id} not found");
+                    self.active_view = AppView::TaskBoard;
+                }
+                Err(e) => {
+                    self.task_detail_cache = None;
+                    self.task_detail_blocked_by = Vec::new();
+                    self.task_detail_blocking = Vec::new();
+                    self.status_message = format!("Error loading task: {e}");
+                    self.active_view = AppView::TaskBoard;
+                }
+            }
+        } else {
+            self.task_detail_cache = None;
+            self.task_detail_blocked_by = Vec::new();
+            self.task_detail_blocking = Vec::new();
+        }
+    }
+
+    /// Navigate to the previous task in the list (from detail view).
+    pub fn task_detail_prev(&mut self) {
+        if self.selected_task_idx > 0 {
+            self.selected_task_idx -= 1;
+            if let Some(task) = self.task_list_cache.get(self.selected_task_idx) {
+                let id = task.id.clone();
+                self.active_view = AppView::TaskDetail(id.clone());
+                self.load_task_detail(&id);
+            }
+        }
+    }
+
+    /// Navigate to the next task in the list (from detail view).
+    pub fn task_detail_next(&mut self) {
+        if !self.task_list_cache.is_empty()
+            && self.selected_task_idx < self.task_list_cache.len() - 1
+        {
+            self.selected_task_idx += 1;
+            if let Some(task) = self.task_list_cache.get(self.selected_task_idx) {
+                let id = task.id.clone();
+                self.active_view = AppView::TaskDetail(id.clone());
+                self.load_task_detail(&id);
+            }
+        }
+    }
+
     /// Go back from the current view (Esc key).
     pub fn go_back(&mut self) {
-        self.active_view = match &self.active_view {
-            AppView::TaskDetail(_) => AppView::TaskBoard,
-            _ => AppView::Conversation,
-        };
+        match &self.active_view {
+            AppView::TaskDetail(_) => {
+                self.task_detail_cache = None;
+                self.task_detail_blocked_by = Vec::new();
+                self.task_detail_blocking = Vec::new();
+                self.active_view = AppView::TaskBoard;
+            }
+            _ => {
+                self.active_view = AppView::Conversation;
+            }
+        }
     }
 }
 

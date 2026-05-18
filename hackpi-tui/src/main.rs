@@ -229,6 +229,8 @@ async fn main() -> anyhow::Result<()> {
                         KeyCode::Up => {
                             if matches!(app.active_view, AppView::TaskBoard) {
                                 app.task_cursor_up();
+                            } else if matches!(app.active_view, AppView::TaskDetail(_)) {
+                                app.task_detail_prev();
                             } else {
                                 app.scroll_offset = app.scroll_offset.saturating_sub(5);
                             }
@@ -236,6 +238,8 @@ async fn main() -> anyhow::Result<()> {
                         KeyCode::Down => {
                             if matches!(app.active_view, AppView::TaskBoard) {
                                 app.task_cursor_down();
+                            } else if matches!(app.active_view, AppView::TaskDetail(_)) {
+                                app.task_detail_next();
                             } else {
                                 app.scroll_offset = app.scroll_offset.saturating_add(5);
                             }
@@ -283,10 +287,16 @@ async fn main() -> anyhow::Result<()> {
                                         )
                                         .await;
                                         // Refresh task cache after task operations on TaskBoard
-                                        if submitted.starts_with("/task")
-                                            && matches!(app.active_view, AppView::TaskBoard)
-                                        {
-                                            app.refresh_task_cache();
+                                        if submitted.starts_with("/task") {
+                                            if matches!(app.active_view, AppView::TaskBoard) {
+                                                app.refresh_task_cache();
+                                            } else if let AppView::TaskDetail(_) = app.active_view {
+                                                let detail_id = match &app.active_view {
+                                                    AppView::TaskDetail(id) => id.clone(),
+                                                    _ => String::new(),
+                                                };
+                                                app.load_task_detail(&detail_id);
+                                            }
                                         }
                                     } else {
                                         tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
