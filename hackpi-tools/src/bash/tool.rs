@@ -2,17 +2,24 @@ use async_trait::async_trait;
 use hackpi_core::tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-use super::session::with_session;
+use super::filesystem::InMemoryFs;
+use super::session::{normalize_path, BashSession};
 
 pub struct BashTool {
     #[allow(dead_code)]
     workspace_root: PathBuf,
+    session: Mutex<BashSession>,
 }
 
 impl BashTool {
     pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+        let session = BashSession::new(Box::new(InMemoryFs::default()));
+        Self {
+            workspace_root,
+            session: Mutex::new(session),
+        }
     }
 }
 
@@ -69,13 +76,19 @@ impl Tool for BashTool {
             return ToolResult::Cancelled;
         }
 
-        let signal = ctx.signal.clone();
-
         let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
         let result = tokio::time::timeout(timeout_dur, async {
             tokio::task::block_in_place(|| {
-                with_session(workdir, Some(signal), |session| session.execute(command))
+                let mut session = self.session.lock().unwrap();
+                session.signal = Some(ctx.signal.clone());
+                if let Some(wd) = workdir {
+                    let normalized = normalize_path(wd);
+                    if session.fs.is_dir(std::path::Path::new(&normalized)) {
+                        session.cwd = std::path::PathBuf::from(normalized);
+                    }
+                }
+                session.execute(command)
             })
         })
         .await;

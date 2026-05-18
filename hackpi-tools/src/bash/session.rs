@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 
 use super::commands::{CommandContext, CommandRegistry};
-use super::filesystem::{FileSystem, InMemoryFs};
+use super::filesystem::FileSystem;
 use super::parser::{parse, AstNode, RedirectOp};
 
 pub struct BashSession {
@@ -322,7 +322,7 @@ pub struct BashOutput {
 
 /// Normalize a path by resolving `.` and `..` components.
 /// Works on virtual filesystem paths (no canonicalize needed).
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     use std::path::Component;
     let path = std::path::Path::new(path);
     let mut components: Vec<&str> = Vec::new();
@@ -348,31 +348,6 @@ fn normalize_path(path: &str) -> String {
     } else {
         format!("/{}", components.join("/"))
     }
-}
-
-pub fn with_session<F, R>(workdir: Option<&str>, signal: Option<watch::Receiver<bool>>, f: F) -> R
-where
-    F: FnOnce(&mut BashSession) -> R,
-{
-    use std::cell::RefCell;
-    thread_local! {
-        static SESSION: RefCell<Option<BashSession>> = const { RefCell::new(None) };
-    }
-    SESSION.with(|s| {
-        let mut session = s.borrow_mut();
-        if session.is_none() {
-            *session = Some(BashSession::new(Box::new(InMemoryFs::default())));
-        }
-        let session = session.as_mut().unwrap();
-        session.signal = signal;
-        if let Some(wd) = workdir {
-            let normalized = normalize_path(wd);
-            if session.fs.is_dir(std::path::Path::new(&normalized)) {
-                session.cwd = std::path::PathBuf::from(normalized);
-            }
-        }
-        f(session)
-    })
 }
 
 #[cfg(test)]
