@@ -85,6 +85,14 @@ pub fn load_hackpi_config(path: &Path) -> Result<Vec<PermissionRule>, String> {
         if let Ok(cg_rules) = parse_command_gate_block(cg) {
             rules.extend(cg_rules);
         }
+
+        // Check allow_git_in_bash — inject bypass rules at the front
+        let extras = parse_command_gate_extras(cg);
+        if extras.allow_git_in_bash {
+            let mut bypass = vcs_bypass_rules();
+            bypass.extend(rules);
+            rules = bypass;
+        }
     }
 
     // Parse file_protection block
@@ -268,16 +276,40 @@ pub fn parse_path_access_block(config: &Value) -> Result<Vec<PermissionRule>, St
 ///   "patterns": {
 ///     "rm -rf": "ask",
 ///     "curl *": "deny"
-///   }
+///   },
+///   "allow": ["git status", "git log"],
+///   "deny": ["git *", "gh *"],
+///   "ask": [],
+///   "allow_git_in_bash": false
 /// }
 /// ```
 ///
-/// Each key is a command substring pattern, each value is the action
-/// (`"ask"` or `"deny"`). Rules are generated with no tool pattern
-/// (applies to all tools via the command gate).
+/// Each key in `patterns` is a command substring pattern, each value is the
+/// action (`"ask"` or `"deny"`).
+///
+/// The `allow`, `deny`, and `ask` arrays contain command patterns. Rules are
+/// generated with no tool pattern (applies to all tools via the command gate).
+///
+/// Deny rules come first, then patterns (ask/deny from `patterns` object),
+/// then allow rules — so deny takes precedence over allow within this block.
 pub fn parse_command_gate_block(config: &Value) -> Result<Vec<PermissionRule>, String> {
     let mut rules = Vec::new();
 
+    // Deny array first (deny beats allow within a source)
+    if let Some(deny_arr) = config.get("deny").and_then(|v| v.as_array()) {
+        for entry in deny_arr {
+            if let Some(pattern) = entry.as_str() {
+                rules.push(PermissionRule {
+                    tool_pattern: None,
+                    path_pattern: None,
+                    command_pattern: Some(pattern.to_string()),
+                    action: RuleAction::Deny,
+                });
+            }
+        }
+    }
+
+    // Legacy patterns object (ask/deny)
     if let Some(patterns) = config.get("patterns").and_then(|v| v.as_object()) {
         for (pattern, action_val) in patterns {
             let action_str = match action_val.as_str() {
@@ -300,7 +332,77 @@ pub fn parse_command_gate_block(config: &Value) -> Result<Vec<PermissionRule>, S
         }
     }
 
+    // Ask array
+    if let Some(ask_arr) = config.get("ask").and_then(|v| v.as_array()) {
+        for entry in ask_arr {
+            if let Some(pattern) = entry.as_str() {
+                rules.push(PermissionRule {
+                    tool_pattern: None,
+                    path_pattern: None,
+                    command_pattern: Some(pattern.to_string()),
+                    action: RuleAction::Ask,
+                });
+            }
+        }
+    }
+
+    // Allow array last
+    if let Some(allow_arr) = config.get("allow").and_then(|v| v.as_array()) {
+        for entry in allow_arr {
+            if let Some(pattern) = entry.as_str() {
+                rules.push(PermissionRule {
+                    tool_pattern: None,
+                    path_pattern: None,
+                    command_pattern: Some(pattern.to_string()),
+                    action: RuleAction::Allow,
+                });
+            }
+        }
+    }
+
     Ok(rules)
+}
+
+/// Extra metadata parsed from the `command_gate` config block.
+pub struct CommandGateExtras {
+    /// When true, inject allow rules for `git` and `gh` so they bypass
+    /// the built-in VCS deny patterns.
+    pub allow_git_in_bash: bool,
+}
+
+/// Parse extra metadata from the `command_gate` config block (non-rule fields).
+///
+/// Currently extracts:
+/// - `allow_git_in_bash: bool` — defaults to `false`
+pub fn parse_command_gate_extras(config: &Value) -> CommandGateExtras {
+    let allow_git_in_bash = config
+        .get("allow_git_in_bash")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    CommandGateExtras { allow_git_in_bash }
+}
+
+/// Return the allow rules that bypass the built-in VCS deny patterns.
+///
+/// These rules allow `git` and `gh` commands in bash when `allow_git_in_bash`
+/// is enabled. They are prepended to the config rules so they take precedence
+/// over the built-in dangerous patterns.
+pub fn vcs_bypass_rules() -> Vec<PermissionRule> {
+    vec![
+        PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("git".to_string()),
+            action: RuleAction::Allow,
+        },
+        PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("gh".to_string()),
+            action: RuleAction::Allow,
+        },
+    ]
 }
 
 /// Parse the `file_protection` config block.
@@ -828,6 +930,150 @@ mod tests {
 
         let rules = parse_command_gate_block(&config).expect("should parse");
         assert_eq!(rules.len(), 1, "unknown action entry skipped");
+    }
+
+    // ── parse_command_gate_block with allow/deny/ask arrays ────────────────
+
+    #[test]
+    fn test_parse_command_gate_block_deny_array() {
+        let config = json!({
+            "deny": ["git *", "gh *"]
+        });
+
+        let rules = parse_command_gate_block(&config).expect("should parse");
+        assert_eq!(rules.len(), 2);
+
+        let git_deny = rules
+            .iter()
+            .find(|r| r.command_pattern.as_deref() == Some("git *"));
+        assert!(git_deny.is_some());
+        assert_eq!(git_deny.unwrap().action, RuleAction::Deny);
+
+        let gh_deny = rules
+            .iter()
+            .find(|r| r.command_pattern.as_deref() == Some("gh *"));
+        assert!(gh_deny.is_some());
+        assert_eq!(gh_deny.unwrap().action, RuleAction::Deny);
+    }
+
+    #[test]
+    fn test_parse_command_gate_block_allow_array() {
+        let config = json!({
+            "allow": ["git status", "git log"]
+        });
+
+        let rules = parse_command_gate_block(&config).expect("should parse");
+        assert_eq!(rules.len(), 2);
+
+        for rule in &rules {
+            assert_eq!(rule.action, RuleAction::Allow);
+        }
+    }
+
+    #[test]
+    fn test_parse_command_gate_block_ask_array() {
+        let config = json!({
+            "ask": ["npm *"]
+        });
+
+        let rules = parse_command_gate_block(&config).expect("should parse");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].action, RuleAction::Ask);
+        assert_eq!(rules[0].command_pattern.as_deref(), Some("npm *"));
+    }
+
+    #[test]
+    fn test_parse_command_gate_block_deny_before_allow_order() {
+        let config = json!({
+            "allow": ["git status"],
+            "deny": ["git *"]
+        });
+
+        let rules = parse_command_gate_block(&config).expect("should parse");
+        // deny rules come first, then allow
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].action, RuleAction::Deny);
+        assert_eq!(rules[1].action, RuleAction::Allow);
+    }
+
+    #[test]
+    fn test_parse_command_gate_block_combined_patterns_and_arrays() {
+        let config = json!({
+            "patterns": {
+                "rm -rf": "ask"
+            },
+            "deny": ["git *"],
+            "allow": ["git status"]
+        });
+
+        let rules = parse_command_gate_block(&config).expect("should parse");
+        // deny rules first, then patterns, then allow
+        assert!(rules.len() >= 3);
+
+        let deny_rules: Vec<_> = rules
+            .iter()
+            .filter(|r| r.action == RuleAction::Deny)
+            .collect();
+        let ask_rules: Vec<_> = rules
+            .iter()
+            .filter(|r| r.action == RuleAction::Ask)
+            .collect();
+        let allow_rules: Vec<_> = rules
+            .iter()
+            .filter(|r| r.action == RuleAction::Allow)
+            .collect();
+
+        assert!(!deny_rules.is_empty());
+        assert!(!ask_rules.is_empty());
+        assert!(!allow_rules.is_empty());
+    }
+
+    // ── parse_command_gate_extras (allow_git_in_bash) ────────────────────
+
+    #[test]
+    fn test_parse_command_gate_extras_allow_git_in_bash_true() {
+        let config = json!({
+            "allow_git_in_bash": true,
+            "deny": ["git *"]
+        });
+
+        let result = parse_command_gate_extras(&config);
+        assert!(result.allow_git_in_bash);
+    }
+
+    #[test]
+    fn test_parse_command_gate_extras_allow_git_in_bash_false() {
+        let config = json!({
+            "allow_git_in_bash": false,
+            "deny": ["git *"]
+        });
+
+        let result = parse_command_gate_extras(&config);
+        assert!(!result.allow_git_in_bash);
+    }
+
+    #[test]
+    fn test_parse_command_gate_extras_default_false() {
+        let config = json!({
+            "deny": ["git *"]
+        });
+
+        let result = parse_command_gate_extras(&config);
+        assert!(!result.allow_git_in_bash);
+    }
+
+    // ── vcs_bypass_rules ────────────────────────────────────────────────
+
+    #[test]
+    fn test_vcs_bypass_rules_returns_git_and_gh_allow() {
+        let rules = vcs_bypass_rules();
+        assert_eq!(rules.len(), 2);
+
+        assert_eq!(rules[0].action, RuleAction::Allow);
+        assert_eq!(rules[0].command_pattern.as_deref(), Some("git"));
+
+        assert_eq!(rules[1].action, RuleAction::Allow);
+        assert_eq!(rules[1].command_pattern.as_deref(), Some("gh"));
     }
 
     // ── parse_file_protection_block ───────────────────────────────────────

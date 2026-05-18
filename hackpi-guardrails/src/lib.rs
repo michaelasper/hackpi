@@ -659,6 +659,145 @@ mod tests {
         assert_eq!(result, GuardResult::Allow);
     }
 
+    // ── VCS Command Blocking Tests ────────────────────────────────────────
+
+    #[test]
+    fn test_bash_git_status_denied_by_default() {
+        // Without any config, git commands in bash should be denied by built-in patterns
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({ "command": "git status" });
+        let result = evaluator.check_tool("bash", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("git"),
+                    "deny message should mention git: {msg}"
+                );
+            }
+            other => panic!("expected Deny for 'git status', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_gh_issue_list_denied_by_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({ "command": "gh issue list" });
+        let result = evaluator.check_tool("bash", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("gh"), "deny message should mention gh: {msg}");
+            }
+            other => panic!("expected Deny for 'gh issue list', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_ls_still_allowed_with_vcs_patterns() {
+        // Non-VCS commands should still be allowed
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({ "command": "ls -la" });
+        let result = evaluator.check_tool("bash", &params);
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_non_bash_tool_git_not_blocked() {
+        // git commands in non-bash tools should NOT be blocked
+        // (the command_gate checks all tools, but the built-in VCS deny
+        // patterns should only apply when the tool is "bash")
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({ "command": "git status" });
+        // Using a tool named "git_read" — should be allowed
+        let result = evaluator.check_tool("git_read", &params);
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_allow_git_in_bash_true_bypasses_vcs_deny() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Create config with allow_git_in_bash: true
+        let hackpi = dir.path().join(".hackpi/guardrails.json");
+        std::fs::create_dir_all(hackpi.parent().unwrap()).expect("create dir");
+        std::fs::write(
+            &hackpi,
+            r#"{"command_gate": {"allow_git_in_bash": true, "deny": ["git *", "gh *"]}}"#,
+        )
+        .expect("write");
+
+        evaluator.load_rules().expect("load rules");
+
+        let params = json!({ "command": "git status" });
+        let result = evaluator.check_tool("bash", &params);
+        assert_eq!(
+            result,
+            GuardResult::Allow,
+            "git status should be allowed with allow_git_in_bash"
+        );
+    }
+
+    #[test]
+    fn test_allow_git_in_bash_true_allows_gh() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        let hackpi = dir.path().join(".hackpi/guardrails.json");
+        std::fs::create_dir_all(hackpi.parent().unwrap()).expect("create dir");
+        std::fs::write(&hackpi, r#"{"command_gate": {"allow_git_in_bash": true}}"#).expect("write");
+
+        evaluator.load_rules().expect("load rules");
+
+        let params = json!({ "command": "gh pr create" });
+        let result = evaluator.check_tool("bash", &params);
+        assert_eq!(
+            result,
+            GuardResult::Allow,
+            "gh should be allowed with allow_git_in_bash"
+        );
+    }
+
+    #[test]
+    fn test_command_gate_allow_overrides_vcs_deny() {
+        // A specific allow rule for "git status" should override the built-in VCS deny
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        let hackpi = dir.path().join(".hackpi/guardrails.json");
+        std::fs::create_dir_all(hackpi.parent().unwrap()).expect("create dir");
+        std::fs::write(
+            &hackpi,
+            r#"{"command_gate": {"allow": ["git status", "git log"], "deny": ["git *", "gh *"]}}"#,
+        )
+        .expect("write");
+
+        evaluator.load_rules().expect("load rules");
+
+        // "git status" should be allowed by the specific allow rule
+        let params = json!({ "command": "git status" });
+        let result = evaluator.check_tool("bash", &params);
+        assert_eq!(
+            result,
+            GuardResult::Allow,
+            "git status should be allowed by config allow rule"
+        );
+    }
+
     // ── GuardType Display Tests ──────────────────────────────────────────
 
     #[test]

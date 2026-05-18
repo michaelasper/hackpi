@@ -8,6 +8,9 @@ pub struct DangerousPattern {
     pub word_boundary: bool,
     /// If true, matching is case-sensitive. Default (false) is case-insensitive.
     pub case_sensitive: bool,
+    /// If set, this pattern only applies to commands from this specific tool
+    /// (e.g., "bash"). If None, applies to all tools.
+    pub tool_scope: Option<&'static str>,
 }
 
 /// Built-in dangerous command patterns checked as a fallback after config rules.
@@ -21,18 +24,21 @@ pub const DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "> /dev/sda",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "> /dev/nvme",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     // No-space redirect variants
     DangerousPattern {
@@ -40,54 +46,79 @@ pub const DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: ">/dev/nvme",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "mkfs.",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "dd",
         action: RuleAction::Deny,
         word_boundary: true,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "sudo",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "su",
         action: RuleAction::Deny,
         word_boundary: true,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "doas",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "passwd",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "chpasswd",
         action: RuleAction::Deny,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
+    },
+    // VCS commands — use dedicated git_read/git_write/github tools instead
+    // Only applies to the "bash" tool so VCS tools are not blocked.
+    DangerousPattern {
+        pattern: "git",
+        action: RuleAction::Deny,
+        word_boundary: true,
+        case_sensitive: false,
+        tool_scope: Some("bash"),
+    },
+    DangerousPattern {
+        pattern: "gh",
+        action: RuleAction::Deny,
+        word_boundary: true,
+        case_sensitive: false,
+        tool_scope: Some("bash"),
     },
     // Ask patterns second (notable but potentially legitimate)
     DangerousPattern {
@@ -95,36 +126,42 @@ pub const DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         action: RuleAction::Ask,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "rm -r",
         action: RuleAction::Ask,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "chmod -R",
         action: RuleAction::Ask,
         word_boundary: false,
         case_sensitive: true,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "chown -R",
         action: RuleAction::Ask,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "curl",
         action: RuleAction::Ask,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
     DangerousPattern {
         pattern: "wget",
         action: RuleAction::Ask,
         word_boundary: false,
         case_sensitive: false,
+        tool_scope: None,
     },
 ];
 
@@ -144,7 +181,7 @@ pub fn check(command: &str, rules: &[PermissionRule], tool: &str) -> GuardResult
     }
 
     // 2. Check built-in dangerous patterns as fallback
-    if let Some(result) = check_against_dangerous_patterns(command) {
+    if let Some(result) = check_against_dangerous_patterns(command, tool) {
         return result;
     }
 
@@ -208,8 +245,19 @@ pub fn check_command_against_rules(
 /// with case-sensitivity controlled by `case_sensitive` for other patterns.
 /// Returns the first matching pattern's `GuardResult`, or `None` if no
 /// pattern matches.
-pub fn check_against_dangerous_patterns(command: &str) -> Option<GuardResult> {
+///
+/// Patterns with a `tool_scope` only match when the given `tool` matches
+/// the scope (case-insensitive). Patterns without a `tool_scope` match
+/// all tools.
+pub fn check_against_dangerous_patterns(command: &str, tool: &str) -> Option<GuardResult> {
     for dp in DANGEROUS_PATTERNS {
+        // Check tool scoping
+        if let Some(scope) = dp.tool_scope {
+            if !scope.eq_ignore_ascii_case(tool) {
+                continue;
+            }
+        }
+
         let matches = if dp.word_boundary {
             crate::pattern::command_matches_at_word_boundary(command, dp.pattern, dp.case_sensitive)
         } else if dp.case_sensitive {
@@ -267,9 +315,9 @@ mod tests {
     // ── False-positive regression tests ──────────────────────────────────
 
     #[test]
-    fn test_git_add_not_flagged_by_dd() {
+    fn test_add_not_flagged_by_dd() {
         // "dd" should not match inside "add"
-        let result = check("git add .", &[], "bash");
+        let result = check("echo add .", &[], "bash");
         assert_eq!(result, GuardResult::Allow);
     }
 
@@ -631,7 +679,7 @@ mod tests {
 
     #[test]
     fn test_dangerous_patterns_rm_rf_asks() {
-        let result = check_against_dangerous_patterns("rm -rf /");
+        let result = check_against_dangerous_patterns("rm -rf /", "bash");
         assert!(result.is_some());
         match result.unwrap() {
             GuardResult::Ask(reason) => {
@@ -643,13 +691,13 @@ mod tests {
 
     #[test]
     fn test_dangerous_patterns_safe_is_none() {
-        let result = check_against_dangerous_patterns("ls -la");
+        let result = check_against_dangerous_patterns("ls -la", "bash");
         assert!(result.is_none());
     }
 
     #[test]
     fn test_dangerous_patterns_sudo_denies() {
-        let result = check_against_dangerous_patterns("sudo make install");
+        let result = check_against_dangerous_patterns("sudo make install", "bash");
         assert!(result.is_some());
         match result.unwrap() {
             GuardResult::Deny(msg) => {
@@ -924,6 +972,179 @@ mod tests {
         assert!(
             idx_rm_rf < idx_rm_r,
             "rm -rf should come before rm -r in DANGEROUS_PATTERNS"
+        );
+    }
+
+    // ── VCS Command Blocking (git/gh in bash) ────────────────────────────
+
+    #[test]
+    fn test_git_status_denied_by_vcs_pattern() {
+        // "git status" should be denied when VCS tools are present
+        let result = check("git status", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("git"),
+                    "deny message should mention git: {msg}"
+                );
+            }
+            other => panic!("expected Deny for 'git status', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_log_denied_by_vcs_pattern() {
+        let result = check("git log --oneline", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("git"),
+                    "deny message should mention git: {msg}"
+                );
+            }
+            other => panic!("expected Deny for 'git log', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_denied_by_vcs_pattern() {
+        let result = check("git commit -m \"hello\"", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("git"),
+                    "deny message should mention git: {msg}"
+                );
+            }
+            other => panic!("expected Deny for 'git commit', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gh_pr_create_denied_by_vcs_pattern() {
+        // "gh pr create" should be denied when VCS tools are present
+        let result = check("gh pr create --title foo", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("gh"), "deny message should mention gh: {msg}");
+            }
+            other => panic!("expected Deny for 'gh pr create', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gh_issue_list_denied_by_vcs_pattern() {
+        let result = check("gh issue list", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("gh"), "deny message should mention gh: {msg}");
+            }
+            other => panic!("expected Deny for 'gh issue list', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ls_not_denied_by_vcs_patterns() {
+        // "ls -la" should still be allowed (only git/gh are blocked)
+        let result = check("ls -la", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_cargo_test_not_denied_by_vcs_patterns() {
+        // "cargo test" should still be allowed
+        let result = check("cargo test", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_git_word_boundary_not_inside_other_word() {
+        // "git" should not match inside words like "digital" or "nogit"
+        let result = check("echo digital", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_gh_word_boundary_not_inside_other_word() {
+        // "gh" should not match inside words like "rough" or "ghost"
+        let result = check("echo rough ghost", &[], "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_git_uppercase_denied() {
+        // Case-insensitive: "GIT" should also be denied
+        let result = check("GIT status", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("git"),
+                    "deny message should mention git: {msg}"
+                );
+            }
+            other => panic!("expected Deny for 'GIT status', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gh_uppercase_denied() {
+        // Case-insensitive: "GH" should also be denied
+        let result = check("GH issue list", &[], "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("gh"), "deny message should mention gh: {msg}");
+            }
+            other => panic!("expected Deny for 'GH issue list', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_config_allow_rule_overrides_vcs_deny() {
+        // A config allow rule for "git status" should bypass the built-in deny
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("git status".into()),
+            action: RuleAction::Allow,
+        }];
+        let result = check("git status", &rules, "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_vcs_patterns_exist_in_dangerous_patterns() {
+        let patterns: Vec<&str> = DANGEROUS_PATTERNS.iter().map(|dp| dp.pattern).collect();
+        assert!(
+            patterns.contains(&"git"),
+            "DANGEROUS_PATTERNS should contain 'git' for VCS blocking"
+        );
+        assert!(
+            patterns.contains(&"gh"),
+            "DANGEROUS_PATTERNS should contain 'gh' for VCS blocking"
+        );
+    }
+
+    #[test]
+    fn test_git_uses_word_boundary_matching() {
+        let git = DANGEROUS_PATTERNS
+            .iter()
+            .find(|dp| dp.pattern == "git")
+            .expect("git pattern must exist");
+        assert!(
+            git.word_boundary,
+            "git should use word-boundary matching to avoid false positives"
+        );
+    }
+
+    #[test]
+    fn test_gh_uses_word_boundary_matching() {
+        let gh = DANGEROUS_PATTERNS
+            .iter()
+            .find(|dp| dp.pattern == "gh")
+            .expect("gh pattern must exist");
+        assert!(
+            gh.word_boundary,
+            "gh should use word-boundary matching to avoid false positives"
         );
     }
 }
