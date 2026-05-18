@@ -389,11 +389,23 @@ pub fn append_to_permissions(
             .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
     }
 
-    // Write with pretty formatting
+    // Write with pretty formatting — use temp file + atomic rename for crash safety
     let content =
         serde_json::to_string_pretty(&config).map_err(|e| format!("Failed to serialize: {e}"))?;
-    std::fs::write(file_path, content)
-        .map_err(|e| format!("Failed to write {}: {e}", file_path.display()))?;
+
+    // Write to a temporary file in the same directory, then atomically rename.
+    // On POSIX, rename() is atomic when source and destination are on the same
+    // filesystem, so concurrent readers always see a consistent file.
+    let tmp_path = file_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &content)
+        .map_err(|e| format!("Failed to write temporary file {}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, file_path).map_err(|e| {
+        format!(
+            "Failed to rename {} to {}: {e}",
+            tmp_path.display(),
+            file_path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -1028,6 +1040,36 @@ mod tests {
             result.unwrap_err().contains("is not an array"),
             "error should mention array"
         );
+    }
+
+    #[test]
+    fn test_append_to_permissions_atomic_write_no_temp_file_left_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("guardrails.json");
+
+        // Create initial file
+        let initial = r#"{"permissions":{"allow":[],"deny":[]}}"#;
+        std::fs::write(&file_path, initial).expect("write initial");
+
+        // Append a permission
+        let result = append_to_permissions(&file_path, "Read(./docs/**)", "allow");
+        assert!(result.is_ok(), "append should succeed");
+
+        // Temp file should NOT exist after successful write
+        let tmp_path = file_path.with_extension("json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "temp file should be cleaned up after atomic write"
+        );
+
+        // The target file should have the correct content
+        let content = std::fs::read_to_string(&file_path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse JSON");
+        let allow = parsed["permissions"]["allow"]
+            .as_array()
+            .expect("allow array");
+        assert_eq!(allow.len(), 1, "should have one allow entry");
+        assert_eq!(allow[0].as_str(), Some("Read(./docs/**)"));
     }
 
     #[test]
