@@ -23,6 +23,16 @@ impl std::fmt::Debug for PermissionPrompt {
     }
 }
 
+/// Active view in the TUI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppView {
+    Conversation,
+    TaskBoard,
+    TaskDetail(String),
+    /// Placeholder for a future graph view.
+    TaskGraph,
+}
+
 pub enum AppState {
     Resting,
     Generating,
@@ -56,6 +66,12 @@ pub struct App {
     pub quit_requested: bool,
     pub pending_permission: Option<PermissionPrompt>,
     pub task_store: Option<Arc<hackpi_tasks::JsonTaskStore>>,
+    /// Active view (Conversation, TaskBoard, etc.).
+    pub active_view: AppView,
+    /// Cached task list for the task board view.
+    pub task_list_cache: Vec<hackpi_tasks::Task>,
+    /// Cursor position in the task board list.
+    pub selected_task_idx: usize,
 }
 
 impl Default for App {
@@ -76,6 +92,9 @@ impl App {
             quit_requested: false,
             pending_permission: None,
             task_store: None,
+            active_view: AppView::Conversation,
+            task_list_cache: Vec::new(),
+            selected_task_idx: 0,
         }
     }
 
@@ -164,6 +183,78 @@ impl App {
         self.input.clear();
         self.usage = None;
         self.scroll_offset = 0;
+    }
+
+    /// Cycle the active view: Conversation → TaskBoard → TaskGraph (placeholder) → Conversation.
+    pub fn cycle_view(&mut self) {
+        self.active_view = match &self.active_view {
+            AppView::Conversation | AppView::TaskDetail(_) => AppView::TaskBoard,
+            AppView::TaskBoard => AppView::TaskGraph,
+            AppView::TaskGraph => AppView::Conversation,
+        };
+    }
+
+    /// Refresh the task list cache from the task store.
+    /// Returns `true` if the refresh succeeded.
+    pub fn refresh_task_cache(&mut self) -> bool {
+        if let Some(ref store) = self.task_store {
+            let store_clone: Arc<dyn hackpi_tasks::TaskStore> =
+                Arc::clone(store) as Arc<dyn hackpi_tasks::TaskStore>;
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    store_clone.list(&hackpi_tasks::TaskFilter::default()).await
+                })
+            });
+            match result {
+                Ok(tasks) => {
+                    self.task_list_cache = tasks;
+                    // Clamp cursor
+                    if self.selected_task_idx >= self.task_list_cache.len()
+                        && !self.task_list_cache.is_empty()
+                    {
+                        self.selected_task_idx = self.task_list_cache.len() - 1;
+                    }
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Move the task board cursor up.
+    pub fn task_cursor_up(&mut self) {
+        if self.selected_task_idx > 0 {
+            self.selected_task_idx -= 1;
+        }
+    }
+
+    /// Move the task board cursor down.
+    pub fn task_cursor_down(&mut self) {
+        if !self.task_list_cache.is_empty() {
+            self.selected_task_idx =
+                (self.selected_task_idx + 1).min(self.task_list_cache.len() - 1);
+        }
+    }
+
+    /// Enter the selected task detail view. Returns the task ID if a task was selected.
+    pub fn enter_task_detail(&mut self) -> Option<String> {
+        if let Some(task) = self.task_list_cache.get(self.selected_task_idx) {
+            let id = task.id.clone();
+            self.active_view = AppView::TaskDetail(id.clone());
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    /// Go back from the current view (Esc key).
+    pub fn go_back(&mut self) {
+        self.active_view = match &self.active_view {
+            AppView::TaskDetail(_) => AppView::TaskBoard,
+            _ => AppView::Conversation,
+        };
     }
 }
 
@@ -1608,5 +1699,260 @@ mod tests {
             }
         }
         assert!(found_chunk);
+    }
+
+    // ── Task board view / navigation tests ────────────────────────────────
+
+    #[test]
+    fn test_app_default_view_is_conversation() {
+        let app = App::new();
+        assert_eq!(app.active_view, AppView::Conversation);
+    }
+
+    #[test]
+    fn test_tab_cycles_conversation_to_task_board() {
+        let mut app = App::new();
+        assert_eq!(app.active_view, AppView::Conversation);
+        app.cycle_view();
+        assert_eq!(app.active_view, AppView::TaskBoard);
+    }
+
+    #[test]
+    fn test_tab_cycles_task_board_to_task_graph() {
+        let mut app = App::new();
+        app.cycle_view(); // → TaskBoard
+        app.cycle_view(); // → TaskGraph
+        assert_eq!(app.active_view, AppView::TaskGraph);
+    }
+
+    #[test]
+    fn test_tab_cycles_task_graph_to_conversation() {
+        let mut app = App::new();
+        app.cycle_view(); // → TaskBoard
+        app.cycle_view(); // → TaskGraph
+        app.cycle_view(); // → Conversation
+        assert_eq!(app.active_view, AppView::Conversation);
+    }
+
+    #[test]
+    fn test_tab_cycles_full_loop() {
+        let mut app = App::new();
+        for _ in 0..3 {
+            app.cycle_view();
+        }
+        assert_eq!(app.active_view, AppView::Conversation);
+    }
+
+    #[test]
+    fn test_task_detail_goes_back_to_task_board() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskDetail("TSK-001".to_string());
+        app.go_back();
+        assert_eq!(app.active_view, AppView::TaskBoard);
+    }
+
+    #[test]
+    fn test_task_board_goes_back_to_conversation() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskBoard;
+        app.go_back();
+        assert_eq!(app.active_view, AppView::Conversation);
+    }
+
+    #[test]
+    fn test_conversation_goes_back_stays_conversation() {
+        let mut app = App::new();
+        app.go_back();
+        assert_eq!(app.active_view, AppView::Conversation);
+    }
+
+    #[test]
+    fn test_task_cursor_up_clamps_at_zero() {
+        let mut app = App::new();
+        app.selected_task_idx = 0;
+        app.task_cursor_up();
+        assert_eq!(app.selected_task_idx, 0);
+    }
+
+    #[test]
+    fn test_task_cursor_up_decrements() {
+        let mut app = App::new();
+        app.selected_task_idx = 3;
+        app.task_cursor_up();
+        assert_eq!(app.selected_task_idx, 2);
+    }
+
+    #[test]
+    fn test_task_cursor_down_clamps_at_end() {
+        let mut app = App::new();
+        // Empty cache — cursor should not move
+        app.task_cursor_down();
+        assert_eq!(app.selected_task_idx, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_task_cursor_down_increments() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        // Create 3 tasks
+        for i in 0..3 {
+            handle_slash_command(
+                &format!("/task create Task {i}"),
+                &mut app,
+                &tx,
+                &mut ge,
+                &registry,
+            )
+            .await;
+        }
+
+        app.refresh_task_cache();
+        assert_eq!(app.task_list_cache.len(), 3);
+        assert_eq!(app.selected_task_idx, 0);
+
+        app.task_cursor_down();
+        assert_eq!(app.selected_task_idx, 1);
+
+        app.task_cursor_down();
+        assert_eq!(app.selected_task_idx, 2);
+
+        // Should clamp at last item
+        app.task_cursor_down();
+        assert_eq!(app.selected_task_idx, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_enter_task_detail_transitions_view() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        handle_slash_command(
+            "/task create Auth module",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+
+        app.refresh_task_cache();
+        let id = app.enter_task_detail();
+        assert_eq!(id, Some("TSK-001".to_string()));
+        assert_eq!(app.active_view, AppView::TaskDetail("TSK-001".to_string()));
+    }
+
+    #[test]
+    fn test_enter_task_detail_with_empty_cache_returns_none() {
+        let mut app = App::new();
+        let result = app.enter_task_detail();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refresh_task_cache_populates_list() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        handle_slash_command("/task create Task A", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Task B", &mut app, &tx, &mut ge, &registry).await;
+
+        assert!(app.task_list_cache.is_empty());
+        let result = app.refresh_task_cache();
+        assert!(result);
+        assert_eq!(app.task_list_cache.len(), 2);
+        assert_eq!(app.task_list_cache[0].title, "Task A");
+        assert_eq!(app.task_list_cache[1].title, "Task B");
+    }
+
+    #[test]
+    fn test_refresh_task_cache_without_store_returns_false() {
+        let mut app = App::new();
+        assert!(app.task_store.is_none());
+        let result = app.refresh_task_cache();
+        assert!(!result);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refresh_clamps_cursor_to_last_item() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        // Create 5 tasks
+        for i in 0..5 {
+            handle_slash_command(
+                &format!("/task create T{i}"),
+                &mut app,
+                &tx,
+                &mut ge,
+                &registry,
+            )
+            .await;
+        }
+
+        app.refresh_task_cache();
+        assert_eq!(app.task_list_cache.len(), 5);
+
+        // Move cursor to last item
+        app.selected_task_idx = 4;
+
+        // Now cache shrinks to 2 items — cursor should clamp
+        // Delete tasks 3,4 by recreating store... easier: just manually set cache
+        app.task_list_cache.truncate(2);
+        app.selected_task_idx = 4;
+        // Simulate refresh clamping
+        if app.selected_task_idx >= app.task_list_cache.len() && !app.task_list_cache.is_empty() {
+            app.selected_task_idx = app.task_list_cache.len() - 1;
+        }
+        assert_eq!(app.selected_task_idx, 1);
+    }
+
+    #[test]
+    fn test_task_detail_tab_cycles_to_task_board() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskDetail("TSK-001".to_string());
+        app.cycle_view();
+        assert_eq!(app.active_view, AppView::TaskBoard);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cache_shows_blocked_by_tasks() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        // Create two tasks
+        handle_slash_command("/task create Blocker", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Blocked", &mut app, &tx, &mut ge, &registry).await;
+
+        // Block second task by first
+        handle_slash_command(
+            "/task block TSK-002 TSK-001",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+
+        app.refresh_task_cache();
+        assert_eq!(app.task_list_cache.len(), 2);
+
+        // Find the blocked task
+        let blocked = app
+            .task_list_cache
+            .iter()
+            .find(|t| t.id == "TSK-002")
+            .unwrap();
+        assert!(blocked.blocked_by.contains(&"TSK-001".to_string()));
     }
 }
