@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use hackpi_core::tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 use super::filesystem::InMemoryFs;
 use super::session::{normalize_path, BashSession};
@@ -79,17 +79,15 @@ impl Tool for BashTool {
         let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
         let result = tokio::time::timeout(timeout_dur, async {
-            tokio::task::block_in_place(|| {
-                let mut session = self.session.lock().unwrap();
-                session.signal = Some(ctx.signal.clone());
-                if let Some(wd) = workdir {
-                    let normalized = normalize_path(wd);
-                    if session.fs.is_dir(std::path::Path::new(&normalized)) {
-                        session.cwd = std::path::PathBuf::from(normalized);
-                    }
+            let mut session = self.session.lock().await;
+            session.signal = Some(ctx.signal.clone());
+            if let Some(wd) = workdir {
+                let normalized = normalize_path(wd);
+                if session.fs.is_dir(std::path::Path::new(&normalized)) {
+                    session.cwd = std::path::PathBuf::from(normalized);
                 }
-                session.execute(command)
-            })
+            }
+            session.execute(command)
         })
         .await;
 
@@ -119,6 +117,7 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hackpi_core::tools::ToolContext;
 
     #[test]
     fn test_input_schema_has_additional_properties_false() {
@@ -129,5 +128,28 @@ mod tests {
             Some(&serde_json::json!(false)),
             "bash tool schema missing additionalProperties: false"
         );
+    }
+
+    #[tokio::test]
+    async fn test_bash_execute_echo() {
+        let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+        let params = serde_json::json!({
+            "command": "echo hello world"
+        });
+        let ctx = ToolContext {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        match result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("hello world"),
+                    "expected 'hello world' in output, got: {content}"
+                );
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
     }
 }
