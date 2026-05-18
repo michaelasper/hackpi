@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${REPO:-https://github.com/anomalyco/hackpi.git}"
+REPO="${REPO:-https://github.com/michaelasper/hackpi.git}"
 PACKAGE="${PACKAGE:-hackpi-tui}"
 BIN_NAME="${BIN_NAME:-hackpi}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
