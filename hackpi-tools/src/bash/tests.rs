@@ -719,6 +719,130 @@ fn test_seq_last_command_exit_code() {
 }
 
 #[test]
+fn test_ln_symlink_creates_link() {
+    let mut session = new_session();
+    session
+        .fs
+        .write(Path::new("/home/user/target.txt"), b"link target")
+        .unwrap();
+    let out = session.execute("ln -s target.txt link.txt");
+    assert_eq!(out.exit_code, 0);
+    let content = session.fs.read(Path::new("/home/user/link.txt")).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&content),
+        "link target",
+        "symlink should resolve to target content"
+    );
+}
+
+#[test]
+fn test_ln_symlink_missing_target() {
+    let mut session = new_session();
+    let out = session.execute("ln -s nonexistent.txt link.txt");
+    assert_eq!(
+        out.exit_code, 0,
+        "ln -s should succeed even with missing target"
+    );
+    // Reading a dangling symlink should fail
+    let result = session.fs.read(Path::new("/home/user/link.txt"));
+    assert!(result.is_err(), "reading a dangling symlink should fail");
+}
+
+#[test]
+fn test_ln_hardlink() {
+    let mut session = new_session();
+    session
+        .fs
+        .write(Path::new("/home/user/original.txt"), b"hardlink content")
+        .unwrap();
+    let out = session.execute("ln original.txt hardlink.txt");
+    assert_eq!(out.exit_code, 0);
+    let content = session
+        .fs
+        .read(Path::new("/home/user/hardlink.txt"))
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&content), "hardlink content");
+}
+
+#[test]
+fn test_ln_missing_operand() {
+    let mut session = new_session();
+    let out = session.execute("ln");
+    assert_eq!(out.exit_code, 1);
+    assert!(out.stderr.contains("missing operand"));
+}
+
+#[test]
+fn test_with_session_workdir_normalizes_dotdot() {
+    let (_, rx) = watch::channel(false);
+    with_session(Some("/home"), Some(rx), |session| {
+        assert_eq!(session.cwd, Path::new("/home"));
+    });
+    // Then with .. that goes to root
+    let (_, rx) = watch::channel(false);
+    with_session(Some("/home/user/.."), Some(rx), |session| {
+        assert_eq!(
+            session.cwd,
+            Path::new("/home"),
+            "workdir with .. should normalize to /home"
+        );
+    });
+}
+
+#[test]
+fn test_with_session_workdir_normalizes_complex_dotdot() {
+    let (_, rx) = watch::channel(false);
+    // /tmp/../home/user should normalize to /home/user
+    with_session(Some("/tmp/../home/user"), Some(rx), |session| {
+        assert_eq!(
+            session.cwd,
+            Path::new("/home/user"),
+            "complex .. workdir should normalize"
+        );
+    });
+}
+
+#[test]
+fn test_with_session_workdir_traversal_stays_at_root() {
+    let (_, rx) = watch::channel(false);
+    // Going above root should stay at root
+    with_session(Some("/../../.."), Some(rx), |session| {
+        assert_eq!(
+            session.cwd,
+            Path::new("/"),
+            ".. above root should stay at root"
+        );
+    });
+}
+
+#[test]
+fn test_home_user_bashrc_exists() {
+    let session = new_session();
+    assert!(session.fs.is_file(Path::new("/home/user/.bashrc")));
+}
+
+#[test]
+fn test_readlink_on_symlink() {
+    let session = new_session();
+    session
+        .fs
+        .write(Path::new("/home/user/real.txt"), b"content")
+        .unwrap();
+    session
+        .fs
+        .symlink(
+            Path::new("/home/user/real.txt"),
+            Path::new("/home/user/link.txt"),
+        )
+        .unwrap();
+    let target = session
+        .fs
+        .read_link(Path::new("/home/user/link.txt"))
+        .unwrap();
+    assert_eq!(target, Path::new("/home/user/real.txt"));
+}
+
+#[test]
 fn test_concurrent_reads_do_not_deadlock() {
     let fs = Box::new(InMemoryFs::default());
     fs.write(Path::new("/file1.txt"), b"content1").unwrap();

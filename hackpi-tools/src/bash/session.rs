@@ -320,6 +320,36 @@ pub struct BashOutput {
     pub command_count: u32,
 }
 
+/// Normalize a path by resolving `.` and `..` components.
+/// Works on virtual filesystem paths (no canonicalize needed).
+fn normalize_path(path: &str) -> String {
+    use std::path::Component;
+    let path = std::path::Path::new(path);
+    let mut components: Vec<&str> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                components.pop();
+            }
+            Component::RootDir => {
+                components.clear();
+            }
+            Component::Normal(name) => {
+                if let Some(s) = name.to_str() {
+                    components.push(s);
+                }
+            }
+            Component::Prefix(_) => {}
+        }
+    }
+    if components.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", components.join("/"))
+    }
+}
+
 pub fn with_session<F, R>(workdir: Option<&str>, signal: Option<watch::Receiver<bool>>, f: F) -> R
 where
     F: FnOnce(&mut BashSession) -> R,
@@ -336,10 +366,56 @@ where
         let session = session.as_mut().unwrap();
         session.signal = signal;
         if let Some(wd) = workdir {
-            if session.fs.is_dir(std::path::Path::new(wd)) {
-                session.cwd = std::path::PathBuf::from(wd);
+            let normalized = normalize_path(wd);
+            if session.fs.is_dir(std::path::Path::new(&normalized)) {
+                session.cwd = std::path::PathBuf::from(normalized);
             }
         }
         f(session)
     })
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_path_simple() {
+        assert_eq!(normalize_path("/home/user"), "/home/user");
+    }
+
+    #[test]
+    fn test_normalize_path_dotdot() {
+        assert_eq!(normalize_path("/home/user/.."), "/home");
+    }
+
+    #[test]
+    fn test_normalize_path_complex() {
+        assert_eq!(normalize_path("/tmp/../home/user"), "/home/user");
+    }
+
+    #[test]
+    fn test_normalize_path_above_root() {
+        assert_eq!(normalize_path("/../../.."), "/");
+    }
+
+    #[test]
+    fn test_normalize_path_dot() {
+        assert_eq!(normalize_path("/home/./user"), "/home/user");
+    }
+
+    #[test]
+    fn test_normalize_path_root() {
+        assert_eq!(normalize_path("/"), "/");
+    }
+
+    #[test]
+    fn test_normalize_path_relative() {
+        assert_eq!(normalize_path("foo/bar"), "/foo/bar");
+    }
+
+    #[test]
+    fn test_normalize_path_relative_dotdot() {
+        assert_eq!(normalize_path("foo/../bar"), "/bar");
+    }
 }

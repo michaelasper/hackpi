@@ -43,6 +43,7 @@ pub(crate) struct FileNode {
     pub mode: u32,
     pub is_dir: bool,
     pub is_symlink: bool,
+    pub symlink_target: Option<PathBuf>,
     pub children: BTreeMap<String, FileNode>,
     pub created: SystemTime,
     pub modified: SystemTime,
@@ -59,6 +60,7 @@ impl Default for InMemoryFs {
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
+            symlink_target: None,
             children: BTreeMap::new(),
             created: SystemTime::now(),
             modified: SystemTime::now(),
@@ -69,6 +71,7 @@ impl Default for InMemoryFs {
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
+            symlink_target: None,
             children: BTreeMap::new(),
             created: SystemTime::now(),
             modified: SystemTime::now(),
@@ -79,6 +82,7 @@ impl Default for InMemoryFs {
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
+            symlink_target: None,
             children: BTreeMap::new(),
             created: SystemTime::now(),
             modified: SystemTime::now(),
@@ -89,20 +93,34 @@ impl Default for InMemoryFs {
             mode: 0o644,
             is_dir: false,
             is_symlink: false,
+            symlink_target: None,
             children: BTreeMap::new(),
             created: SystemTime::now(),
             modified: SystemTime::now(),
         };
 
-        let user = FileNode {
-            content: Vec::new(),
-            mode: 0o755,
-            is_dir: true,
+        let bashrc = FileNode {
+            content: b"# ~/.bashrc - default bash configuration\n".to_vec(),
+            mode: 0o644,
+            is_dir: false,
             is_symlink: false,
+            symlink_target: None,
             children: BTreeMap::new(),
             created: SystemTime::now(),
             modified: SystemTime::now(),
         };
+
+        let mut user = FileNode {
+            content: Vec::new(),
+            mode: 0o755,
+            is_dir: true,
+            is_symlink: false,
+            symlink_target: None,
+            children: BTreeMap::new(),
+            created: SystemTime::now(),
+            modified: SystemTime::now(),
+        };
+        user.children.insert(".bashrc".into(), bashrc);
         home.children.insert("user".into(), user);
         root.children.insert("home".into(), home);
         root.children.insert("tmp".into(), tmp);
@@ -112,6 +130,7 @@ impl Default for InMemoryFs {
             mode: 0o755,
             is_dir: true,
             is_symlink: false,
+            symlink_target: None,
             children: BTreeMap::new(),
             created: SystemTime::now(),
             modified: SystemTime::now(),
@@ -145,6 +164,38 @@ pub(crate) fn resolve_path_ref<'a>(node: &'a FileNode, path: &Path) -> Option<&'
     Some(current)
 }
 
+/// Like `resolve_path_ref`, but follows symlinks on the final component.
+/// Does NOT follow symlinks on intermediate path components.
+fn resolve_path_follow<'a>(root: &'a FileNode, path: &Path) -> Option<&'a FileNode> {
+    let node = resolve_path_ref(root, path)?;
+    follow_symlinks(root, node, path)
+}
+
+/// Follow symlink chain starting from `node` up to 10 levels deep.
+fn follow_symlinks<'a>(
+    root: &'a FileNode,
+    mut node: &'a FileNode,
+    path: &Path,
+) -> Option<&'a FileNode> {
+    let mut current_path = path.to_path_buf();
+    for _ in 0..10 {
+        if !node.is_symlink {
+            return Some(node);
+        }
+        let target = node.symlink_target.as_ref()?;
+        let resolved = if target.is_absolute() {
+            resolve_path_ref(root, target)?
+        } else {
+            let parent = current_path.parent()?;
+            let full = parent.join(target);
+            current_path = full.clone();
+            resolve_path_ref(root, &full)?
+        };
+        node = resolved;
+    }
+    None // Too many levels of symlink indirection
+}
+
 impl InMemoryFs {
     fn ensure_parents(&self, path: &Path) -> std::io::Result<()> {
         let parent = path.parent().unwrap_or(Path::new("/"));
@@ -155,7 +206,7 @@ impl InMemoryFs {
 impl FileSystem for InMemoryFs {
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         let root_guard = self.root.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(node) = resolve_path_ref(&root_guard, path) {
+        if let Some(node) = resolve_path_follow(&root_guard, path) {
             if node.is_dir {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::IsADirectory,
@@ -205,6 +256,7 @@ impl FileSystem for InMemoryFs {
                         mode: 0o755,
                         is_dir: true,
                         is_symlink: false,
+                        symlink_target: None,
                         children: BTreeMap::new(),
                         created: SystemTime::now(),
                         modified: SystemTime::now(),
@@ -221,6 +273,7 @@ impl FileSystem for InMemoryFs {
                 mode: 0o644,
                 is_dir: false,
                 is_symlink: false,
+                symlink_target: None,
                 children: BTreeMap::new(),
                 created: SystemTime::now(),
                 modified: SystemTime::now(),
@@ -298,26 +351,26 @@ impl FileSystem for InMemoryFs {
 
     fn exists(&self, path: &Path) -> bool {
         let root = self.root.read().unwrap_or_else(|e| e.into_inner());
-        resolve_path_ref(&root, path).is_some()
+        resolve_path_follow(&root, path).is_some()
     }
 
     fn is_dir(&self, path: &Path) -> bool {
         let root = self.root.read().unwrap_or_else(|e| e.into_inner());
-        resolve_path_ref(&root, path)
+        resolve_path_follow(&root, path)
             .map(|n| n.is_dir)
             .unwrap_or(false)
     }
 
     fn is_file(&self, path: &Path) -> bool {
         let root = self.root.read().unwrap_or_else(|e| e.into_inner());
-        resolve_path_ref(&root, path)
+        resolve_path_follow(&root, path)
             .map(|n| !n.is_dir)
             .unwrap_or(false)
     }
 
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<DirEntry>> {
         let root = self.root.read().unwrap_or_else(|e| e.into_inner());
-        let node = resolve_path_ref(&root, path)
+        let node = resolve_path_follow(&root, path)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
 
         if !node.is_dir {
@@ -370,6 +423,7 @@ impl FileSystem for InMemoryFs {
                         mode: 0o755,
                         is_dir: true,
                         is_symlink: false,
+                        symlink_target: None,
                         children: BTreeMap::new(),
                         created: SystemTime::now(),
                         modified: SystemTime::now(),
@@ -397,7 +451,7 @@ impl FileSystem for InMemoryFs {
 
     fn metadata(&self, path: &Path) -> std::io::Result<FileMeta> {
         let root = self.root.read().unwrap_or_else(|e| e.into_inner());
-        let node = resolve_path_ref(&root, path)
+        let node = resolve_path_follow(&root, path)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))?;
         Ok(FileMeta {
             size: node.content.len() as u64,
@@ -408,18 +462,81 @@ impl FileSystem for InMemoryFs {
         })
     }
 
-    fn symlink(&self, _target: &Path, _link: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "symlinks not supported in InMemoryFs",
-        ))
+    fn symlink(&self, target: &Path, link: &Path) -> std::io::Result<()> {
+        let mut guard = self.root.write().unwrap_or_else(|e| e.into_inner());
+        let root = &mut *guard;
+        let components: Vec<_> = link.components().collect();
+
+        let mut segments: Vec<&str> = Vec::new();
+        for comp in &components[..components.len().saturating_sub(1)] {
+            let name = comp.as_os_str().to_str().unwrap_or("");
+            match name {
+                "/" | "." => continue,
+                ".." => {
+                    if !segments.is_empty() {
+                        segments.pop();
+                    }
+                }
+                _ => segments.push(name),
+            }
+        }
+
+        let file_name = components
+            .last()
+            .and_then(|c| c.as_os_str().to_str())
+            .unwrap_or("");
+
+        // Create parent directories if needed
+        let mut current = root;
+        for seg in &segments {
+            if !current.children.contains_key(*seg) {
+                current.children.insert(
+                    seg.to_string(),
+                    FileNode {
+                        content: Vec::new(),
+                        mode: 0o755,
+                        is_dir: true,
+                        is_symlink: false,
+                        symlink_target: None,
+                        children: BTreeMap::new(),
+                        created: SystemTime::now(),
+                        modified: SystemTime::now(),
+                    },
+                );
+            }
+            current = current.children.get_mut(*seg).unwrap();
+        }
+
+        current.children.insert(
+            file_name.into(),
+            FileNode {
+                content: Vec::new(),
+                mode: 0o644,
+                is_dir: false,
+                is_symlink: true,
+                symlink_target: Some(target.to_path_buf()),
+                children: BTreeMap::new(),
+                created: SystemTime::now(),
+                modified: SystemTime::now(),
+            },
+        );
+
+        Ok(())
     }
 
-    fn read_link(&self, _path: &Path) -> std::io::Result<PathBuf> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "symlinks not supported in InMemoryFs",
-        ))
+    fn read_link(&self, path: &Path) -> std::io::Result<PathBuf> {
+        let root = self.root.read().unwrap_or_else(|e| e.into_inner());
+        let node = resolve_path_ref(&root, path)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "File not found"))?;
+        if !node.is_symlink {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a symlink",
+            ));
+        }
+        node.symlink_target.clone().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "symlink target missing")
+        })
     }
 }
 
