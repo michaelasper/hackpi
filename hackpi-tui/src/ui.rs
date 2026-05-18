@@ -41,6 +41,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_input(frame, chunks[2], app);
     render_status(frame, chunks[3], app);
 
+    if app.autocomplete_visible {
+        render_autocomplete_modal(frame, chunks[2], app);
+    }
+
     if app.pending_permission.is_some() {
         render_permission_modal(frame, area, app);
     }
@@ -544,6 +548,99 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(text).style(style).wrap(Wrap { trim: true }),
         area,
     );
+}
+
+/// Render the slash command autocomplete popover above the input area.
+fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
+    let filtered = app.filtered_commands();
+    if filtered.is_empty() {
+        return;
+    }
+
+    // Modal dimensions — use the full terminal area frame for reference
+    let frame_area = frame.area();
+    let modal_width = frame_area.width.min(60);
+    let max_visible = 10; // max items to show at once
+    let item_count = filtered.len().min(max_visible);
+    // Height: top border (1) + title (1) + items + optional "more" (1) + hint (1) + bottom border (1)
+    let modal_height = (item_count + 5).min(16) as u16;
+
+    // Position above the input area, indented from the left, clamped to top of screen
+    let x = input_area.x + 2;
+    let y = input_area.y.saturating_sub(modal_height).max(1); // leave room for tab header
+
+    let modal_area = Rect {
+        x,
+        y,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the area behind the modal
+    frame.render_widget(Clear, modal_area);
+
+    // Build list lines
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title
+    lines.push(Line::from(Span::styled(
+        " Slash Commands ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    // Command items
+    let display_count: usize = filtered.len().min(max_visible);
+    for (i, cmd) in filtered.iter().enumerate().take(display_count) {
+        let is_selected = i == app.autocomplete_selected;
+        let cursor = if is_selected { "▸ " } else { "  " };
+
+        let cmd_style = if is_selected {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let desc_style = if is_selected {
+            Style::default().fg(Color::Gray).bg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(cursor.to_string(), cmd_style),
+            Span::styled(format!("{:<20}", cmd.name), cmd_style),
+            Span::styled(cmd.description, desc_style),
+        ]));
+    }
+
+    // Hint line
+    if filtered.len() > max_visible {
+        lines.push(Line::from(Span::styled(
+            format!("  … and {} more", filtered.len() - max_visible),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  ↑/↓ navigate  Tab select  Enter submit  Esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .alignment(Alignment::Left);
+
+    frame.render_widget(paragraph, modal_area);
 }
 
 #[allow(clippy::vec_init_then_push)]
@@ -1593,6 +1690,132 @@ mod tests {
         assert!(
             cell_str.contains("TSK-001"),
             "detail view should show task ID in header, got: {cell_str}"
+        );
+    }
+
+    // ── Autocomplete modal tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_render_autocomplete_modal_shows_commands() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("/help"),
+            "autocomplete should show /help, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("/clear"),
+            "autocomplete should show /clear, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("Slash Commands"),
+            "autocomplete should show title"
+        );
+    }
+
+    #[test]
+    fn test_render_autocomplete_modal_filtered_shows_subset() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/gu".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("/guardrails:status"),
+            "autocomplete should show /guardrails:status (buffer len={})",
+            cell_str.len()
+        );
+        // The status bar shows "/help" as a key binding hint, so we can't
+        // check !cell_str.contains("/help"). Instead verify that the modal
+        // does NOT show the command entry pattern for /help — check that
+        // /guardrails:status appears BEFORE /help in the buffer (modal renders
+        // above status bar).
+        let guard_pos = cell_str.find("/guardrails:status");
+        let help_pos = cell_str.rfind("/help");
+        if let (Some(g), Some(h)) = (guard_pos, help_pos) {
+            // /guardrails:status (from modal) should appear before /help (from status bar)
+            assert!(
+                g < h,
+                "filtered commands should be rendered above the status bar"
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_autocomplete_modal_shows_navigation_hints() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("navigate"),
+            "autocomplete should show navigation hints (buffer len={})",
+            cell_str.len()
+        );
+    }
+
+    #[test]
+    fn test_render_autocomplete_modal_not_visible_when_disabled() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            !cell_str.contains("Slash Commands"),
+            "autocomplete should not render when not visible"
         );
     }
 

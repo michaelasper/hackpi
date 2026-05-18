@@ -205,6 +205,40 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
+                } else if app.autocomplete_visible {
+                    // Autocomplete popover is active — intercept navigation/selection keys
+                    match key.code {
+                        KeyCode::Up => {
+                            app.autocomplete_prev();
+                        }
+                        KeyCode::Down => {
+                            app.autocomplete_next();
+                        }
+                        KeyCode::Tab => {
+                            if let Some(cmd) = app.autocomplete_select() {
+                                let full_cmd = format!("{} ", cmd);
+                                input.buffer = full_cmd;
+                                input.cursor = input.buffer.len();
+                                app.autocomplete_visible = false;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(cmd) = app.autocomplete_select() {
+                                let full_cmd = cmd.to_string();
+                                input.set_submit(full_cmd);
+                                app.autocomplete_visible = false;
+                            } else {
+                                // No selection — pass through to normal Enter handling
+                                input.handle_key(key);
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.autocomplete_visible = false;
+                        }
+                        _ => {
+                            input.handle_key(key);
+                        }
+                    }
                 } else {
                     match key.code {
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
@@ -282,6 +316,8 @@ async fn main() -> anyhow::Result<()> {
 
                 // Sync input buffer to app.input for display after every key event
                 app.input = input.buffer.clone();
+                // Update autocomplete visibility based on current input
+                app.update_autocomplete_state();
 
                 // Process any submitted text (from Enter or catch-all key handling)
                 if !matches!(app.state, AppState::Generating) {

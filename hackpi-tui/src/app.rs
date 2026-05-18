@@ -78,6 +78,10 @@ pub struct App {
     pub task_detail_blocked_by: Vec<hackpi_tasks::Task>,
     /// Cached blocking relationships for the detail view.
     pub task_detail_blocking: Vec<hackpi_tasks::Task>,
+    /// Whether the slash command autocomplete popover is visible.
+    pub autocomplete_visible: bool,
+    /// Currently selected index in the autocomplete list.
+    pub autocomplete_selected: usize,
 }
 
 impl Default for App {
@@ -104,6 +108,8 @@ impl App {
             task_detail_cache: None,
             task_detail_blocked_by: Vec::new(),
             task_detail_blocking: Vec::new(),
+            autocomplete_visible: false,
+            autocomplete_selected: 0,
         }
     }
 
@@ -328,6 +334,61 @@ impl App {
         }
     }
 
+    /// Get the filtered list of commands based on current input.
+    pub fn filtered_commands(&self) -> Vec<&'static CommandInfo> {
+        let input = self.input.trim();
+        if input.starts_with('/') {
+            filter_commands(input)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Move the autocomplete selection down by one.
+    pub fn autocomplete_next(&mut self) {
+        let filtered = self.filtered_commands();
+        if filtered.is_empty() {
+            return;
+        }
+        self.autocomplete_selected = (self.autocomplete_selected + 1).min(filtered.len() - 1);
+    }
+
+    /// Move the autocomplete selection up by one.
+    pub fn autocomplete_prev(&mut self) {
+        if self.autocomplete_selected > 0 {
+            self.autocomplete_selected -= 1;
+        }
+    }
+
+    /// Get the name of the currently selected command, if any and if autocomplete is visible.
+    pub fn autocomplete_select(&self) -> Option<&'static str> {
+        if !self.autocomplete_visible {
+            return None;
+        }
+        let filtered = self.filtered_commands();
+        filtered.get(self.autocomplete_selected).map(|c| c.name)
+    }
+
+    /// Update autocomplete visibility based on current state.
+    pub fn update_autocomplete_state(&mut self) {
+        let should_show = self.input.starts_with('/')
+            && matches!(self.state, AppState::Resting)
+            && matches!(self.active_view, AppView::Conversation);
+
+        if should_show && !self.filtered_commands().is_empty() {
+            self.autocomplete_visible = true;
+        } else {
+            self.autocomplete_visible = false;
+            self.autocomplete_selected = 0;
+        }
+
+        // Clamp selected index to filtered list bounds
+        let filtered = self.filtered_commands();
+        if !filtered.is_empty() && self.autocomplete_selected >= filtered.len() {
+            self.autocomplete_selected = filtered.len() - 1;
+        }
+    }
+
     /// Go back from the current view (Esc key).
     pub fn go_back(&mut self) {
         match &self.active_view {
@@ -342,6 +403,70 @@ impl App {
             }
         }
     }
+}
+
+/// Metadata about a registered slash command for autocomplete display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommandInfo {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// All registered slash commands with descriptions for the autocomplete modal.
+pub const SLASH_COMMANDS: &[CommandInfo] = &[
+    CommandInfo {
+        name: "/help",
+        description: "Show available commands",
+    },
+    CommandInfo {
+        name: "/clear",
+        description: "Clear the conversation",
+    },
+    CommandInfo {
+        name: "/quit",
+        description: "Exit the application",
+    },
+    CommandInfo {
+        name: "/guardrails:status",
+        description: "Show guardrails status",
+    },
+    CommandInfo {
+        name: "/guardrails:clean",
+        description: "Clear session cache",
+    },
+    CommandInfo {
+        name: "/guardrails:onboarding",
+        description: "Write a preset guardrails config",
+    },
+    CommandInfo {
+        name: "/git:status",
+        description: "Show git status (via git_read)",
+    },
+    CommandInfo {
+        name: "/git:log",
+        description: "Show recent git log (via git_read)",
+    },
+    CommandInfo {
+        name: "/github:pr-list",
+        description: "List open pull requests (via github)",
+    },
+    CommandInfo {
+        name: "/task",
+        description: "Manage tasks (create, list, show, ...)",
+    },
+    CommandInfo {
+        name: "/tasks",
+        description: "Alias for /task list",
+    },
+];
+
+/// Return all slash commands whose name starts with the given filter text (case-insensitive).
+pub fn filter_commands(filter: &str) -> Vec<&'static CommandInfo> {
+    let lower = filter.to_lowercase();
+    SLASH_COMMANDS
+        .iter()
+        .filter(|cmd| cmd.name.starts_with(&lower))
+        .collect()
 }
 
 /// Invoke a registered tool by name with the given parameters and render
@@ -2040,5 +2165,261 @@ mod tests {
             .find(|t| t.id == "TSK-002")
             .unwrap();
         assert!(blocked.blocked_by.contains(&"TSK-001".to_string()));
+    }
+
+    // ── Autocomplete command filter tests ──────────────────────────────────
+
+    #[test]
+    fn test_filter_commands_empty_returns_all() {
+        let results = filter_commands("");
+        assert_eq!(results.len(), SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn test_filter_commands_help_prefix() {
+        let results = filter_commands("/hel");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "/help");
+    }
+
+    #[test]
+    fn test_filter_commands_guardrails_prefix() {
+        let results = filter_commands("/guard");
+        // Should match /guardrails:status, /guardrails:clean, /guardrails:onboarding
+        assert_eq!(results.len(), 3);
+        for cmd in &results {
+            assert!(cmd.name.starts_with("/guard"));
+        }
+    }
+
+    #[test]
+    fn test_filter_commands_git_prefix() {
+        let results = filter_commands("/git");
+        // Matches /git:status, /git:log, /github:pr-list (starts with /git)
+        assert_eq!(results.len(), 3);
+        for cmd in &results {
+            assert!(cmd.name.starts_with("/git"));
+        }
+    }
+
+    #[test]
+    fn test_filter_commands_no_match() {
+        let results = filter_commands("/xyz");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_filter_commands_case_insensitive() {
+        let results = filter_commands("/HELP");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "/help");
+    }
+
+    #[test]
+    fn test_filter_commands_task_matches_both() {
+        let results = filter_commands("/task");
+        // Should match /task and /tasks
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_commands_task_exact() {
+        let results = filter_commands("/tasks");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "/tasks");
+    }
+
+    #[test]
+    fn test_filter_commands_quit_prefix() {
+        let results = filter_commands("/qu");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "/quit");
+    }
+
+    #[test]
+    fn test_filter_commands_clear_prefix() {
+        let results = filter_commands("/cl");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "/clear");
+    }
+
+    #[test]
+    fn test_command_info_debug_and_clone() {
+        let info = CommandInfo {
+            name: "/test",
+            description: "test command",
+        };
+        let cloned = info;
+        assert_eq!(format!("{info:?}"), format!("{cloned:?}"));
+    }
+
+    // ── Autocomplete state tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_autocomplete_default_not_visible() {
+        let app = App::new();
+        assert!(!app.autocomplete_visible);
+        assert_eq!(app.autocomplete_selected, 0);
+    }
+
+    #[test]
+    fn test_autocomplete_update_shows_when_input_starts_with_slash() {
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+    }
+
+    #[test]
+    fn test_autocomplete_update_hidden_when_input_empty() {
+        let mut app = App::new();
+        app.input = "".to_string();
+        app.update_autocomplete_state();
+        assert!(!app.autocomplete_visible);
+    }
+
+    #[test]
+    fn test_autocomplete_update_hidden_when_generating() {
+        let mut app = App::new();
+        app.state = AppState::Generating;
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(!app.autocomplete_visible);
+    }
+
+    #[test]
+    fn test_autocomplete_update_hidden_in_task_view() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskBoard;
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(!app.autocomplete_visible);
+    }
+
+    #[test]
+    fn test_autocomplete_update_hidden_when_no_match() {
+        let mut app = App::new();
+        app.input = "/zzz".to_string();
+        app.update_autocomplete_state();
+        assert!(!app.autocomplete_visible);
+    }
+
+    #[test]
+    fn test_autocomplete_next_moves_down() {
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+        assert_eq!(app.autocomplete_selected, 0);
+        app.autocomplete_next();
+        assert_eq!(app.autocomplete_selected, 1);
+    }
+
+    #[test]
+    fn test_autocomplete_next_clamps_at_end() {
+        let mut app = App::new();
+        app.input = "/hel".to_string();
+        app.update_autocomplete_state();
+        let count = app.filtered_commands().len();
+        assert_eq!(count, 1);
+        // Even with only 1 item, next should not go out of bounds
+        app.autocomplete_selected = count - 1;
+        app.autocomplete_next();
+        assert_eq!(app.autocomplete_selected, count - 1);
+    }
+
+    #[test]
+    fn test_autocomplete_prev_moves_up() {
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        app.autocomplete_selected = 3;
+        app.autocomplete_prev();
+        assert_eq!(app.autocomplete_selected, 2);
+    }
+
+    #[test]
+    fn test_autocomplete_prev_clamps_at_zero() {
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        app.autocomplete_selected = 0;
+        app.autocomplete_prev();
+        assert_eq!(app.autocomplete_selected, 0);
+    }
+
+    #[test]
+    fn test_autocomplete_select_returns_name() {
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        app.autocomplete_visible = true;
+        let selected = app.autocomplete_select();
+        assert!(selected.is_some());
+        assert_eq!(selected.unwrap(), "/help");
+    }
+
+    #[test]
+    fn test_autocomplete_select_returns_none_when_not_visible() {
+        let app = App::new();
+        let selected = app.autocomplete_select();
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn test_autocomplete_select_returns_none_when_empty_filter() {
+        let mut app = App::new();
+        app.input = "/zzz".to_string();
+        app.update_autocomplete_state();
+        assert!(!app.autocomplete_visible);
+        // Make it visible but with empty filtered list
+        app.autocomplete_visible = true;
+        let selected = app.autocomplete_select();
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn test_filtered_commands_uses_input() {
+        let mut app = App::new();
+        app.input = "/cl".to_string();
+        let results = app.filtered_commands();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "/clear");
+    }
+
+    #[test]
+    fn test_filtered_commands_guard_prefix() {
+        let mut app = App::new();
+        app.input = "/gu".to_string();
+        let cmds = app.filtered_commands();
+        assert_eq!(cmds.len(), 3, "should filter to guardrails commands");
+        for cmd in &cmds {
+            assert!(
+                cmd.name.starts_with("/gu"),
+                "{} should start with /gu",
+                cmd.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_filtered_commands_empty_if_no_slash() {
+        let mut app = App::new();
+        app.input = "hello".to_string();
+        let results = app.filtered_commands();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_update_autocomplete_resets_selection_when_hidden() {
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+        app.autocomplete_selected = 5;
+        app.input = "hello".to_string();
+        app.update_autocomplete_state();
+        assert!(!app.autocomplete_visible);
+        assert_eq!(app.autocomplete_selected, 0);
     }
 }

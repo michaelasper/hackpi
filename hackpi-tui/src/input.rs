@@ -68,4 +68,48 @@ impl InputHandler {
     pub fn last_submitted(&mut self) -> Option<String> {
         self.last_submitted.take()
     }
+
+    /// Set the buffer to the given text and mark it as submitted.
+    /// Used by autocomplete to insert and submit a selected command.
+    pub fn set_submit(&mut self, text: String) {
+        self.last_submitted = Some(text.clone());
+        self.buffer = text;
+        self.cursor = self.buffer.len();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_submit_sets_buffer_and_submitted() {
+        let mut input = InputHandler::new();
+        input.set_submit("/help".to_string());
+        assert_eq!(input.buffer, "/help");
+        assert_eq!(input.cursor, 5);
+        assert_eq!(input.last_submitted(), Some("/help".to_string()));
+        // After taking, last_submitted should be None
+        assert_eq!(input.last_submitted(), None);
+    }
+
+    #[test]
+    fn test_set_submit_with_empty_string() {
+        let mut input = InputHandler::new();
+        input.set_submit(String::new());
+        assert_eq!(input.buffer, "");
+        // last_submitted should still be Some even for empty string
+        assert_eq!(input.last_submitted(), Some(String::new()));
+    }
+
+    #[test]
+    fn test_set_submit_clears_previous_submission() {
+        let mut input = InputHandler::new();
+        input.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        input.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        input.set_submit("/clear".to_string());
+        assert_eq!(input.buffer, "/clear");
+        assert_eq!(input.cursor, 6);
+        assert_eq!(input.last_submitted(), Some("/clear".to_string()));
+    }
 }
