@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use hackpi_core::tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 pub struct WriteTool {
     workspace_root: std::path::PathBuf,
@@ -9,7 +10,14 @@ pub struct WriteTool {
 
 impl WriteTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+        // Canonicalize the workspace root to prevent symlink-based
+        // bypass attempts against the path jail. If canonicalization
+        // fails (e.g. the path doesn't exist yet), fall back to the
+        // original path — the path jail will produce an appropriate error.
+        let canonical = workspace_root.canonicalize().unwrap_or(workspace_root);
+        Self {
+            workspace_root: canonical,
+        }
     }
 }
 
@@ -71,13 +79,6 @@ impl Tool for WriteTool {
                 Err(e) => return e,
             };
 
-        // Overwrite trap
-        if canonical.exists() {
-            return ToolResult::SystemError {
-                message: "Error: File already exists. Use edit to modify.".into(),
-            };
-        }
-
         // Phantom directory handler
         if let Some(parent) = canonical.parent() {
             if !parent.exists() {
@@ -91,32 +92,43 @@ impl Tool for WriteTool {
             }
         }
 
-        // Atomic write: temp file then rename
-        let file_name = canonical
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file");
-        let tmp_path = canonical.with_file_name(format!(".{file_name}.tmp"));
-
-        if let Err(e) = fs::write(&tmp_path, content.as_bytes()).await {
-            let msg = match e.kind() {
-                std::io::ErrorKind::PermissionDenied => {
-                    format!("Permission denied: {file_path}")
+        // Atomically create and write the file using create_new(true).
+        // This is an atomic operation: if the file already exists, the OS
+        // will reject it with AlreadyExists, closing the TOCTOU race window
+        // that existed with the previous check-then-write pattern.
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&canonical)
+            .await
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(content.as_bytes()).await {
+                    // Clean up the empty file on write failure
+                    let _ = fs::remove_file(&canonical).await;
+                    let msg = match e.kind() {
+                        std::io::ErrorKind::PermissionDenied => {
+                            format!("Permission denied: {file_path}")
+                        }
+                        _ => format!("IO error: {e}"),
+                    };
+                    return ToolResult::SystemError { message: msg };
                 }
-                _ => format!("IO error: {e}"),
-            };
-            return ToolResult::SystemError { message: msg };
-        }
-
-        if let Err(e) = fs::rename(&tmp_path, &canonical).await {
-            let _ = fs::remove_file(&tmp_path).await;
-            let msg = match e.kind() {
-                std::io::ErrorKind::PermissionDenied => {
-                    format!("Permission denied: {file_path}")
-                }
-                _ => format!("IO error: {e}"),
-            };
-            return ToolResult::SystemError { message: msg };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return ToolResult::SystemError {
+                    message: "Error: File already exists. Use edit to modify.".into(),
+                };
+            }
+            Err(e) => {
+                let msg = match e.kind() {
+                    std::io::ErrorKind::PermissionDenied => {
+                        format!("Permission denied: {file_path}")
+                    }
+                    _ => format!("IO error: {e}"),
+                };
+                return ToolResult::SystemError { message: msg };
+            }
         }
 
         let byte_count = content.len();
@@ -174,6 +186,84 @@ mod tests {
         assert!(file_path.exists(), "file should have been created");
         let contents = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(contents, "Hello, world!");
+    }
+
+    #[tokio::test]
+    async fn test_write_to_existing_file_fails() {
+        let dir = temp_dir();
+        let file_path = dir.join("existing.txt");
+        std::fs::write(&file_path, b"original content").unwrap();
+
+        let tool = WriteTool::new(dir.clone());
+        let params = serde_json::json!({
+            "path": "existing.txt",
+            "content": "overwrite attempt"
+        });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("already exists"),
+                    "error should mention 'already exists', got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for existing file, got {other:?}"),
+        }
+
+        // Verify the original content is preserved
+        let contents = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            contents, "original content",
+            "existing file content should be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_with_symlinked_workspace_root_resolves_correctly() {
+        let dir = temp_dir();
+
+        // Create a symlink to the temp dir to simulate a symlinked workspace root
+        // (e.g. macOS /var -> /private/var)
+        let link_name = format!("hackpi_write_symlink_{}", std::process::id());
+        let link_dir = std::env::temp_dir().join(&link_name);
+        let _ = std::fs::remove_dir_all(&link_dir);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dir, &link_dir).unwrap();
+
+        let tool = WriteTool::new(link_dir.clone());
+
+        // Writing to a path inside the symlinked workspace should succeed
+        let params = serde_json::json!({
+            "path": "hello.txt",
+            "content": "Hello through symlink!"
+        });
+        let ctx = ToolContext {
+            workspace_root: link_dir.clone(),
+            conversation_id: String::new(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        assert!(
+            matches!(result, ToolResult::Success { .. }),
+            "write through symlinked root should succeed: {:?}",
+            result
+        );
+
+        // File should be in the real (canonical) directory
+        let file_path = dir.join("hello.txt");
+        assert!(file_path.exists(), "file should exist in canonical root");
+        let contents = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(contents, "Hello through symlink!");
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&link_dir);
     }
 
     #[tokio::test]
