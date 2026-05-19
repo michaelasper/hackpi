@@ -130,7 +130,7 @@ impl ToolRegistry {
                 }
                 GuardResult::Ask(guard_reason) => {
                     // Create oneshot channel for the user's decision
-                    let (resp_tx, resp_rx) = oneshot::channel();
+                    let (resp_tx, mut resp_rx) = oneshot::channel();
                     let id = NEXT_PERMISSION_ID.fetch_add(1, Ordering::Relaxed);
 
                     // Send PermissionRequest through the channel to the main loop
@@ -151,16 +151,49 @@ impl ToolRegistry {
                         });
                     }
 
-                    // Await user response with timeout
-                    match tokio::time::timeout(self.permission_timeout, resp_rx).await {
-                        Ok(Ok(PermissionDecision::AllowOnce)) => { /* proceed */ }
-                        Ok(Ok(PermissionDecision::AllowSession)) => {
+                    // Check for existing cancellation before waiting
+                    if *ctx.signal.borrow() {
+                        return Some(ToolResult::Cancelled);
+                    }
+
+                    // Await user response with timeout, while also listening for
+                    // cancellation. Using tokio::select! ensures that cancelling
+                    // during a permission prompt wakes the wait immediately instead
+                    // of blocking until the permission timeout expires.
+                    let mut signal_rx = ctx.signal.clone();
+                    let decision = tokio::select! {
+                        biased;
+
+                        result = &mut resp_rx => {
+                            match result {
+                                Ok(decision) => decision,
+                                Err(_) => {
+                                    // Channel closed = deny
+                                    return Some(ToolResult::SystemError {
+                                        message: "Permission prompt cancelled.".into(),
+                                    });
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep(self.permission_timeout) => {
+                            return Some(ToolResult::SystemError {
+                                message: "Permission prompt timed out after 120 seconds.".into(),
+                            });
+                        }
+                        _ = signal_rx.changed() => {
+                            return Some(ToolResult::Cancelled);
+                        }
+                    };
+
+                    match decision {
+                        PermissionDecision::AllowOnce => { /* proceed */ }
+                        PermissionDecision::AllowSession => {
                             let mut guard = evaluator.write().unwrap();
                             let session_key = guard.session_cache_key(name, &params);
                             guard.record_decision(session_key, PermissionDecision::AllowSession);
                             /* proceed */
                         }
-                        Ok(Ok(PermissionDecision::Deny)) => {
+                        PermissionDecision::Deny => {
                             let mut guard = evaluator.write().unwrap();
                             let session_key = guard.session_cache_key(name, &params);
                             guard.record_decision(session_key, PermissionDecision::Deny);
@@ -168,7 +201,7 @@ impl ToolRegistry {
                                 message: "Permission denied by user.".into(),
                             });
                         }
-                        Ok(Ok(PermissionDecision::AlwaysAllow)) => {
+                        PermissionDecision::AlwaysAllow => {
                             let perm_string = permission_string(name, &params);
                             let guard = evaluator.read().unwrap();
                             if let Err(e) = guard
@@ -179,7 +212,7 @@ impl ToolRegistry {
                             }
                             /* proceed */
                         }
-                        Ok(Ok(PermissionDecision::AlwaysDeny)) => {
+                        PermissionDecision::AlwaysDeny => {
                             let perm_string = permission_string(name, &params);
                             let guard = evaluator.read().unwrap();
                             if let Err(e) = guard
@@ -190,17 +223,6 @@ impl ToolRegistry {
                             }
                             return Some(ToolResult::SystemError {
                                 message: "Permission denied by user. Always deny saved.".into(),
-                            });
-                        }
-                        Ok(Err(_)) => {
-                            // Channel closed = deny
-                            return Some(ToolResult::SystemError {
-                                message: "Permission prompt cancelled.".into(),
-                            });
-                        }
-                        Err(_) => {
-                            return Some(ToolResult::SystemError {
-                                message: "Permission prompt timed out after 120 seconds.".into(),
                             });
                         }
                     }
@@ -244,7 +266,11 @@ mod tests {
     }
 
     fn test_ctx() -> ToolContext {
-        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        // Keep the sender alive so signal_rx.changed() only fires on
+        // actual cancellation (not when the sender is dropped).
+        // In production the sender lives for the entire agent session.
+        std::mem::forget(tx);
         ToolContext {
             workspace_root: std::env::temp_dir(),
             signal: rx,
@@ -404,6 +430,114 @@ mod tests {
         assert!(
             matches!(result, Some(ToolResult::Success { .. })),
             "Expected Success after AllowOnce, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_permission_ask_cancelled_before_wait() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Create a .hackpi/guardrails.json that asks for "echo" commands
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create .hackpi dir");
+        let guardrails_config = json!({
+            "command_gate": {
+                "ask": ["echo"]
+            }
+        });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&guardrails_config).unwrap(),
+        )
+        .expect("write guardrails config");
+
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+        evaluator.load_rules().expect("load rules");
+        let evaluator = Arc::new(RwLock::new(evaluator));
+
+        let (perm_tx, _perm_rx): (mpsc::UnboundedSender<PermissionRequest>, _) =
+            mpsc::unbounded_channel();
+
+        // Create a context where cancellation is already signalled
+        let (_signal_tx, signal_rx) = tokio::sync::watch::channel(true);
+        let ctx = ToolContext {
+            workspace_root: std::env::temp_dir(),
+            signal: signal_rx,
+        };
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+        registry.set_permission_tx(perm_tx);
+        registry.set_permission_timeout(Duration::from_secs(120));
+
+        // Signal is already true → should return Cancelled immediately
+        let result = registry
+            .dispatch("echo", json!({"command": "echo test"}), &ctx)
+            .await;
+
+        assert!(
+            matches!(result, Some(ToolResult::Cancelled)),
+            "Expected Cancelled when signal pre-set, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_permission_ask_cancelled_during_wait() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Create a .hackpi/guardrails.json that asks for "echo" commands
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create .hackpi dir");
+        let guardrails_config = json!({
+            "command_gate": {
+                "ask": ["echo"]
+            }
+        });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&guardrails_config).unwrap(),
+        )
+        .expect("write guardrails config");
+
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+        evaluator.load_rules().expect("load rules");
+        let evaluator = Arc::new(RwLock::new(evaluator));
+
+        let (perm_tx, _perm_rx): (mpsc::UnboundedSender<PermissionRequest>, _) =
+            mpsc::unbounded_channel();
+
+        // Create a cancellable signal that starts as false
+        let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+        let ctx = ToolContext {
+            workspace_root: std::env::temp_dir(),
+            signal: signal_rx,
+        };
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+        registry.set_permission_tx(perm_tx);
+        registry.set_permission_timeout(Duration::from_secs(120));
+
+        // Spawn dispatch — it will enter the permission prompt wait
+        let handle = tokio::spawn(async move {
+            registry
+                .dispatch("echo", json!({"command": "echo test"}), &ctx)
+                .await
+        });
+
+        // Give it a moment to enter the permission wait
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send cancellation signal — should wake the wait
+        signal_tx.send(true).expect("send cancellation");
+
+        // The dispatch should now return Cancelled
+        let result = handle.await.expect("dispatch task panicked");
+        assert!(
+            matches!(result, Some(ToolResult::Cancelled)),
+            "Expected Cancelled after mid-wait cancellation, got: {result:?}"
         );
     }
 }
