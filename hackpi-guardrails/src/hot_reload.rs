@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -18,6 +19,19 @@ pub struct HotReloader {
     rules: Arc<RwLock<Vec<PermissionRule>>>,
     /// Paths to the three config files to watch.
     settings_paths: SettingsPaths,
+    /// Signal to stop the background watcher thread on drop.
+    stopped: Arc<AtomicBool>,
+    /// Optional join handle for the tokio task (for abort on drop).
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for HotReloader {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl HotReloader {
@@ -29,6 +43,8 @@ impl HotReloader {
         Self {
             rules,
             settings_paths,
+            stopped: Arc::new(AtomicBool::new(false)),
+            handle: None,
         }
     }
 
@@ -39,8 +55,9 @@ impl HotReloader {
     /// for 200 ms (batching rapid writes from editor saves), then calls
     /// [`try_reload`] to validate and atomically swap rules.
     ///
-    /// Returns a `JoinHandle` that can be awaited or detached.
-    pub fn start(self) -> Result<JoinHandle<()>, String> {
+    /// The watcher thread is automatically cleaned up when the `HotReloader`
+    /// is dropped, via the `stopped` flag and `JoinHandle::abort()`.
+    pub fn start(&mut self) -> Result<(), String> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<notify::Event, notify::Error>>();
 
         let mut watcher = RecommendedWatcher::new(
@@ -68,8 +85,9 @@ impl HotReloader {
             }
         }
 
-        let rules = self.rules;
-        let settings_paths = self.settings_paths;
+        let rules = self.rules.clone();
+        let settings_paths = self.settings_paths.clone();
+        let stopped = self.stopped.clone();
 
         let handle = tokio::spawn(async move {
             // Bridge from std::sync::mpsc (notify uses OS threads) to
@@ -77,11 +95,25 @@ impl HotReloader {
             let (async_tx, mut async_rx) = mpsc::unbounded_channel::<notify::Event>();
 
             // Keep the watcher alive in a dedicated OS thread.
+            // The thread checks `stopped` periodically so it exits cleanly
+            // when the HotReloader is dropped.
             std::thread::spawn(move || {
                 let _watcher = watcher;
-                while let Ok(Ok(event)) = rx.recv() {
-                    if async_tx.send(event).is_err() {
+                loop {
+                    if stopped.load(Ordering::Relaxed) {
                         break;
+                    }
+                    match rx.recv_timeout(Duration::from_millis(500)) {
+                        Ok(Ok(event)) => {
+                            if async_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Err(_)) => continue,
+                        Err(_) => {
+                            // Timeout — recheck stopped flag
+                            continue;
+                        }
                     }
                 }
             });
@@ -102,7 +134,8 @@ impl HotReloader {
             }
         });
 
-        Ok(handle)
+        self.handle = Some(handle);
+        Ok(())
     }
 }
 
@@ -552,8 +585,8 @@ mod tests {
         try_reload(&rules, &paths).expect("initial load should succeed");
 
         // Start the reloader
-        let reloader = HotReloader::new(Arc::clone(&rules), paths);
-        let handle = reloader.start().expect("failed to start reloader");
+        let mut reloader = HotReloader::new(Arc::clone(&rules), paths);
+        reloader.start().expect("failed to start reloader");
 
         // Give the watcher time to start and do initial scan
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -578,8 +611,7 @@ mod tests {
             );
         }
 
-        // Clean up
-        handle.abort();
+        // Clean up — drop reloader, which aborts the watcher thread
     }
 
     #[tokio::test]
@@ -603,8 +635,8 @@ mod tests {
         try_reload(&rules, &paths).expect("initial load should succeed");
 
         // Start the reloader
-        let reloader = HotReloader::new(Arc::clone(&rules), paths);
-        let handle = reloader.start().expect("failed to start reloader");
+        let mut reloader = HotReloader::new(Arc::clone(&rules), paths);
+        reloader.start().expect("failed to start reloader");
 
         // Wait for watcher to start
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -629,6 +661,6 @@ mod tests {
             );
         }
 
-        handle.abort();
+        // Clean up — drop reloader, which aborts the watcher thread
     }
 }
