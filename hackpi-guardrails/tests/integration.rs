@@ -367,16 +367,14 @@ fn test_invalid_json_one_file_others_still_load() {
     std::fs::create_dir_all(claude_local.parent().unwrap()).expect("create dir");
     std::fs::write(&claude_local, "not valid json").expect("write");
 
-    // Loading should fail because claude_local exists but has invalid JSON
+    // Loading should succeed with partial results
     let paths = SettingsPaths::new(dir.path());
-    let result = hackpi_guardrails::config::load_all(&paths);
+    let rules = hackpi_guardrails::config::load_all(&paths)
+        .expect("should return partial results when one file has invalid JSON");
+    assert!(!rules.is_empty(), "should still have rules from valid files");
     assert!(
-        result.is_err(),
-        "invalid JSON in any file should cause error"
-    );
-    assert!(
-        result.unwrap_err().contains("Invalid JSON"),
-        "error should mention JSON parse failure"
+        rules.iter().any(|r| r.action == hackpi_guardrails::RuleAction::Allow),
+        "should contain the allow rule from valid hackpi config"
     );
 }
 

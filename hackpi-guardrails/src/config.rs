@@ -17,23 +17,46 @@ use std::path::Path;
 /// Returns an empty Vec if no config files exist.
 pub fn load_all(paths: &SettingsPaths) -> Result<Vec<PermissionRule>, String> {
     let mut all_rules = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
     // 1. .hackpi/guardrails.json (highest priority)
     if paths.hackpi.exists() {
-        let rules = load_hackpi_config(&paths.hackpi)?;
-        all_rules.extend(rules);
+        match load_hackpi_config(&paths.hackpi) {
+            Ok(rules) => all_rules.extend(rules),
+            Err(e) => errors.push(format!("{}: {e}", paths.hackpi.display())),
+        }
     }
 
     // 2. .claude/settings.local.json
     if paths.claude_local.exists() {
-        let rules = load_claude_settings(&paths.claude_local)?;
-        all_rules.extend(rules);
+        match load_claude_settings(&paths.claude_local) {
+            Ok(rules) => all_rules.extend(rules),
+            Err(e) => errors.push(format!("{}: {e}", paths.claude_local.display())),
+        }
     }
 
     // 3. .claude/settings.json (lowest priority)
     if paths.claude_project.exists() {
-        let rules = load_claude_settings(&paths.claude_project)?;
-        all_rules.extend(rules);
+        match load_claude_settings(&paths.claude_project) {
+            Ok(rules) => all_rules.extend(rules),
+            Err(e) => errors.push(format!("{}: {e}", paths.claude_project.display())),
+        }
+    }
+
+    // If ALL files failed, return the aggregated errors
+    if all_rules.is_empty() && !errors.is_empty() {
+        return Err(format!(
+            "Failed to load all config files:\n  {}",
+            errors.join("\n  ")
+        ));
+    }
+
+    // If some files failed but others succeeded, log warnings
+    if !errors.is_empty() {
+        tracing::warn!(
+            "Guardrails: some config files failed to load:\n  {}",
+            errors.join("\n  ")
+        );
     }
 
     Ok(all_rules)
@@ -532,6 +555,34 @@ mod tests {
             result.unwrap_err().contains("Invalid JSON"),
             "error should mention Invalid JSON"
         );
+    }
+
+    #[test]
+    fn test_load_all_partial_failure_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_paths(dir.path());
+
+        // Valid hackpi config
+        write_config(
+            &paths.hackpi,
+            r#"{"permissions": {"allow": ["Read(./docs/**)"]}}"#,
+        );
+        // Invalid claude local config
+        write_config(&paths.claude_local, "not valid json");
+        // Valid claude project config
+        write_config(
+            &paths.claude_project,
+            r#"{"permissions": {"deny": ["Write(./.env)"]}}"#,
+        );
+
+        // Should succeed with partial results — rules from hackpi and claude_project
+        let rules = load_all(&paths).expect("should return partial results");
+        assert!(!rules.is_empty(), "should have rules from valid files");
+
+        let allow_rules: Vec<_> = rules.iter().filter(|r| r.action == RuleAction::Allow).collect();
+        let deny_rules: Vec<_> = rules.iter().filter(|r| r.action == RuleAction::Deny).collect();
+        assert!(!allow_rules.is_empty(), "should have allow rule from hackpi config");
+        assert!(!deny_rules.is_empty(), "should have deny rule from claude_project config");
     }
 
     // ── load_hackpi_config: All sections ──────────────────────────────────
