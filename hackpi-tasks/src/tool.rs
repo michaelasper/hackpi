@@ -35,7 +35,7 @@ impl Tool for TaskTool {
 
     fn description(&self) -> &str {
         "Manage tasks: create, list, show, update, transition, block, unblock. \
-         Tasks track work items with states (todo, in_progress, in_review, done, cancelled)."
+         Tasks track work items with workflow-defined states."
     }
 
     fn input_schema(&self) -> Value {
