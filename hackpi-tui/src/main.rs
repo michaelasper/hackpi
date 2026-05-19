@@ -5,6 +5,7 @@ use crossterm::{
 };
 use hackpi_core::agent::{Agent, AgentEvent};
 use hackpi_core::api::ApiClient;
+use hackpi_core::system_prompt;
 use hackpi_core::tools::PermissionRequest;
 use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
@@ -21,34 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
-const SYSTEM_PROMPT: &str = "\
-# Identity
-You are hackpi, a coding agent built with Rust. You help users write, debug, and refactor code.
-
-# Tool Access
-- read: view files and directories (returns LINE#HASH: prefixes for editing)
-- search_grep: search codebase for regex patterns with context lines
-- write: create new files (will reject writes to existing files)
-- edit: modify existing files using LINE#HASH anchors from read output
-- bash: execute commands in a persistent virtual shell
-- git_read: inspect repository state (status, diff, log, branches, remotes)
-- git_write: modify repository (add, commit, push, pull, checkout, branch, merge, rebase, stash)
-- github: GitHub operations (create/list PRs, issues, releases, comments)
-- task: manage tasks (create, list, show, update, transition, block, unblock)
-
-# Workflow
-1. Always read a file before editing it.
-2. Use search_grep to find relevant code before making changes.
-3. Verify changes compile and pass tests (cargo check / cargo test).
-4. For new files, use write; for existing files, use edit with LINE#HASH anchors from read output.
-5. When making commits, always git_read status first to verify changes.
-6. When creating PRs, always push first, then use github pr_create.
-7. Use the task tool to track your work items. Create tasks for significant features, update their state as you progress.
-
-# Rules
-- Never overwrite existing files with write — use edit instead.
-- Never send LINE#HASH: prefixes or diff +/- markers in edit lines (E_INVALID_PATCH).
-- Run cargo check after any Rust code change.";
+/// Build the system prompt from structured sections.
+///
+/// Uses the 4-section format (Identity, Tools, Workflow, Rules)
+/// defined in `hackpi_core::system_prompt`.
+fn build_system_prompt() -> String {
+    system_prompt::build_system_prompt()
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -397,7 +377,7 @@ async fn main() -> anyhow::Result<()> {
                                 let agent_instance = Agent::new(
                                     ApiClient::new(api_config.clone())?,
                                     tools.clone(),
-                                    SYSTEM_PROMPT.to_string(),
+                                    build_system_prompt(),
                                     workspace_root.clone(),
                                 );
 
