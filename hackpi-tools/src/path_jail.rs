@@ -1,6 +1,35 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use hackpi_core::tools::ToolResult;
+
+/// Normalize a path by resolving `.` and `..` components without touching
+/// the filesystem. This mirrors the lexical normalization that
+/// `std::fs::canonicalize` performs on the path string, but without
+/// resolving symlinks or requiring any component to exist.
+///
+/// This is essential for the path-jail security check: the naive
+/// `workspace_root.join("foo/../../../etc/passwd")` produces a PathBuf whose
+/// `starts_with(workspace_root)` is `true` (because `..` is just another
+/// component). Normalizing first collapses those `..` components so the
+/// boundary check sees the true target location.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => { /* skip `.` */ }
+            Component::ParentDir => {
+                // Pop the last real component. If there's nothing to pop
+                // (e.g. we'd escape above root), preserve the `..` so the
+                // resulting path visibly escapes and fails starts_with().
+                if !normalized.pop() {
+                    normalized.push(component);
+                }
+            }
+            _ => normalized.push(component),
+        }
+    }
+    normalized
+}
 
 /// Resolve a file path relative to a workspace root, enforcing that the
 /// resolved path stays within the workspace boundary.
@@ -51,11 +80,12 @@ pub fn resolve_workspace_path(
                         canonical_parent.join(file_name)
                     }
                     Err(_) => {
-                        // Parent doesn't exist either — fall back to string-level
-                        // verification. The resolved path is workspace_root + file_path,
-                        // and absolute paths were already rejected, so a starts_with
-                        // check against the canonical root is sufficient.
-                        let joined = canonical_root.join(file_path);
+                        // Parent doesn't exist either — fall back to lexical
+                        // normalization. We must resolve `.` and `..` components
+                        // before the starts_with check; otherwise a path like
+                        // `foo/../../../etc/passwd` would pass because its prefix
+                        // components match the workspace root.
+                        let joined = normalize_path(&canonical_root.join(file_path));
                         if !joined.starts_with(&canonical_root) {
                             return Err(ToolResult::SystemError {
                                 message: format!(
@@ -249,5 +279,111 @@ mod tests {
             resolved.starts_with(std::fs::canonicalize(&dir).unwrap()),
             "resolved path should be within workspace root"
         );
+    }
+
+    // ── COR-19 regression tests ──────────────────────────────────────
+    // These verify that directory-traversal attacks through non-existent
+    // intermediate directories are blocked by the normalize_path fallback.
+
+    #[test]
+    fn test_traversal_through_nonexistent_dir_is_rejected() {
+        let dir = temp_dir();
+
+        // "foo" doesn't exist, so the parent canonicalize fails and we
+        // fall through to the lexical-normalization fallback. The `..`
+        // components escape the workspace root.
+        let result = resolve_workspace_path(&dir, "foo/../../../etc/passwd");
+        assert!(
+            result.is_err(),
+            "traversal through nonexistent dir must be rejected, got: {:?}",
+            result
+        );
+        match result {
+            Err(ToolResult::SystemError { message }) => {
+                assert!(
+                    message.contains("outside workspace"),
+                    "error should mention workspace boundary, got: {message}"
+                );
+            }
+            _ => panic!("expected SystemError"),
+        }
+    }
+
+    #[test]
+    fn test_traversal_with_dots_only_is_rejected() {
+        let dir = temp_dir();
+
+        let result = resolve_workspace_path(&dir, "../../../etc/shadow");
+        assert!(
+            result.is_err(),
+            "bare traversal must be rejected, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_traversal_with_mixed_existing_and_nonexistent() {
+        let dir = temp_dir();
+        // Create "real_dir" so one level exists, then traverse through it
+        std::fs::create_dir(dir.join("real_dir")).unwrap();
+
+        let result = resolve_workspace_path(&dir, "real_dir/../../etc/passwd");
+        assert!(
+            result.is_err(),
+            "traversal via existing dir must be rejected, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_traversal_with_deep_nonexistent_chain() {
+        let dir = temp_dir();
+
+        let result = resolve_workspace_path(&dir, "a/b/c/../../../../../../etc/passwd");
+        assert!(
+            result.is_err(),
+            "deep traversal through nonexistent dirs must be rejected, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_component_is_stripped_in_fallback() {
+        let dir = temp_dir();
+
+        // "./file.txt" should resolve normally even though parent doesn't
+        // need canonicalization
+        let result = resolve_workspace_path(&dir, "./file.txt");
+        assert!(
+            result.is_ok(),
+            "'.' components should be resolved: {:?}",
+            result
+        );
+        let resolved = result.unwrap();
+        assert!(resolved.ends_with("file.txt"));
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(&dir).unwrap()),
+            "resolved path should be within workspace root"
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_resolves_dotdot() {
+        let cases = vec![
+            ("/a/b/../c", "/a/c"),
+            ("/a/b/../../c", "/c"),
+            ("/a/./b", "/a/b"),
+            ("/a/b/c/../../d", "/a/d"),
+            ("/../etc/passwd", "/../etc/passwd"), // can't go above root; .. is preserved
+        ];
+        for (input, expected) in cases {
+            let normalized = normalize_path(Path::new(input));
+            assert_eq!(
+                normalized,
+                PathBuf::from(expected),
+                "normalize_path({input:?}) = {:?}, expected {expected:?}",
+                normalized
+            );
+        }
     }
 }
