@@ -15,7 +15,8 @@ pub struct BashTool {
 
 impl BashTool {
     pub fn new(workspace_root: PathBuf) -> Self {
-        let session = BashSession::new(Box::new(InMemoryFs::default()));
+        let fs = InMemoryFs::with_home(&workspace_root);
+        let session = BashSession::with_workspace(Box::new(fs), workspace_root.clone());
         Self {
             workspace_root,
             session: Mutex::new(session),

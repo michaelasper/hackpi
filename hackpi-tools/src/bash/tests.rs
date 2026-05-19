@@ -7,23 +7,24 @@ use super::tool::BashTool;
 use hackpi_core::tools::Tool;
 
 fn new_session() -> BashSession {
-    let fs = Box::new(InMemoryFs::default());
-    let session = BashSession::new(fs);
+    let home = Path::new("/home/user");
+    let fs = Box::new(InMemoryFs::with_home(&std::path::PathBuf::from("/")));
+    let session = BashSession::with_workspace(fs, home.to_path_buf());
 
     session
         .fs
         .write(
-            Path::new("/home/user/hello.txt"),
+            &home.join("hello.txt"),
             b"hello world\nline two\nline three\n",
         )
         .unwrap();
     session
         .fs
-        .write(Path::new("/home/user/numbers.txt"), b"3\n1\n2\n")
+        .write(&home.join("numbers.txt"), b"3\n1\n2\n")
         .unwrap();
     session
         .fs
-        .write(Path::new("/home/user/colors.txt"), b"red\ngreen\nblue\n")
+        .write(&home.join("colors.txt"), b"red\ngreen\nblue\n")
         .unwrap();
 
     session
@@ -882,8 +883,16 @@ fn test_bash_tool_workdir_with_dotdot_normalizes() {
 
 #[test]
 fn test_home_user_bashrc_exists() {
-    let session = new_session();
+    let fs = Box::new(InMemoryFs::with_home(&std::path::PathBuf::from("/")));
+    let session = BashSession::with_workspace(fs, std::path::PathBuf::from("/"));
     assert!(session.fs.is_file(Path::new("/home/user/.bashrc")));
+}
+
+#[test]
+fn test_default_inmemoryfs_does_not_have_home() {
+    // The default InMemoryFs should be minimal — no /home/user
+    let fs = InMemoryFs::default();
+    assert!(!fs.is_dir(std::path::Path::new("/home")));
 }
 
 #[test]

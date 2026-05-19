@@ -18,16 +18,26 @@ pub struct BashSession {
 
 impl BashSession {
     pub fn new(fs: Box<dyn FileSystem>) -> Self {
+        Self::with_workspace(fs, PathBuf::from("/"))
+    }
+
+    /// Create a new BashSession with a configurable home/workspace directory.
+    ///
+    /// The `workspace_dir` is used as the initial `HOME`, `PWD`, and `cwd`.
+    /// This allows the virtual shell to be rooted at the actual project
+    /// directory instead of a hardcoded `/home/user`.
+    pub fn with_workspace(fs: Box<dyn FileSystem>, workspace_dir: PathBuf) -> Self {
+        let home = workspace_dir.to_string_lossy().to_string();
         let mut env = HashMap::new();
-        env.insert("HOME".into(), "/home/user".into());
-        env.insert("PWD".into(), "/home/user".into());
+        env.insert("HOME".into(), home.clone());
+        env.insert("PWD".into(), home);
         env.insert("USER".into(), "user".into());
         env.insert("SHELL".into(), "/bin/bash".into());
 
         Self {
             fs,
             env,
-            cwd: PathBuf::from("/home/user"),
+            cwd: workspace_dir,
             registry: CommandRegistry::new(),
             command_count: 0,
             signal: None,

@@ -54,51 +54,73 @@ pub struct InMemoryFs {
     root: RwLock<FileNode>,
 }
 
+/// Create a minimal root filesystem with `/tmp` and `/dev/null`.
+fn create_root() -> FileNode {
+    let tmp = FileNode {
+        content: Arc::new(Vec::new()),
+        mode: 0o755,
+        is_dir: true,
+        is_symlink: false,
+        symlink_target: None,
+        children: BTreeMap::new(),
+        created: SystemTime::now(),
+        modified: SystemTime::now(),
+    };
+
+    let dev_null = FileNode {
+        content: Arc::new(Vec::new()),
+        mode: 0o644,
+        is_dir: false,
+        is_symlink: false,
+        symlink_target: None,
+        children: BTreeMap::new(),
+        created: SystemTime::now(),
+        modified: SystemTime::now(),
+    };
+
+    let mut root = FileNode {
+        content: Arc::new(Vec::new()),
+        mode: 0o755,
+        is_dir: true,
+        is_symlink: false,
+        symlink_target: None,
+        children: BTreeMap::new(),
+        created: SystemTime::now(),
+        modified: SystemTime::now(),
+    };
+    root.children.insert("tmp".into(), tmp);
+
+    let mut dev = FileNode {
+        content: Arc::new(Vec::new()),
+        mode: 0o755,
+        is_dir: true,
+        is_symlink: false,
+        symlink_target: None,
+        children: BTreeMap::new(),
+        created: SystemTime::now(),
+        modified: SystemTime::now(),
+    };
+    dev.children.insert("null".into(), dev_null);
+    root.children.insert("dev".into(), dev);
+
+    root
+}
+
 impl Default for InMemoryFs {
     fn default() -> Self {
-        let mut root = FileNode {
-            content: Arc::new(Vec::new()),
-            mode: 0o755,
-            is_dir: true,
-            is_symlink: false,
-            symlink_target: None,
-            children: BTreeMap::new(),
-            created: SystemTime::now(),
-            modified: SystemTime::now(),
-        };
+        InMemoryFs {
+            root: RwLock::new(create_root()),
+        }
+    }
+}
 
-        let mut home = FileNode {
-            content: Arc::new(Vec::new()),
-            mode: 0o755,
-            is_dir: true,
-            is_symlink: false,
-            symlink_target: None,
-            children: BTreeMap::new(),
-            created: SystemTime::now(),
-            modified: SystemTime::now(),
-        };
-
-        let tmp = FileNode {
-            content: Arc::new(Vec::new()),
-            mode: 0o755,
-            is_dir: true,
-            is_symlink: false,
-            symlink_target: None,
-            children: BTreeMap::new(),
-            created: SystemTime::now(),
-            modified: SystemTime::now(),
-        };
-
-        let dev_null = FileNode {
-            content: Arc::new(Vec::new()),
-            mode: 0o644,
-            is_dir: false,
-            is_symlink: false,
-            symlink_target: None,
-            children: BTreeMap::new(),
-            created: SystemTime::now(),
-            modified: SystemTime::now(),
-        };
+impl InMemoryFs {
+    /// Create an InMemoryFs with a home directory rooted at the given path.
+    ///
+    /// Creates `/home/user` and `~/.bashrc` under the virtual filesystem
+    /// rooted at the workspace root, so tools like `cd ~` resolve correctly.
+    pub fn with_home(workspace_root: &std::path::Path) -> Self {
+        let mut root = create_root();
 
         let bashrc = FileNode {
             content: Arc::new(b"# ~/.bashrc - default bash configuration\n".to_vec()),
@@ -111,7 +133,7 @@ impl Default for InMemoryFs {
             modified: SystemTime::now(),
         };
 
-        let mut user = FileNode {
+        let mut user_home = FileNode {
             content: Arc::new(Vec::new()),
             mode: 0o755,
             is_dir: true,
@@ -121,12 +143,10 @@ impl Default for InMemoryFs {
             created: SystemTime::now(),
             modified: SystemTime::now(),
         };
-        user.children.insert(".bashrc".into(), bashrc);
-        home.children.insert("user".into(), user);
-        root.children.insert("home".into(), home);
-        root.children.insert("tmp".into(), tmp);
+        user_home.children.insert(".bashrc".into(), bashrc);
 
-        let mut dev = FileNode {
+        // Create /home/user under the virtual root
+        let mut home = FileNode {
             content: Arc::new(Vec::new()),
             mode: 0o755,
             is_dir: true,
@@ -136,8 +156,33 @@ impl Default for InMemoryFs {
             created: SystemTime::now(),
             modified: SystemTime::now(),
         };
-        dev.children.insert("null".into(), dev_null);
-        root.children.insert("dev".into(), dev);
+        home.children.insert("user".into(), user_home);
+        root.children.insert("home".into(), home);
+
+        // Also create the workspace root directory in the virtual fs
+        let mut current = &mut root;
+        for component in workspace_root.iter() {
+            let name = component.to_str().unwrap_or("");
+            if name.is_empty() || name == "/" {
+                continue;
+            }
+            if !current.children.contains_key(name) {
+                current.children.insert(
+                    name.to_string(),
+                    FileNode {
+                        content: Arc::new(Vec::new()),
+                        mode: 0o755,
+                        is_dir: true,
+                        is_symlink: false,
+                        symlink_target: None,
+                        children: BTreeMap::new(),
+                        created: SystemTime::now(),
+                        modified: SystemTime::now(),
+                    },
+                );
+            }
+            current = current.children.get_mut(name).unwrap();
+        }
 
         InMemoryFs {
             root: RwLock::new(root),
