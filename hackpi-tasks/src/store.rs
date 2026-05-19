@@ -2,8 +2,9 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing;
 
 use crate::meta::MetaIdGenerator;
@@ -49,6 +50,12 @@ pub struct JsonTaskStore {
     /// Loaded workflow profiles, keyed by name. Thread-safe for concurrent
     /// access and hot-reload swaps.
     workflows: Arc<RwLock<HashMap<String, WorkflowProfile>>>,
+    /// Per-task locks preventing concurrent read-modify-write races on the
+    /// same task file. The map is populated lazily as tasks are accessed.
+    task_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Monotonically increasing counter for unique temp file names, avoiding
+    /// collisions when multiple writes to the same task race on the temp path.
+    next_temp_id: AtomicU64,
 }
 
 impl JsonTaskStore {
@@ -66,6 +73,8 @@ impl JsonTaskStore {
             tasks_dir,
             id_gen,
             workflows: Arc::new(RwLock::new(workflows)),
+            task_locks: Arc::new(RwLock::new(HashMap::new())),
+            next_temp_id: AtomicU64::new(0),
         })
     }
 
@@ -87,6 +96,8 @@ impl JsonTaskStore {
             tasks_dir,
             id_gen,
             workflows: Arc::new(RwLock::new(workflows)),
+            task_locks: Arc::new(RwLock::new(HashMap::new())),
+            next_temp_id: AtomicU64::new(0),
         })
     }
 
@@ -126,13 +137,37 @@ impl JsonTaskStore {
         self.tasks_dir.join(format!("{id}.json"))
     }
 
+    /// Acquire a per-task lock that serializes read-modify-write cycles for
+    /// the given task ID. Multiple concurrent calls with the same ID will
+    /// synchronize on the same underlying `Mutex`, ensuring exclusive access.
+    ///
+    /// Uses double-checked locking: reads under a shared `RwLock` guard first,
+    /// then acquires the write guard only when a new entry must be inserted.
+    async fn task_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        let map = self.task_locks.read().await;
+        if let Some(lock) = map.get(id) {
+            return lock.clone();
+        }
+        drop(map);
+
+        let mut map = self.task_locks.write().await;
+        let entry = map
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())));
+        entry.clone()
+    }
+
     /// Atomically write a task file: write to a temp file first, then rename.
+    /// The temp file name includes a unique counter to avoid collisions when
+    /// concurrent writes target the same task (even with per-task locking, the
+    /// temp name uniqueness provides defense-in-depth).
     async fn write_task_file(&self, task: &Task) -> Result<()> {
         let target = self.task_path(&task.id);
         let content = serde_json::to_string_pretty(task).with_context(|| "serializing task")?;
 
-        // Write to a temp file in the same directory
-        let temp_name = format!(".{}.tmp", task.id);
+        // Use a unique temp name per write to avoid collisions
+        let temp_id = self.next_temp_id.fetch_add(1, Ordering::Relaxed);
+        let temp_name = format!(".{}.{}.tmp", task.id, temp_id);
         let temp_path = self.tasks_dir.join(&temp_name);
 
         tokio::fs::write(&temp_path, &content)
@@ -285,6 +320,9 @@ impl TaskStore for JsonTaskStore {
     }
 
     async fn update(&self, id: &str, update: &TaskUpdate) -> Result<Option<Task>> {
+        let task_lock = self.task_lock(id).await;
+        let _guard = task_lock.lock().await;
+
         let mut task = match self.get(id).await? {
             Some(t) => t,
             None => return Ok(None),
@@ -310,6 +348,9 @@ impl TaskStore for JsonTaskStore {
     }
 
     async fn delete(&self, id: &str) -> Result<bool> {
+        let task_lock = self.task_lock(id).await;
+        let _guard = task_lock.lock().await;
+
         let path = self.task_path(id);
         if !path.exists() {
             return Ok(false);
@@ -1416,6 +1457,201 @@ transitions:
             )
             .await;
         assert!(result.is_err(), "done → wip should be invalid");
+    }
+
+    // ── Concurrency Tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn concurrent_updates_to_same_task_all_succeed() {
+        let (_dir, store) = setup_store().await;
+        let store = Arc::new(store);
+        let task = store
+            .create(&NewTask::new("Concurrent task"))
+            .await
+            .expect("create");
+        let id = task.id.clone();
+
+        let mut handles = vec![];
+        for i in 0..20 {
+            let s = Arc::clone(&store);
+            let id_clone = id.clone();
+            handles.push(tokio::spawn(async move {
+                s.update(
+                    &id_clone,
+                    &TaskUpdate {
+                        title: Some(format!("Update {i}")),
+                        priority: Some(TaskPriority::High),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.expect("join");
+            assert!(result.is_ok(), "concurrent update should succeed");
+            let updated = result
+                .expect("is_ok already checked")
+                .expect("task should exist");
+            assert!(
+                updated.title.starts_with("Update "),
+                "title should be set: {}",
+                updated.title
+            );
+        }
+
+        // Final state should be valid and have priority set
+        let final_task = store.get(&id).await.expect("get").expect("exists");
+        assert!(final_task.title.starts_with("Update "));
+        assert_eq!(final_task.priority, TaskPriority::High);
+    }
+
+    #[tokio::test]
+    async fn concurrent_updates_different_tasks_independent() {
+        let (_dir, store) = setup_store().await;
+        let store = Arc::new(store);
+
+        let t1 = store.create(&NewTask::new("Task A")).await.expect("create");
+        let t2 = store.create(&NewTask::new("Task B")).await.expect("create");
+
+        // Concurrently update two different tasks — should not block each other
+        let s1 = Arc::clone(&store);
+        let id1 = t1.id.clone();
+        let h1 = tokio::spawn(async move {
+            s1.update(
+                &id1,
+                &TaskUpdate {
+                    title: Some("Task A updated".to_string()),
+                    priority: Some(TaskPriority::Urgent),
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+
+        let s2 = Arc::clone(&store);
+        let id2 = t2.id.clone();
+        let h2 = tokio::spawn(async move {
+            s2.update(
+                &id2,
+                &TaskUpdate {
+                    title: Some("Task B updated".to_string()),
+                    priority: Some(TaskPriority::Low),
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+
+        let r1 = h1
+            .await
+            .expect("join")
+            .expect("update A")
+            .expect("task A exists");
+        let r2 = h2
+            .await
+            .expect("join")
+            .expect("update B")
+            .expect("task B exists");
+
+        assert_eq!(r1.title, "Task A updated");
+        assert_eq!(r1.priority, TaskPriority::Urgent);
+        assert_eq!(r2.title, "Task B updated");
+        assert_eq!(r2.priority, TaskPriority::Low);
+    }
+
+    #[tokio::test]
+    async fn concurrent_update_and_delete_same_task() {
+        let (_dir, store) = setup_store().await;
+        let store = Arc::new(store);
+        let task = store
+            .create(&NewTask::new("Race me"))
+            .await
+            .expect("create");
+        let id = task.id.clone();
+
+        // Spawn update and delete racing on the same task
+        let s_update = Arc::clone(&store);
+        let id_update = id.clone();
+        let update_handle = tokio::spawn(async move {
+            s_update
+                .update(
+                    &id_update,
+                    &TaskUpdate {
+                        title: Some("Updated".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+
+        let s_delete = Arc::clone(&store);
+        let id_for_delete = id.clone();
+        let delete_handle = tokio::spawn(async move { s_delete.delete(&id_for_delete).await });
+
+        let (update_result, delete_result) = tokio::join!(update_handle, delete_handle);
+
+        // Both should succeed without panics or corruption
+        let _ = update_result.expect("join");
+        let deleted = delete_result.expect("join");
+
+        // The task should be gone (delete won the race) or the update won
+        let final_state = store.get(&id).await.expect("get");
+        if final_state.is_some() {
+            assert!(
+                deleted.unwrap_or(false),
+                "if task still exists, delete should have returned true"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_to_same_task_no_temp_collision() {
+        let (_dir, store) = setup_store().await;
+        let store = Arc::new(store);
+
+        // Create a task, then spam updates to trigger many temp file writes
+        let task = store
+            .create(&NewTask::new("Temp collision test"))
+            .await
+            .expect("create");
+        let id = task.id.clone();
+
+        let mut handles = vec![];
+        for i in 0..50 {
+            let s = Arc::clone(&store);
+            let id_clone = id.clone();
+            handles.push(tokio::spawn(async move {
+                s.update(
+                    &id_clone,
+                    &TaskUpdate {
+                        title: Some(format!("Write {i}")),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }));
+        }
+
+        for handle in handles {
+            handle
+                .await
+                .expect("join")
+                .expect("concurrent write should not panic");
+        }
+
+        // No leftover temp files should exist
+        let mut entries = tokio::fs::read_dir(&store.tasks_dir)
+            .await
+            .expect("read dir");
+        while let Some(entry) = entries.next_entry().await.expect("next") {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !name.starts_with('.'),
+                "no temp files should remain: {name}"
+            );
+        }
     }
 
     #[tokio::test]
