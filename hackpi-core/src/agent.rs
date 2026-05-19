@@ -57,6 +57,7 @@ pub(crate) fn truncate_output(
     clipped
 }
 
+#[derive(Debug)]
 pub enum AgentEvent {
     TextChunk(String),
     ToolCallStart {
@@ -1186,6 +1187,211 @@ mod tests {
         assert!(events.pending_tool_calls.is_empty());
 
         while agent_rx.try_recv().is_ok() {}
+    }
+
+    // ── run() cancellation tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_returns_immediately_when_cancelled_true() {
+        // When `cancelled` is true at the start of `run()`, the agent must
+        // send `AgentEvent::Done` and return immediately without making any
+        // API calls. This covers the core of COR-183: without a reset, a
+        // previous Ctrl+C interrupt latches and kills the next generation.
+        let api = ApiClient::new(ApiConfig::default()).unwrap();
+        let tools = Arc::new(ToolRegistry::new());
+        let agent = Agent::new(api, tools, "system".into(), PathBuf::from("/tmp"));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let mut conversation = Vec::new();
+
+        agent
+            .run("hello", &mut conversation, tx, signal_rx, cancelled)
+            .await;
+
+        // Should have sent exactly one Done event
+        match rx.try_recv() {
+            Ok(AgentEvent::Done) => {} // expected
+            Ok(other) => panic!("expected Done, got {other:?}"),
+            Err(e) => panic!("expected Done event, got empty channel: {e:?}"),
+        }
+
+        // No more events should be queued
+        assert!(
+            rx.try_recv().is_err(),
+            "should have exactly one event (Done)"
+        );
+
+        // User message is pushed to conversation before the cancel check,
+        // so conversation should have 1 entry. This documents the current
+        // behavior — the user input is recorded even on cancellation.
+        assert_eq!(
+            conversation.len(),
+            1,
+            "conversation should contain user message"
+        );
+        assert!(
+            matches!(conversation[0].role, Role::User),
+            "the message should have User role"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_does_not_exit_immediately_when_cancelled_reset() {
+        // Regression test for COR-183: after resetting the cancelled flag,
+        // a subsequent `run()` call must not exit immediately. Uses a
+        // wiremock server to verify the agent actually makes an API call.
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Mock a streaming response with a tool_use stop reason
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"content\":[]}}\n\n\
+                     data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                     data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"text\":\"Hello!\"}}\n\n\
+                     data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                     data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\n\n\
+                     data: [DONE]\n\n",
+                ),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let api_config = ApiConfig {
+            endpoint: format!("{}/v1/messages", mock_server.uri()),
+            model: "ds4".into(),
+            max_tokens: 100,
+            temperature: 0.0,
+        };
+        let api = ApiClient::new(api_config).unwrap();
+        let tools = Arc::new(ToolRegistry::new());
+        let agent = Agent::new(api, tools, "system".into(), PathBuf::from("/tmp"));
+
+        let cancelled = Arc::new(AtomicBool::new(true));
+
+        // First run with cancelled=true — should exit immediately
+        {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (_stx, srx) = tokio::sync::watch::channel(false);
+            let mut conversation = Vec::new();
+
+            agent
+                .run("first", &mut conversation, tx, srx, Arc::clone(&cancelled))
+                .await;
+
+            match rx.try_recv() {
+                Ok(AgentEvent::Done) => {} // expected
+                Ok(other) => panic!("expected Done, got {other:?}"),
+                Err(e) => panic!("expected Done event: {e:?}"),
+            }
+        }
+
+        // Reset cancelled flag (mirrors the fix applied in main.rs)
+        cancelled.store(false, Ordering::SeqCst);
+
+        // Second run with cancelled=false — must NOT exit immediately.
+        // The agent should reach the API call and get a response.
+        {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (_stx, srx) = tokio::sync::watch::channel(false);
+            let mut conversation = Vec::new();
+
+            agent
+                .run("second", &mut conversation, tx, srx, Arc::clone(&cancelled))
+                .await;
+
+            // Should NOT be Done — the agent should have processed the
+            // streaming response, which includes "Hello!" text and an
+            // end_turn stop reason.
+            let mut found_hello = false;
+            let mut found_done = false;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    AgentEvent::TextChunk(text) if text == "Hello!" => {
+                        found_hello = true;
+                    }
+                    AgentEvent::Done => {
+                        found_done = true;
+                    }
+                    AgentEvent::Usage(usage) => {
+                        assert_eq!(usage.input_tokens, 10);
+                        assert_eq!(usage.output_tokens, 5);
+                    }
+                    _ => {} // other events are fine
+                }
+            }
+
+            assert!(
+                found_hello,
+                "should have received 'Hello!' text from mock server"
+            );
+            assert!(found_done, "should have received Done event at end");
+        }
+    }
+
+    // ── process_sse_events: cancellation ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_process_sse_events_returns_none_when_cancelled() {
+        let (tx, mut api_rx) = mpsc::unbounded_channel::<crate::api::ApiEvent>();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        tx.send(make_event(
+            r#"{"type":"content_block_delta","index":0,"delta":{"text":"hello"}}"#,
+        ))
+        .ok();
+
+        let cancelled = AtomicBool::new(true);
+        let result = Agent::process_sse_events(&mut api_rx, &agent_tx, &cancelled).await;
+
+        assert!(result.is_none(), "should return None when cancelled");
+
+        // Should have sent a Done event
+        match agent_rx.try_recv() {
+            Ok(AgentEvent::Done) => {}
+            Ok(other) => panic!("expected Done, got {other:?}"),
+            Err(e) => panic!("expected Done event: {e:?}"),
+        }
+
+        // Drop remaining so the buffer doesn't accumulate
+        while agent_rx.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_events_processes_normally_when_not_cancelled() {
+        let (tx, mut api_rx) = mpsc::unbounded_channel::<crate::api::ApiEvent>();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        tx.send(make_event(
+            r#"{"type":"content_block_delta","index":0,"delta":{"text":"hello"}}"#,
+        ))
+        .ok();
+
+        tx.send(crate::api::ApiEvent::Done).ok();
+
+        let cancelled = AtomicBool::new(false);
+        let result = Agent::process_sse_events(&mut api_rx, &agent_tx, &cancelled).await;
+
+        assert!(result.is_some(), "should return events when not cancelled");
+        let events = result.unwrap();
+        assert_eq!(events.text, "hello");
+
+        while agent_rx.try_recv().is_ok() {}
+    }
+
+    // ── AtomicBool reset semantics ────────────────────────────────────
+
+    #[test]
+    fn test_atomic_bool_reset_makes_load_return_false() {
+        // Verify that storing true then false on an AtomicBool correctly
+        // resets the flag — this is the core mechanism of the COR-183 fix.
+        let flag = AtomicBool::new(true);
+        assert!(flag.load(Ordering::SeqCst), "should start as true");
+
+        flag.store(false, Ordering::SeqCst);
+        assert!(!flag.load(Ordering::SeqCst), "should be false after reset");
     }
 
     #[tokio::test]
