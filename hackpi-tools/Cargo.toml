@@ -18,3 +18,4 @@ walkdir.workspace = true
 regex.workspace = true
 async-trait.workspace = true
 hackpi-core = { path = "../hackpi-core" }
+tempfile.workspace = true

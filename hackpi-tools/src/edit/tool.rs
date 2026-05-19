@@ -429,15 +429,27 @@ impl Tool for EditTool {
 
         let result = current_lines.join("\n");
 
-        let file_name = canonical
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file");
-        let tmp_path = canonical.with_file_name(format!(".{file_name}.tmp"));
-
         let original_perms = std::fs::metadata(&canonical).ok().map(|m| m.permissions());
 
+        // Use tempfile::NamedTempFile with randomized filenames opened with
+        // create_new(true) (O_CREAT|O_EXCL) so that pre-existing symlinks at
+        // the temp path CANNOT be followed — the OS atomically refuses to
+        // open an already-existing path. This prevents the attack where a
+        // malicious workspace places a symlink at a predictable temp path
+        // (e.g. .<file>.tmp) pointing outside the workspace (COR-168).
+        let tmp_dir = canonical.parent().unwrap_or(std::path::Path::new("."));
+        let tmp = match tempfile::NamedTempFile::new_in(tmp_dir) {
+            Ok(t) => t,
+            Err(e) => {
+                return ToolResult::SystemError {
+                    message: format!("IO error creating temp file: {e}"),
+                }
+            }
+        };
+        let tmp_path = tmp.path().to_path_buf();
+
         if let Err(e) = fs::write(&tmp_path, result.as_bytes()).await {
+            // tmp is dropped here, which cleans up the temp file
             return ToolResult::SystemError {
                 message: format!("IO error writing {file_path}: {e}"),
             };
@@ -447,8 +459,9 @@ impl Tool for EditTool {
             let _ = fs::set_permissions(&tmp_path, perms.clone()).await;
         }
 
-        if let Err(e) = fs::rename(&tmp_path, &canonical).await {
-            let _ = fs::remove_file(&tmp_path).await;
+        // persist() atomically renames the temp file to the target path.
+        // On failure, the NamedTempFile is consumed and cleaned up on drop.
+        if let Err(e) = tmp.persist(&canonical) {
             return ToolResult::SystemError {
                 message: format!("IO error renaming {file_path}: {e}"),
             };
