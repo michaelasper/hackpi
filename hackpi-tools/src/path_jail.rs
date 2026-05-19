@@ -32,23 +32,40 @@ pub fn resolve_workspace_path(
 
     // For path verification, canonicalize the resolved path.
     // If the file doesn't exist yet, canonicalize its parent directory.
+    // If the parent also doesn't exist, fall back to string-level verification.
     let canonical_resolved = if let Ok(p) = std::fs::canonicalize(&resolved) {
         p
     } else {
-        // File doesn't exist yet — canonicalize parent and append filename
-        match resolved.parent() {
+        // File doesn't exist yet — try to canonicalize parent and append filename
+        let resolved_parent = resolved.parent();
+        match resolved_parent {
             Some(parent) if parent.as_os_str().is_empty() => {
                 // Edge case: file_path was just a filename with no directory component
                 let file_name = resolved.file_name().unwrap_or_default();
                 canonical_root.join(file_name)
             }
             Some(parent) => {
-                let canonical_parent =
-                    std::fs::canonicalize(parent).map_err(|e| ToolResult::SystemError {
-                        message: format!("Error resolving path {file_path}: {e}"),
-                    })?;
-                let file_name = resolved.file_name().unwrap_or_default();
-                canonical_parent.join(file_name)
+                match std::fs::canonicalize(parent) {
+                    Ok(canonical_parent) => {
+                        let file_name = resolved.file_name().unwrap_or_default();
+                        canonical_parent.join(file_name)
+                    }
+                    Err(_) => {
+                        // Parent doesn't exist either — fall back to string-level
+                        // verification. The resolved path is workspace_root + file_path,
+                        // and absolute paths were already rejected, so a starts_with
+                        // check against the canonical root is sufficient.
+                        let joined = canonical_root.join(file_path);
+                        if !joined.starts_with(&canonical_root) {
+                            return Err(ToolResult::SystemError {
+                                message: format!(
+                                    "Security Error: Path outside workspace: {file_path}"
+                                ),
+                            });
+                        }
+                        joined
+                    }
+                }
             }
             None => {
                 return Err(ToolResult::SystemError {
@@ -57,8 +74,7 @@ pub fn resolve_workspace_path(
             }
         }
     };
-
-    // Verify resolved starts with root
+    // Verify resolved starts with root (for the canonicalized path case)
     if !canonical_resolved.starts_with(&canonical_root) {
         return Err(ToolResult::SystemError {
             message: format!("Security Error: Path outside workspace: {file_path}"),
@@ -198,14 +214,40 @@ mod tests {
     }
 
     #[test]
-    fn test_nonexistent_parent_dir_returns_error() {
+    fn test_nonexistent_parent_dir_resolves_via_fallback() {
         let dir = temp_dir();
 
-        // Both parent and file don't exist
+        // Both parent and file don't exist — should now resolve via string-level fallback
         let result = resolve_workspace_path(&dir, "nonexistent_dir/file.txt");
         assert!(
-            result.is_err(),
-            "non-existent parent dir should return error"
+            result.is_ok(),
+            "non-existent parent dir should resolve via fallback: {:?}",
+            result
+        );
+        let resolved = result.unwrap();
+        assert!(resolved.ends_with("file.txt"));
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(&dir).unwrap()),
+            "resolved path should be within workspace root"
+        );
+    }
+
+    #[test]
+    fn test_nonexistent_nested_parent_dir_resolves_via_fallback() {
+        let dir = temp_dir();
+
+        // Deeply nested parent dirs that don't exist
+        let result = resolve_workspace_path(&dir, "a/b/c/d/file.txt");
+        assert!(
+            result.is_ok(),
+            "nested non-existent parent dirs should resolve via fallback: {:?}",
+            result
+        );
+        let resolved = result.unwrap();
+        assert!(resolved.ends_with("file.txt"));
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(&dir).unwrap()),
+            "resolved path should be within workspace root"
         );
     }
 }
