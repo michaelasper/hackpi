@@ -59,6 +59,8 @@ pub enum ToolCallStatus {
 pub struct App {
     pub state: AppState,
     pub input: String,
+    /// Frame counter for animated loading spinner.
+    pub loading_frame: usize,
     pub conversation: VecDeque<ConversationEntry>,
     pub scroll_offset: usize,
     pub usage: Option<Usage>,
@@ -110,6 +112,7 @@ impl App {
             task_detail_blocking: Vec::new(),
             autocomplete_visible: false,
             autocomplete_selected: 0,
+            loading_frame: 0,
         }
     }
 

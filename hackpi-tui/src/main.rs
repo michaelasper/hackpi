@@ -155,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
     // when this function returns (dropping key_tx).
 
     let mut should_render = true;
+    let mut spinner_tick = tokio::time::interval(std::time::Duration::from_millis(100));
 
     loop {
         // Only render when state actually changes.
@@ -167,6 +168,12 @@ async fn main() -> anyhow::Result<()> {
         }
 
         tokio::select! {
+            _ = spinner_tick.tick() => {
+                if matches!(app.state, AppState::Generating) {
+                    app.loading_frame = app.loading_frame.wrapping_add(1);
+                    should_render = true;
+                }
+            }
             Some(agent_event) = agent_rx.recv() => {
                 match agent_event {
                     AgentEvent::TextChunk(text) => {

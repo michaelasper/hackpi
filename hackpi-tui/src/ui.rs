@@ -516,6 +516,10 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, input_area);
 }
 
+/// Spinner frames for the animated loading indicator.
+/// Cycles through these while waiting for LLM response.
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 fn status_bar_text(app: &App) -> String {
     let view_hint = match &app.active_view {
         AppView::Conversation => "",
@@ -523,10 +527,13 @@ fn status_bar_text(app: &App) -> String {
         AppView::TaskDetail(id) => return format!(" Task: {id}  |  Esc back  ↑/↓ navigate  ●"),
         AppView::TaskGraph => "Tab:Graph  ",
     };
-    let state_text = match app.state {
-        AppState::Resting => "Ctrl+C interrupt  Ctrl+L clear  Ctrl+D exit  /help",
-        AppState::Generating => "Generating... (Ctrl+C to interrupt)",
-        AppState::Interrupted => "Interrupted. Press any key.",
+    let state_text: String = match app.state {
+        AppState::Resting => "Ctrl+C interrupt  Ctrl+L clear  Ctrl+D exit  /help".into(),
+        AppState::Generating => {
+            let frame = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
+            format!("Generating... {frame} (Ctrl+C to interrupt)")
+        }
+        AppState::Interrupted => "Interrupted. Press any key.".into(),
     };
     let conn = "●";
     if app.status_message.is_empty() {
