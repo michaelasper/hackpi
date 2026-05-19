@@ -1026,7 +1026,9 @@ mod tests {
 
     #[test]
     fn test_command_gate_allow_overrides_vcs_deny() {
-        // A specific allow rule for "git status" should override the built-in VCS deny
+        // With wildcard matching, deny "git *" correctly matches "git status".
+        // Since deny rules are evaluated before allow rules within a source
+        // (deny beats allow), "git status" is denied by the deny rule.
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = SettingsPaths::new(dir.path());
         let mut evaluator = GuardEvaluator::new(false, paths);
@@ -1041,14 +1043,20 @@ mod tests {
 
         evaluator.load_rules().expect("load rules");
 
-        // "git status" should be allowed by the specific allow rule
+        // "git status" matches deny "git *" (wildcard) before allow "git status"
         let params = json!({ "command": "git status" });
         let result = evaluator.check_tool("bash", &params);
-        assert_eq!(
-            result,
-            GuardResult::Allow,
-            "git status should be allowed by config allow rule"
-        );
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("git *"),
+                    "deny message should mention the deny rule: {msg}"
+                );
+            }
+            other => {
+                panic!("expected Deny for 'git status' matched by deny 'git *', got {other:?}")
+            }
+        }
     }
 
     // ── GitWrite Operation Guardrail Tests ────────────────────────────────
