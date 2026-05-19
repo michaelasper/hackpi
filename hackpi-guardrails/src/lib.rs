@@ -158,6 +158,31 @@ impl GuardEvaluator {
         }
     }
 
+    /// Generate a deterministic session cache key from tool name and params.
+    ///
+    /// Uses the most specific parameter for key generation:
+    /// - `command` for bash-like tools
+    /// - `path` for file-access tools
+    /// - `operation` for git_write tools
+    ///
+    /// This must produce the same key as `tools.rs` uses when recording
+    /// user decisions so that the cache lookup in `check_tool` matches.
+    pub fn session_cache_key(&self, tool_name: &str, params: &serde_json::Value) -> String {
+        if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+            format!("{}:command:{}", tool_name, cmd)
+        } else if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+            format!("{}:path:{}", tool_name, path)
+        } else if let Some(op) = params.get("operation").and_then(|v| v.as_str()) {
+            format!("{}:op:{}", tool_name, op)
+        } else {
+            format!(
+                "{}:params:{}",
+                tool_name,
+                serde_json::to_string(params).unwrap_or_default()
+            )
+        }
+    }
+
     /// Check whether a tool call is allowed.
     ///
     /// Examines the `command`, `path`, and (for git_write) `operation`
@@ -167,11 +192,30 @@ impl GuardEvaluator {
     /// - `path` → `file_protection` + `path_guard`
     /// - `operation` (git_write) → `vcs_operation_gate`
     ///
+    /// Before running any guard checks, consults the session cache for a
+    /// previously recorded user decision (`AllowSession` or `Deny`). If a
+    /// cached decision exists, it is applied immediately without re-checking.
+    ///
     /// Returns `Allow` if all guards pass, `Deny` with a reason if any
     /// guard blocks, or `Ask` with a reason if user input is needed.
     pub fn check_tool(&self, tool_name: &str, params: &serde_json::Value) -> GuardResult {
         if self.god_mode {
             return GuardResult::Allow;
+        }
+
+        // Consult session cache first — AllowSession and Deny decisions
+        // recorded for this (tool, params) combination take effect immediately.
+        let cache_key = self.session_cache_key(tool_name, params);
+        if let Some(decision) = self.session_cache.get(&cache_key) {
+            match decision {
+                PermissionDecision::AllowSession => return GuardResult::Allow,
+                PermissionDecision::Deny => {
+                    return GuardResult::Deny("Permission denied for this session.".into());
+                }
+                // AllowOnce, AlwaysAllow, AlwaysDeny are never stored in
+                // the session cache (see record_decision).
+                _ => {}
+            }
         }
 
         // Check command gate (bash tool)
@@ -654,6 +698,176 @@ mod tests {
         assert_eq!(json["tool"].as_str(), Some("read"));
         assert_eq!(json["path_pattern"].as_str(), Some("./docs/**"));
         assert_eq!(json["action"].as_str(), Some("Allow"));
+    }
+
+    // ── Session Cache Enforcement in check_tool ──────────────────────────
+
+    #[test]
+    fn test_check_tool_consults_session_cache_allows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // With no rules, bash(echo hello) would normally be allowed anyway.
+        // But we want to verify the cache is checked: pre-load an AllowSession.
+        let key = evaluator.session_cache_key("bash", &json!({"command": "echo hello"}));
+        evaluator.record_decision(key, PermissionDecision::AllowSession);
+
+        let params = json!({ "command": "echo hello" });
+        let result = evaluator.check_tool("bash", &params);
+        assert_eq!(
+            result,
+            GuardResult::Allow,
+            "cached AllowSession should return Allow"
+        );
+    }
+
+    #[test]
+    fn test_check_tool_session_cache_allow_bypasses_guards() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Pre-load AllowSession for a command that would normally be blocked.
+        let key = evaluator.session_cache_key("bash", &json!({"command": "sudo rm -rf /"}));
+        evaluator.record_decision(key, PermissionDecision::AllowSession);
+
+        // Without the cache, this would be Deny'd by the command gate.
+        let params = json!({ "command": "sudo rm -rf /" });
+        let result = evaluator.check_tool("bash", &params);
+        assert_eq!(
+            result,
+            GuardResult::Allow,
+            "cached AllowSession should bypass command gate"
+        );
+    }
+
+    #[test]
+    fn test_check_tool_session_cache_deny_bypasses_guards() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Pre-load Deny for a command that would normally be allowed.
+        let key = evaluator.session_cache_key("bash", &json!({"command": "ls -la"}));
+        evaluator.record_decision(key, PermissionDecision::Deny);
+
+        // Without the cache, this would be Allow'd. With cache, should be Deny'd.
+        let params = json!({ "command": "ls -la" });
+        let result = evaluator.check_tool("bash", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("denied for this session"),
+                    "Deny message should mention session denial: {msg}"
+                );
+            }
+            other => panic!("expected Deny from cached Deny decision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_tool_session_cache_deny_on_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Pre-load Deny for a path operation.
+        let key = evaluator.session_cache_key("read", &json!({"path": "some/file.txt"}));
+        evaluator.record_decision(key, PermissionDecision::Deny);
+
+        let params = json!({ "path": "some/file.txt" });
+        let result = evaluator.check_tool("read", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("denied for this session"),
+                    "Deny message should mention session denial: {msg}"
+                );
+            }
+            other => panic!("expected Deny from cached Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_tool_no_cache_entry_runs_normal_checks() {
+        // Without a cache entry, normal guard checks still apply.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        // sudo should be denied by built-in patterns (no cache entry)
+        let params = json!({ "command": "sudo rm -rf /" });
+        let result = evaluator.check_tool("bash", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("sudo"),
+                    "should still deny sudo without cache: {msg}"
+                );
+            }
+            other => panic!("expected Deny for sudo without cache, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_tool_session_cache_key_consistency() {
+        // Verify that the cache key generated by check_tool via
+        // session_cache_key matches what tools.rs would record.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        // Command-based key
+        let params = json!({ "command": "rm -rf /" });
+        let expected = "bash:command:rm -rf /".to_string();
+        assert_eq!(
+            evaluator.session_cache_key("bash", &params),
+            expected,
+            "command key should match expected format"
+        );
+
+        // Path-based key
+        let params = json!({ "path": ".env" });
+        let expected = "read:path:.env".to_string();
+        assert_eq!(
+            evaluator.session_cache_key("read", &params),
+            expected,
+            "path key should match expected format"
+        );
+
+        // Operation-based key
+        let params = json!({ "operation": "reset", "mode": "hard" });
+        let expected = "git_write:op:reset".to_string();
+        assert_eq!(
+            evaluator.session_cache_key("git_write", &params),
+            expected,
+            "operation key should match expected format"
+        );
+    }
+
+    #[test]
+    fn test_check_tool_session_cache_allow_session_for_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Create a file inside the workspace so path_guard doesn't Ask
+        let test_file = dir.path().join("test.txt");
+        std::fs::write(&test_file, "content").expect("write file");
+
+        // Without cache, reading .env would Ask (file protection).
+        // Pre-load AllowSession for reading .env.
+        let key = evaluator.session_cache_key("read", &json!({"path": ".env"}));
+        evaluator.record_decision(key, PermissionDecision::AllowSession);
+
+        let params = json!({ "path": ".env" });
+        let result = evaluator.check_tool("read", &params);
+        assert_eq!(
+            result,
+            GuardResult::Allow,
+            "cached AllowSession should allow reading .env"
+        );
     }
 
     // ── check_tool Edge Cases ────────────────────────────────────────────

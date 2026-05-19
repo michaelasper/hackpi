@@ -156,12 +156,14 @@ impl ToolRegistry {
                         Ok(Ok(PermissionDecision::AllowOnce)) => { /* proceed */ }
                         Ok(Ok(PermissionDecision::AllowSession)) => {
                             let mut guard = evaluator.write().unwrap();
-                            let session_key =
-                                format!("{}:{}", guard_reason.tool, guard_reason.details);
+                            let session_key = guard.session_cache_key(name, &params);
                             guard.record_decision(session_key, PermissionDecision::AllowSession);
                             /* proceed */
                         }
                         Ok(Ok(PermissionDecision::Deny)) => {
+                            let mut guard = evaluator.write().unwrap();
+                            let session_key = guard.session_cache_key(name, &params);
+                            guard.record_decision(session_key, PermissionDecision::Deny);
                             return Some(ToolResult::SystemError {
                                 message: "Permission denied by user.".into(),
                             });
