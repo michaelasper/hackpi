@@ -660,14 +660,103 @@ async fn test_atomic_write_creates_file_with_correct_content() {
     let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
     assert_eq!(content, "modified content");
 
-    // Verify no temp file is left behind
+    // Verify no temp files are left behind (tempfile uses `tmp_` prefix)
     let has_temp = std::fs::read_dir(&dir)
         .unwrap()
-        .any(|e| e.unwrap().file_name().to_string_lossy().starts_with("."));
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .any(|name| name.starts_with("tmp_") || name.starts_with("."));
     assert!(
         !has_temp,
-        "temp file should be cleaned up after atomic write"
+        "temp files should be cleaned up after atomic write"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── COR-168: Symlink attack prevention ─────────────────────────
+
+fn edit_test_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("hackpi_edit_symlink_test_{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn test_symlink_temp_file_attack_is_prevented() {
+    // COR-168: An attacker-controlled workspace may contain a symlink
+    // at the predictable temp path (e.g. .<file>.tmp) pointing outside
+    // the workspace. The edit tool must NOT follow the symlink.
+    // With tempfile's randomized filenames and create_new(true), the
+    // symlink at the old predictable path is never opened.
+    let dir = edit_test_dir("attack");
+    let outside = std::env::temp_dir().join("hackpi_edit_symlink_attack_target");
+    let _ = std::fs::remove_file(&outside);
+
+    create_test_file(&dir, "target.rs", "original content\n");
+
+    // Create a symlink at the OLD predictable temp path (.target.rs.tmp)
+    // pointing to a file outside the workspace. The new code uses
+    // randomized temp paths so this symlink is never followed.
+    let old_temp_path = dir.join(".target.rs.tmp");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &old_temp_path).unwrap();
+
+    let anchor = make_anchor("original content", 1);
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor,
+            "lines": ["modified content"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "target.rs", edits).await;
+    assert!(result.contains("Applied 1 edit(s)"));
+
+    // Verify the target file was modified correctly
+    let content = std::fs::read_to_string(dir.join("target.rs")).unwrap();
+    assert_eq!(content, "modified content");
+
+    // Verify the symlink target outside the workspace was NOT modified
+    #[cfg(unix)]
+    assert!(
+        !outside.exists(),
+        "symlink target outside workspace must not be created or modified"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[tokio::test]
+async fn test_pre_existing_temp_path_does_not_block_edit() {
+    // COR-168: Even if the old predictable temp path exists as a regular
+    // file (not a symlink), the edit tool must still work correctly since
+    // it now uses randomized temp file names.
+    let dir = edit_test_dir("blocker");
+
+    create_test_file(&dir, "target.rs", "original content\n");
+
+    // Create a regular file at the OLD predictable temp path
+    let old_temp_path = dir.join(".target.rs.tmp");
+    std::fs::write(&old_temp_path, b"blocker file").unwrap();
+
+    let anchor = make_anchor("original content", 1);
+    let edits = serde_json::json!([
+        {
+            "op": "replace",
+            "pos": anchor,
+            "lines": ["modified content"]
+        }
+    ]);
+
+    let result = apply_edit(&dir, "target.rs", edits).await;
+    assert!(result.contains("Applied 1 edit(s)"));
+
+    // Verify the target file was modified correctly
+    let content = std::fs::read_to_string(dir.join("target.rs")).unwrap();
+    assert_eq!(content, "modified content");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -26,3 +26,4 @@ walkdir = "2"
 regex = "1"
 git2 = "0.19"
 chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"
