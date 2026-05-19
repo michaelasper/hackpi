@@ -85,7 +85,7 @@ impl WorkflowProfile {
     /// Parse a workflow profile from a YAML string.
     pub fn parse_yaml(yaml: &str) -> Result<Self> {
         let profile: WorkflowProfile =
-            serde_yaml::from_str(yaml).with_context(|| "parsing workflow YAML")?;
+            serde_yml::from_str(yaml).with_context(|| "parsing workflow YAML")?;
         Ok(profile)
     }
 
@@ -588,7 +588,7 @@ agent_profile: special
 
     #[test]
     fn parse_yaml_missing_name() {
-        // serde_yaml will fail if required field "name" is missing
+        // serde_yml will fail if required field "name" is missing
         let yaml = r#"
 description: "No name"
 states: []
@@ -603,7 +603,7 @@ transitions: []
     #[test]
     fn default_workflow_yaml_roundtrip() {
         let wf = WorkflowProfile::default_workflow();
-        let yaml = serde_yaml::to_string(&wf).expect("serialize");
+        let yaml = serde_yml::to_string(&wf).expect("serialize");
         let wf2 = WorkflowProfile::parse_yaml(&yaml).expect("parse");
         assert_eq!(wf, wf2);
     }
@@ -614,8 +614,8 @@ transitions: []
             from: "todo".to_string(),
             to: vec!["in_progress".to_string(), "done".to_string()],
         };
-        let yaml = serde_yaml::to_string(&t).expect("serialize");
-        let back: Transition = serde_yaml::from_str(&yaml).expect("deserialize");
+        let yaml = serde_yml::to_string(&t).expect("serialize");
+        let back: Transition = serde_yml::from_str(&yaml).expect("deserialize");
         assert_eq!(t, back);
     }
 
