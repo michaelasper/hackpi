@@ -89,6 +89,11 @@ impl ApiClient {
     }
 }
 
+/// Maximum allowed size of a single SSE line buffer (1 MB).
+/// This prevents unbounded memory growth from a hostile or misconfigured
+/// endpoint that omits newlines or sends extremely long lines.
+const MAX_SSE_LINE_SIZE: usize = 1_048_576;
+
 /// Process an SSE byte stream, buffering raw bytes to avoid UTF-8 corruption
 /// when multi-byte characters are split across TCP chunks.
 async fn process_sse_stream<S, E>(mut stream: S, tx: mpsc::UnboundedSender<ApiEvent>) -> Result<()>
@@ -100,6 +105,21 @@ where
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(Into::into)?;
+
+        // Guard against unbounded buffer growth: if this chunk would push the
+        // buffer past the maximum line size, the stream is either hostile or
+        // misconfigured. Return an error so the caller can abort.
+        if buffer.len() + chunk.len() > MAX_SSE_LINE_SIZE {
+            return Err(anyhow::anyhow!(
+                "SSE buffer exceeded maximum line size of {} bytes \
+                 (buffer: {} bytes, incoming chunk: {} bytes); \
+                 the endpoint may be omitting newlines or sending oversized data",
+                MAX_SSE_LINE_SIZE,
+                buffer.len(),
+                chunk.len(),
+            ));
+        }
+
         buffer.extend_from_slice(&chunk);
 
         // Process complete lines (terminated by 0x0A = '\n')
@@ -163,6 +183,20 @@ where
     // (e.g., ds4-server) do not send [DONE], so treat this as a
     // warning rather than a hard error. The caller has already
     // received all events sent before the stream closed.
+
+    // Check for leftover buffered bytes that were never terminated by a
+    // newline. This indicates a truncated or malformed stream — the data
+    // is incomplete and cannot be parsed.
+    if !buffer.is_empty() {
+        let leftover = String::from_utf8_lossy(&buffer);
+        return Err(anyhow::anyhow!(
+            "SSE stream ended with {} unprocessed byte(s) remaining in buffer: \
+             the last line was not terminated by a newline. \
+             Leftover preview: {leftover:.50}",
+            buffer.len(),
+        ));
+    }
+
     tracing::warn!("SSE stream ended without [DONE] frame; stream may be truncated");
     Ok(())
 }
@@ -715,6 +749,130 @@ mod tests {
         assert!(
             done_received,
             "should have received [DONE] without space prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_exceeds_max_line_size() {
+        // A single chunk that exceeds MAX_SSE_LINE_SIZE should return an error.
+        let oversized = vec![b'x'; MAX_SSE_LINE_SIZE + 1];
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(oversized)];
+
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        assert!(result.is_err(), "oversized chunk should return an error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("SSE buffer exceeded"),
+            "error should mention buffer overflow: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_exceeds_max_line_size_cumulative() {
+        // Multiple chunks that cumulatively exceed MAX_SSE_LINE_SIZE (without
+        // any newline) should return an error.
+        let chunk_size = MAX_SSE_LINE_SIZE / 2 + 1; // 2 chunks will exceed
+        let chunk = vec![b'x'; chunk_size];
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(chunk.clone()), Ok(chunk)];
+
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        assert!(
+            result.is_err(),
+            "cumulative oversized chunks should return an error"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("SSE buffer exceeded"),
+            "error should mention buffer overflow: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_leftover_bytes_on_eof() {
+        // Stream ends with data still in the buffer (no trailing newline).
+        // This should return an error about leftover unprocessed bytes.
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(
+            b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"Hello\"}}".to_vec(),
+        )];
+
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        assert!(
+            result.is_err(),
+            "stream ending with leftover bytes should return an error"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("unprocessed byte(s)"),
+            "error should mention unprocessed bytes: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_exact_fit_does_not_overflow() {
+        // A chunk exactly at MAX_SSE_LINE_SIZE should be allowed (the check is
+        // strict greater-than). It will eventually fail with leftover bytes on
+        // EOF (no newline), but it must NOT trigger the buffer overflow error.
+        let exact_fit = vec![b'x'; MAX_SSE_LINE_SIZE];
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(exact_fit)];
+
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        // Should fail with leftover bytes, NOT with buffer overflow
+        assert!(
+            result.is_err(),
+            "should still error on EOF (leftover bytes)"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("unprocessed byte(s)"),
+            "should fail with leftover bytes, not overflow: {err}"
+        );
+        assert!(
+            !err.contains("SSE buffer exceeded"),
+            "should NOT trigger buffer overflow for exact fit: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_normal_events_under_limit() {
+        // Normal event stream should work fine even with the buffer limit in place.
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
+            Ok(b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n".to_vec()),
+            Ok(b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"Hello\"}}\n".to_vec()),
+            Ok(b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\" World\"}}\n".to_vec()),
+            Ok(b"data: [DONE]\n".to_vec()),
+        ];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed with normal events under limit");
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
+                ApiEvent::Done => break,
+            }
+        }
+
+        assert_eq!(events.len(), 3, "should have received three events");
+        assert_eq!(events[0].event_type, "content_block_start");
+        assert_eq!(
+            events[1].delta.as_ref().unwrap().text.as_deref(),
+            Some("Hello")
+        );
+        assert_eq!(
+            events[2].delta.as_ref().unwrap().text.as_deref(),
+            Some(" World")
         );
     }
 }
