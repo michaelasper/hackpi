@@ -98,6 +98,10 @@ impl JsonTaskStore {
             wf.clone()
         } else {
             // Fall back to built-in default
+            tracing::debug!(
+                workflow_name = %name,
+                "unknown workflow, falling back to default"
+            );
             WorkflowProfile::default_workflow()
         }
     }
@@ -978,6 +982,13 @@ mod tests {
         let (_dir, store) = setup_store().await;
         let task = store.create(&NewTask::new("Task")).await.expect("create");
         assert_eq!(task.workflow, "default");
+    }
+
+    #[tokio::test]
+    async fn get_workflow_fallback_to_default() {
+        let (_dir, store) = setup_store().await;
+        let wf = store.get_workflow("nonexistent_workflow").await;
+        assert_eq!(wf.name, "default");
     }
 
     #[tokio::test]
