@@ -2,6 +2,7 @@ use std::path::Path;
 use tokio::sync::watch;
 
 use super::filesystem::{FileSystem, InMemoryFs};
+use super::parser::{parse, tokenize, AstNode, RedirectOp};
 use super::session::{BashOutput, BashSession};
 use super::tool::BashTool;
 use hackpi_core::tools::Tool;
@@ -990,4 +991,250 @@ fn test_concurrent_reads_do_not_deadlock() {
 
     assert_eq!(fs.read(Path::new("/file1.txt")).unwrap(), b"content1");
     assert_eq!(fs.read(Path::new("/file2.txt")).unwrap(), b"content2");
+}
+
+// --- Parser unit tests ---
+
+#[test]
+fn test_tokenize_simple_command() {
+    let tokens = tokenize("echo hello world").unwrap();
+    assert_eq!(tokens, vec!["echo", "hello", "world"]);
+}
+
+#[test]
+fn test_tokenize_redirect_stdout() {
+    let tokens = tokenize("echo hello > /tmp/out.txt").unwrap();
+    assert_eq!(tokens, vec!["echo", "hello", ">", "/tmp/out.txt"]);
+}
+
+#[test]
+fn test_tokenize_redirect_stderr() {
+    let tokens = tokenize("cmd 2>/tmp/err.txt").unwrap();
+    assert_eq!(tokens, vec!["cmd", "2>", "/tmp/err.txt"]);
+}
+
+#[test]
+fn test_tokenize_redirect_stderr_to_stdout() {
+    let tokens = tokenize("cmd 2>&1").unwrap();
+    assert_eq!(tokens, vec!["cmd", "2>&1"]);
+}
+
+#[test]
+fn test_tokenize_redirect_stdout_to_stderr() {
+    let tokens = tokenize("cmd 1>&2").unwrap();
+    assert_eq!(tokens, vec!["cmd", "1>&2"]);
+}
+
+#[test]
+fn test_tokenize_append_stdout() {
+    let tokens = tokenize("echo a >> /tmp/log.txt").unwrap();
+    assert_eq!(tokens, vec!["echo", "a", ">>", "/tmp/log.txt"]);
+}
+
+#[test]
+fn test_tokenize_append_stderr() {
+    let tokens = tokenize("cmd 2>>/tmp/err.log").unwrap();
+    assert_eq!(tokens, vec!["cmd", "2>>", "/tmp/err.log"]);
+}
+
+#[test]
+fn test_tokenize_stdin_redirect() {
+    let tokens = tokenize("cat < /tmp/input.txt").unwrap();
+    assert_eq!(tokens, vec!["cat", "<", "/tmp/input.txt"]);
+}
+
+#[test]
+fn test_tokenize_quoted_strings() {
+    let tokens = tokenize("echo \"hello world\" 'foo bar'").unwrap();
+    assert_eq!(tokens, vec!["echo", "hello world", "foo bar"]);
+}
+
+#[test]
+fn test_tokenize_single_quotes_preserve_backslash() {
+    let tokens = tokenize("echo 'hello\\nworld'").unwrap();
+    assert_eq!(tokens, vec!["echo", "hello\\nworld"]);
+}
+
+#[test]
+fn test_tokenize_double_quotes_escape() {
+    let tokens = tokenize("echo \"hello\\\"world\"").unwrap();
+    assert_eq!(tokens, vec!["echo", "hello\"world"]);
+}
+
+#[test]
+fn test_tokenize_variable() {
+    let tokens = tokenize("echo $HOME").unwrap();
+    assert_eq!(tokens, vec!["echo", "$HOME"]);
+}
+
+#[test]
+fn test_tokenize_variable_braces() {
+    let tokens = tokenize("echo ${HOME}").unwrap();
+    assert_eq!(tokens, vec!["echo", "${HOME}"]);
+}
+
+#[test]
+fn test_tokenize_pipe() {
+    let tokens = tokenize("echo hello | wc").unwrap();
+    assert_eq!(tokens, vec!["echo", "hello", "|", "wc"]);
+}
+
+#[test]
+fn test_tokenize_and_operator() {
+    let tokens = tokenize("echo a && echo b").unwrap();
+    assert_eq!(tokens, vec!["echo", "a", "&&", "echo", "b"]);
+}
+
+#[test]
+fn test_tokenize_or_operator() {
+    let tokens = tokenize("false || echo fallback").unwrap();
+    assert_eq!(tokens, vec!["false", "||", "echo", "fallback"]);
+}
+
+#[test]
+fn test_tokenize_semicolon() {
+    let tokens = tokenize("echo a; echo b").unwrap();
+    assert_eq!(tokens, vec!["echo", "a", ";", "echo", "b"]);
+}
+
+#[test]
+fn test_tokenize_comment() {
+    let tokens = tokenize("echo hello # this is a comment").unwrap();
+    assert_eq!(tokens, vec!["echo", "hello"]);
+}
+
+#[test]
+fn test_tokenize_comment_no_space() {
+    let tokens = tokenize("# just a comment").unwrap();
+    let result: Vec<String> = vec![];
+    assert_eq!(tokens, result);
+}
+
+#[test]
+fn test_tokenize_empty_input() {
+    let tokens = tokenize("").unwrap();
+    let result: Vec<String> = vec![];
+    assert_eq!(tokens, result);
+}
+
+#[test]
+fn test_tokenize_whitespace_only() {
+    let tokens = tokenize("   \t  ").unwrap();
+    let result: Vec<String> = vec![];
+    assert_eq!(tokens, result);
+}
+
+#[test]
+fn test_tokenize_env_override() {
+    let tokens = tokenize("FOO=bar echo hello").unwrap();
+    assert_eq!(tokens, vec!["FOO=bar", "echo", "hello"]);
+}
+
+#[test]
+fn test_parse_simple_command() {
+    let ast = parse("echo hello world").unwrap();
+    match ast {
+        AstNode::Simple(cmd) => {
+            assert_eq!(cmd.name, "echo");
+            assert_eq!(cmd.args, vec!["hello", "world"]);
+            assert!(cmd.redirects.is_empty());
+        }
+        _ => panic!("expected Simple command"),
+    }
+}
+
+#[test]
+fn test_parse_with_redirects() {
+    let ast = parse("echo hello > /tmp/out.txt 2>/tmp/err.txt").unwrap();
+    match ast {
+        AstNode::Simple(ref cmd) => {
+            assert_eq!(cmd.name, "echo");
+            assert_eq!(cmd.args, vec!["hello"]);
+            assert_eq!(cmd.redirects.len(), 2);
+            match &cmd.redirects[0] {
+                RedirectOp::Output(p) => assert_eq!(p, "/tmp/out.txt"),
+                _ => panic!("expected Output redirect"),
+            }
+            match &cmd.redirects[1] {
+                RedirectOp::Stderr(p) => assert_eq!(p, "/tmp/err.txt"),
+                _ => panic!("expected Stderr redirect"),
+            }
+        }
+        _ => panic!("expected Simple command"),
+    }
+}
+
+#[test]
+fn test_parse_empty_command_returns_error() {
+    let result = parse("");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("empty"));
+}
+
+#[test]
+fn test_parse_pipeline() {
+    let ast = parse("echo hello | wc").unwrap();
+    match ast {
+        AstNode::Pipeline(commands) => {
+            assert_eq!(commands.len(), 2);
+        }
+        _ => panic!("expected Pipeline"),
+    }
+}
+
+#[test]
+fn test_parse_and_operator() {
+    let ast = parse("echo a && echo b").unwrap();
+    match ast {
+        AstNode::And(_, _) => {}
+        _ => panic!("expected And"),
+    }
+}
+
+#[test]
+fn test_parse_or_operator() {
+    let ast = parse("false || echo b").unwrap();
+    match ast {
+        AstNode::Or(_, _) => {}
+        _ => panic!("expected Or"),
+    }
+}
+
+#[test]
+fn test_parse_seq_operator() {
+    let ast = parse("echo a; echo b").unwrap();
+    match ast {
+        AstNode::Seq(_, _) => {}
+        _ => panic!("expected Seq"),
+    }
+}
+
+#[test]
+fn test_stderr_to_stdout_redirect_captured() {
+    let ast = parse("cmd 2>&1").unwrap();
+    match ast {
+        AstNode::Simple(ref cmd) => {
+            assert_eq!(cmd.redirects.len(), 1);
+            match &cmd.redirects[0] {
+                RedirectOp::StderrToStdout => {}
+                other => panic!("expected StderrToStdout, got {other:?}"),
+            }
+        }
+        _ => panic!("expected Simple command"),
+    }
+}
+
+#[test]
+fn test_stdout_to_stderr_redirect_captured() {
+    let ast = parse("cmd 1>&2").unwrap();
+    match ast {
+        AstNode::Simple(ref cmd) => {
+            assert_eq!(cmd.redirects.len(), 1);
+            match &cmd.redirects[0] {
+                RedirectOp::StderrToStdout => {}
+                other => panic!("expected StderrToStdout, got {other:?}"),
+            }
+        }
+        _ => panic!("expected Simple command"),
+    }
 }

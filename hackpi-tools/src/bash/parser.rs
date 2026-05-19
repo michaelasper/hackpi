@@ -28,7 +28,7 @@ pub fn parse(input: &str) -> Result<AstNode, String> {
     parse_sequence(&tokens)
 }
 
-fn tokenize(input: &str) -> Result<Vec<String>, String> {
+pub(crate) fn tokenize(input: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
@@ -112,9 +112,14 @@ fn tokenize(input: &str) -> Result<Vec<String>, String> {
                 tokens.push(tok);
             } else if chars.peek() == Some(&'&') {
                 chars.next();
+                // Read the target file descriptor after >& (e.g., 2>&1 → target=1).
+                let target = chars
+                    .next_if(|c| c.is_ascii_digit())
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "1".to_string());
                 let tok = match fd {
-                    Some(fd) => format!("{fd}>&1"),
-                    None => "2>&1".to_string(),
+                    Some(fd) => format!("{fd}>&{target}"),
+                    None => format!("2>&{target}"),
                 };
                 tokens.push(tok);
             } else {
@@ -274,7 +279,11 @@ fn parse_simple(tokens: &[String], start: usize) -> Result<(AstNode, usize), Str
                     i += 1;
                 }
             }
-            "1>&1" | "2>&1" => {
+            tok if tok.contains(">&") => {
+                // Handle [n]>&[m] redirect — any source fd to any target fd.
+                // In our simplified shell, 2>&1 (stderr→stdout) is the primary
+                // use case, but we accept the general form to avoid silently
+                // dropping unrecognized redirect tokens.
                 redirects.push(RedirectOp::StderrToStdout);
                 i += 1;
             }

@@ -122,7 +122,20 @@ where
                 continue;
             }
 
-            if let Some(data) = line.strip_prefix("data: ") {
+            // SSE spec: data:value or data: value (space after colon is optional).
+            // We match on "data:" and trim to handle both forms.
+            // Non-data lines (event:, id:, retry:, :comments) are valid SSE but
+            // not relevant for our JSON-only event protocol; log at trace level.
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim();
+
+                if data.is_empty() {
+                    // Empty data line — skip rather than failing to parse ""
+                    // as JSON. Some proxies emit blank data: frames as keepalives.
+                    tracing::trace!("SSE data line with empty payload, skipping");
+                    continue;
+                }
+
                 if data == "[DONE]" {
                     tx.send(ApiEvent::Done).ok();
                     return Ok(());
@@ -138,6 +151,10 @@ where
                             .ok();
                     }
                 }
+            } else {
+                // Non-data SSE fields (event:, id:, retry:, :) are valid but
+                // our protocol only uses data: lines with JSON payloads.
+                tracing::trace!("Non-data SSE line (silently ignored): {line}");
             }
         }
     }
@@ -545,5 +562,159 @@ mod tests {
         let result = process_sse_stream(stream::iter(chunks), tx).await;
 
         assert!(result.is_ok(), "SSE stream with only [DONE] should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_data_without_space() {
+        // SSE spec: `data:value` without space after colon is valid.
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
+            Ok(
+                b"data:{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"Hello\"}}\n"
+                    .to_vec(),
+            ),
+            Ok(b"data:[DONE]\n".to_vec()),
+        ];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed");
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
+                ApiEvent::Done => break,
+            }
+        }
+
+        assert_eq!(
+            events.len(),
+            1,
+            "should have parsed data: without space after colon"
+        );
+        assert_eq!(
+            events[0].delta.as_ref().unwrap().text.as_deref(),
+            Some("Hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_empty_data_line_skipped() {
+        // Empty data: lines (e.g., keepalives) should be skipped, not cause parse errors.
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
+            Ok(b"data:\n".to_vec()),
+            Ok(b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"ok\"}}\n".to_vec()),
+            Ok(b"data: [DONE]\n".to_vec()),
+        ];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed");
+
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(e) => errors.push(e),
+                ApiEvent::Done => break,
+            }
+        }
+
+        assert_eq!(
+            errors.len(),
+            0,
+            "empty data: line should not produce a parse error"
+        );
+        assert_eq!(events.len(), 1, "should have received the valid event");
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_non_data_lines_ignored() {
+        // Lines with event:, id:, retry:, or :comment prefixes are valid SSE
+        // but our protocol only uses data:. They should be silently ignored.
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
+            Ok(b"event: ping\n".to_vec()),
+            Ok(b"id: 42\n".to_vec()),
+            Ok(b": this is a comment\n".to_vec()),
+            Ok(b"retry: 3000\n".to_vec()),
+            Ok(b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n".to_vec()),
+            Ok(b"data: [DONE]\n".to_vec()),
+        ];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed");
+
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(e) => errors.push(e),
+                ApiEvent::Done => break,
+            }
+        }
+
+        assert_eq!(errors.len(), 0, "non-data lines should not produce errors");
+        assert_eq!(events.len(), 1, "should have received only the data: event");
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_carriage_return_line_endings() {
+        // SSE spec allows \r\n, \n, or \r line endings. The parser splits on
+        // \n and trims, so \r is stripped by trim().
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(
+            b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"crlf\"}}\r\ndata: [DONE]\n"
+                .to_vec(),
+        )];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed");
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
+                ApiEvent::Done => break,
+            }
+        }
+
+        assert_eq!(events.len(), 1, "should parse SSE with \\r\\n line endings");
+        assert_eq!(
+            events[0].delta.as_ref().unwrap().text.as_deref(),
+            Some("crlf")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_done_without_space() {
+        // [DONE] without space after data: should still be recognized.
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(b"data:[DONE]\n".to_vec())];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed");
+
+        let mut done_received = false;
+        while let Some(event) = rx.recv().await {
+            if matches!(event, ApiEvent::Done) {
+                done_received = true;
+                break;
+            }
+        }
+
+        assert!(
+            done_received,
+            "should have received [DONE] without space prefix"
+        );
     }
 }
