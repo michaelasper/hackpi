@@ -132,6 +132,7 @@ impl App {
                 });
                 self.state = AppState::Generating;
                 self.scroll_offset = 0;
+                self.input.clear();
             }
             TuiEvent::StreamChunk(chunk) => {
                 let needs_new = match self.conversation.back() {
@@ -1414,6 +1415,29 @@ mod tests {
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].role, "user");
         assert_eq!(app.conversation[0].text, "hello");
+        assert!(matches!(app.state, AppState::Generating));
+    }
+
+    /// Regression test for COR-158: Submit handler must clear app.input
+    /// to prevent a ghost textbox (the submitted text appearing in both
+    /// the conversation area and the input area).
+    #[test]
+    fn test_submit_clears_input_preventing_ghost_textbox() {
+        let mut app = App::new();
+        // Simulate the user having typed text into the input
+        app.input = "hello".to_string();
+        // Submit the message
+        app.handle_event(TuiEvent::Submit("hello".into()));
+        // The input must be cleared so it doesn't render as a ghost textbox
+        assert!(
+            app.input.is_empty(),
+            "app.input should be cleared after Submit, got: {:?}",
+            app.input
+        );
+        // Conversation should contain the message
+        assert_eq!(app.conversation.len(), 1);
+        assert_eq!(app.conversation[0].text, "hello");
+        // State should be Generating
         assert!(matches!(app.state, AppState::Generating));
     }
 

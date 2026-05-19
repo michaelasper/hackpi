@@ -2041,4 +2041,75 @@ mod tests {
             "should show hint, got: {cell_str}"
         );
     }
+
+    /// Regression test for COR-158: After submitting a message, the submitted
+    /// text must NOT appear in the input area (which would create a ghost
+    /// textbox above the real one).
+    #[test]
+    fn test_no_ghost_textbox_after_message_submit() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+
+        // Simulate the user having typed "hello" into the input,
+        // then pressing Enter (which clears the buffer and submits).
+        // The Submit handler now clears app.input.
+        app.input = "hello".to_string();
+        app.handle_event(TuiEvent::Submit("hello".into()));
+
+        // app.input should be empty (Submit clears it)
+        assert!(
+            app.input.is_empty(),
+            "app.input should be empty after Submit"
+        );
+
+        // Render after submit
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let width = 80u16;
+
+        // Extract the conversation area rows (rows 1-19) and input area rows (20-22)
+        let input_row_start = 20usize;
+        let input_row_end = 22usize;
+        let input_rows: String = (input_row_start..=input_row_end)
+            .map(|row| {
+                let start = row * (width as usize);
+                let end = start + (width as usize);
+                buffer.content[start..end]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<Vec<&str>>()
+                    .join("")
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        // The input area must NOT contain the submitted text "hello"
+        assert!(
+            !input_rows.contains("hello"),
+            "input area should NOT contain 'hello' after submit (ghost textbox). \
+             Input rows: {input_rows}"
+        );
+
+        // The input area should contain the "> " prompt (empty input during Generating)
+        assert!(
+            input_rows.contains("> "),
+            "input area should contain '> ' prompt. Input rows: {input_rows}"
+        );
+
+        // Full buffer check: conversation should show the user message
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("○ me: hello"),
+            "conversation should show user message, got: {cell_str}"
+        );
+    }
 }
