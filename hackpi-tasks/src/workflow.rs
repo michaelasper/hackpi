@@ -96,6 +96,14 @@ impl WorkflowProfile {
             .any(|t| t.from == from_state && t.to.iter().any(|target| target == to_state))
     }
 
+    /// Returns the initial (first) state for this workflow profile.
+    ///
+    /// Falls back to `"todo"` only if the states list is empty, which should
+    /// never happen for a validated workflow.
+    pub fn initial_state(&self) -> &str {
+        self.states.first().map(|s| s.as_str()).unwrap_or("todo")
+    }
+
     /// Validate the structural integrity of this workflow profile.
     ///
     /// Checks:
@@ -823,6 +831,41 @@ transitions:
         assert_eq!(profiles.len(), 2);
         assert!(profiles.contains_key("flow1"));
         assert!(profiles.contains_key("flow2"));
+    }
+
+    // ── initial_state Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn initial_state_is_first_state_in_list() {
+        let wf = WorkflowProfile {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            states: vec!["new".to_string(), "complete".to_string()],
+            transitions: vec![Transition {
+                from: "new".to_string(),
+                to: vec!["complete".to_string()],
+            }],
+            agent_profile: None,
+        };
+        assert_eq!(wf.initial_state(), "new");
+    }
+
+    #[test]
+    fn initial_state_default_workflow_is_todo() {
+        let wf = WorkflowProfile::default_workflow();
+        assert_eq!(wf.initial_state(), "todo");
+    }
+
+    #[test]
+    fn initial_state_empty_states_falls_back_to_todo() {
+        let wf = WorkflowProfile {
+            name: "empty".to_string(),
+            description: "empty".to_string(),
+            states: vec![],
+            transitions: vec![],
+            agent_profile: None,
+        };
+        assert_eq!(wf.initial_state(), "todo");
     }
 
     // ── Default workflow: terminal states ───────────────────────────────

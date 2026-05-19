@@ -242,17 +242,19 @@ impl TaskStore for JsonTaskStore {
     async fn create(&self, input: &NewTask) -> Result<Task> {
         let id = self.id_gen.next_id().await?;
         let now = chrono::Utc::now();
+        let workflow_name = input
+            .workflow
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let workflow = self.get_workflow(&workflow_name).await;
 
         let task = Task {
             id,
             title: input.title.clone(),
             description: input.description.clone().unwrap_or_default(),
-            state: "todo".to_string(),
+            state: workflow.initial_state().to_string(),
             priority: input.priority.unwrap_or(TaskPriority::None),
-            workflow: input
-                .workflow
-                .clone()
-                .unwrap_or_else(|| "default".to_string()),
+            workflow: workflow_name,
             blocked_by: Vec::new(),
             labels: input.labels.clone().unwrap_or_default(),
             assignee: input.assignee.clone(),
@@ -1217,7 +1219,64 @@ transitions:
         };
         let task = store.create(&input).await.expect("create");
         assert_eq!(task.workflow, "fast");
-        assert_eq!(task.state, "todo"); // Initial state is always "todo"
+        assert_eq!(task.state, "new"); // Initial state is first state in workflow
+    }
+
+    #[tokio::test]
+    async fn custom_workflow_initial_state_no_todo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = dir.path().join("tasks");
+        let workflows_dir = dir.path().join("workflows");
+        tokio::fs::create_dir_all(&workflows_dir)
+            .await
+            .expect("create dir");
+
+        // Workflow with no "todo" state — task should start at "new"
+        let yaml = r#"
+name: fast
+description: "Fast track"
+states:
+  - new
+  - complete
+transitions:
+  - from: new
+    to:
+      - complete
+"#;
+        tokio::fs::write(workflows_dir.join("fast.yaml"), yaml)
+            .await
+            .expect("write");
+
+        let store = JsonTaskStore::with_workflows(tasks_dir, &workflows_dir)
+            .await
+            .expect("create store");
+
+        let input = NewTask {
+            title: "Fast task".to_string(),
+            workflow: Some("fast".to_string()),
+            ..Default::default()
+        };
+        let task = store.create(&input).await.expect("create");
+
+        // Should NOT be "todo" — that state doesn't exist in this workflow
+        assert_eq!(
+            task.state, "new",
+            "should use workflow's first state, not hardcoded 'todo'"
+        );
+
+        // Valid transition from "new" to "complete" should work
+        let updated = store
+            .update(
+                &task.id,
+                &TaskUpdate {
+                    state: Some("complete".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("some");
+        assert_eq!(updated.state, "complete");
     }
 
     #[tokio::test]
