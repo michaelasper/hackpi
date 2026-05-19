@@ -62,7 +62,11 @@ pub struct App {
     /// Frame counter for animated loading spinner.
     pub loading_frame: usize,
     pub conversation: VecDeque<ConversationEntry>,
+    /// Visual row offset from top (used when `auto_scroll` is false).
     pub scroll_offset: usize,
+    /// When true, the conversation view scrolls to show the latest content.
+    /// Set to false when the user manually scrolls up.
+    pub auto_scroll: bool,
     pub usage: Option<Usage>,
     pub status_message: String,
     pub quit_requested: bool,
@@ -103,6 +107,7 @@ impl App {
             input: String::new(),
             conversation: VecDeque::new(),
             scroll_offset: 0,
+            auto_scroll: true,
             usage: None,
             status_message: String::new(),
             quit_requested: false,
@@ -131,10 +136,12 @@ impl App {
                     tool_calls: Vec::new(),
                 });
                 self.state = AppState::Generating;
+                self.auto_scroll = true;
                 self.scroll_offset = 0;
                 self.input.clear();
             }
             TuiEvent::StreamChunk(chunk) => {
+                self.auto_scroll = true;
                 let needs_new = match self.conversation.back() {
                     Some(e) => e.role != "assistant",
                     None => true,
@@ -150,6 +157,7 @@ impl App {
                 }
             }
             TuiEvent::ToolCall { id, name } => {
+                self.auto_scroll = true;
                 let needs_new = match self.conversation.back() {
                     Some(e) => e.role != "assistant",
                     None => true,
@@ -170,6 +178,7 @@ impl App {
                 }
             }
             TuiEvent::ToolResult { id, result } => {
+                self.auto_scroll = true;
                 if let Some(entry) = self.conversation.back_mut() {
                     for tc in &mut entry.tool_calls {
                         if tc.id == id {
@@ -208,6 +217,7 @@ impl App {
         self.input.clear();
         self.usage = None;
         self.scroll_offset = 0;
+        self.auto_scroll = true;
     }
 
     /// Cycle the active view: Conversation → TaskBoard → TaskGraph (placeholder) → Conversation.

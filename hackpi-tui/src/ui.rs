@@ -193,21 +193,53 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
     }
 
-    let visible_lines: &[Line] = if app.scroll_offset > 0 && app.scroll_offset < lines.len() {
-        &lines[app.scroll_offset..]
+    let text = Text::from(lines);
+    let area_width = area.width as usize;
+    let visible_height = area.height as usize;
+
+    // Calculate total visual height accounting for word wrapping
+    let total_height = count_visual_lines(&text, area_width);
+
+    let scroll_y = if app.auto_scroll {
+        // Auto-scroll: pin to the bottom of the conversation
+        total_height
+            .saturating_sub(visible_height)
+            .min(u16::MAX as usize) as u16
     } else {
-        &lines
+        // Manual scroll: use stored offset, clamped to valid range
+        let max_scroll = total_height.saturating_sub(visible_height);
+        app.scroll_offset.min(max_scroll).min(u16::MAX as usize) as u16
     };
 
-    let paragraph = Paragraph::new(Text::from(visible_lines.to_vec()))
+    let paragraph = Paragraph::new(text)
         .block(
             Block::default()
                 .borders(Borders::NONE)
                 .style(Style::default()),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y, 0));
 
     frame.render_widget(paragraph, area);
+}
+
+/// Count the total number of visual rows a `Text` will occupy when rendered
+/// in an area of the given width, accounting for word wrapping.
+fn count_visual_lines(text: &Text, area_width: usize) -> usize {
+    if area_width == 0 {
+        return text.lines.len();
+    }
+    text.lines
+        .iter()
+        .map(|line| {
+            let line_width = line.width();
+            if line_width == 0 {
+                1 // empty line occupies one row
+            } else {
+                line_width.div_ceil(area_width)
+            }
+        })
+        .sum()
 }
 
 /// Color for a task state badge.
@@ -1984,16 +2016,18 @@ mod tests {
         app.handle_event(TuiEvent::Submit("third message".into()));
         app.handle_event(TuiEvent::Done);
 
-        // With scroll_offset = 0, all messages should be visible
+        // With auto_scroll = true (default after Submit), all messages should be visible
+        // and the view should be scrolled to show the latest content
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf0 = terminal.backend().buffer();
         let text0: String = buf0.content.iter().map(|c| c.symbol()).collect();
         assert!(
-            text0.contains("first message"),
-            "first message should be visible at offset 0"
+            text0.contains("third message"),
+            "third message should be visible with auto-scroll"
         );
 
-        // With scroll_offset = 2, "first message" should be skipped
+        // With auto_scroll = false and scroll_offset = 2, the top 2 visual rows are skipped
+        app.auto_scroll = false;
         app.scroll_offset = 2;
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf1 = terminal.backend().buffer();
@@ -2003,6 +2037,207 @@ mod tests {
             text1.contains("third message"),
             "third message should be visible when scrolled"
         );
+    }
+
+    #[test]
+    fn test_conversation_auto_scroll_defaults_to_true() {
+        let app = App::new();
+        assert!(
+            app.auto_scroll,
+            "auto_scroll should default to true so new messages are visible"
+        );
+    }
+
+    #[test]
+    fn test_conversation_auto_scroll_enabled_on_submit() {
+        let mut app = App::new();
+        app.auto_scroll = false;
+        app.handle_event(TuiEvent::Submit("hello".into()));
+        assert!(
+            app.auto_scroll,
+            "auto_scroll should be re-enabled on Submit"
+        );
+    }
+
+    #[test]
+    fn test_conversation_auto_scroll_enabled_on_stream_chunk() {
+        let mut app = App::new();
+        app.auto_scroll = false;
+        app.handle_event(TuiEvent::StreamChunk("chunk".into()));
+        assert!(
+            app.auto_scroll,
+            "auto_scroll should be re-enabled on StreamChunk"
+        );
+    }
+
+    #[test]
+    fn test_conversation_auto_scroll_enabled_on_tool_call() {
+        let mut app = App::new();
+        app.auto_scroll = false;
+        app.handle_event(TuiEvent::ToolCall {
+            id: "tc1".into(),
+            name: "read".into(),
+        });
+        assert!(
+            app.auto_scroll,
+            "auto_scroll should be re-enabled on ToolCall"
+        );
+    }
+
+    #[test]
+    fn test_conversation_auto_scroll_enabled_on_tool_result() {
+        let mut app = App::new();
+        app.auto_scroll = false;
+        app.handle_event(TuiEvent::ToolResult {
+            id: "tc1".into(),
+            result: hackpi_core::tools::ToolResult::Success {
+                content: "ok".into(),
+            },
+        });
+        assert!(
+            app.auto_scroll,
+            "auto_scroll should be re-enabled on ToolResult"
+        );
+    }
+
+    #[test]
+    fn test_conversation_auto_scroll_enabled_after_clear() {
+        let mut app = App::new();
+        app.auto_scroll = false;
+        app.clear();
+        assert!(
+            app.auto_scroll,
+            "auto_scroll should be re-enabled after clear"
+        );
+    }
+
+    #[test]
+    fn test_conversation_many_messages_auto_shows_latest() {
+        use ratatui::backend::TestBackend;
+        // Use a small terminal to force scrolling
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+
+        // Add enough messages to overflow the small area
+        for i in 0..20 {
+            app.handle_event(TuiEvent::Submit(format!("message number {i}")));
+            app.handle_event(TuiEvent::Done);
+        }
+
+        // auto_scroll should be true
+        assert!(app.auto_scroll);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // The latest message should be visible (not clipped)
+        assert!(
+            cell_str.contains("message number 19"),
+            "latest message should be visible with auto-scroll, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_conversation_manual_scroll_prevents_auto_scroll() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+
+        // Add many messages
+        for i in 0..20 {
+            app.handle_event(TuiEvent::Submit(format!("message number {i}")));
+            app.handle_event(TuiEvent::Done);
+        }
+
+        // Simulate user scrolling up: disable auto_scroll
+        app.auto_scroll = false;
+        app.scroll_offset = 0; // scroll to very top
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // The first message should be visible (we're at the top)
+        assert!(
+            cell_str.contains("message number 0"),
+            "first message should be visible when scrolled to top"
+        );
+
+        // The latest message should NOT be visible (we're at the top of 20+ messages)
+        assert!(
+            !cell_str.contains("message number 19"),
+            "latest message should not be visible when scrolled to top"
+        );
+    }
+
+    #[test]
+    fn test_count_visual_lines_empty() {
+        let text = Text::from(Vec::<Line>::new());
+        assert_eq!(count_visual_lines(&text, 80), 0);
+    }
+
+    #[test]
+    fn test_count_visual_lines_single_short_line() {
+        let text = Text::from(vec![Line::from("hello")]);
+        assert_eq!(count_visual_lines(&text, 80), 1);
+    }
+
+    #[test]
+    fn test_count_visual_lines_wrapping() {
+        // A line that's exactly 80 chars should fit in one row
+        let line_80: String = "x".repeat(80);
+        let text = Text::from(vec![Line::from(line_80)]);
+        assert_eq!(count_visual_lines(&text, 80), 1);
+
+        // A line that's 81 chars should wrap to 2 rows
+        let line_81: String = "x".repeat(81);
+        let text = Text::from(vec![Line::from(line_81)]);
+        assert_eq!(count_visual_lines(&text, 80), 2);
+
+        // A line that's 160 chars should wrap to 2 rows
+        let line_160: String = "x".repeat(160);
+        let text = Text::from(vec![Line::from(line_160)]);
+        assert_eq!(count_visual_lines(&text, 80), 2);
+    }
+
+    #[test]
+    fn test_count_visual_lines_empty_line_counts_as_one() {
+        let text = Text::from(vec![Line::from("")]);
+        assert_eq!(count_visual_lines(&text, 80), 1);
+    }
+
+    #[test]
+    fn test_count_visual_lines_multiple_lines() {
+        let text = Text::from(vec![
+            Line::from("line 1"),
+            Line::from(""),
+            Line::from("line 3"),
+        ]);
+        assert_eq!(count_visual_lines(&text, 80), 3);
+    }
+
+    #[test]
+    fn test_count_visual_lines_zero_width() {
+        // With zero area width, each line counts as 1
+        let text = Text::from(vec![Line::from("hello"), Line::from("world")]);
+        assert_eq!(count_visual_lines(&text, 0), 2);
     }
 
     #[test]
