@@ -321,7 +321,6 @@ async fn apply_edit(
     });
     let ctx = ToolContext {
         workspace_root: workspace_root.to_path_buf(),
-        conversation_id: String::new(),
         signal: tokio::sync::watch::channel(false).1,
     };
     let result = tool.execute(params, &ctx).await;
@@ -343,7 +342,6 @@ async fn apply_edit_expect_error(
     });
     let ctx = ToolContext {
         workspace_root: workspace_root.to_path_buf(),
-        conversation_id: String::new(),
         signal: tokio::sync::watch::channel(false).1,
     };
     let result = tool.execute(params, &ctx).await;

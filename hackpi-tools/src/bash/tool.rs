@@ -138,7 +138,6 @@ mod tests {
         });
         let ctx = ToolContext {
             workspace_root: std::path::PathBuf::from("/tmp"),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
         let result = tool.execute(params, &ctx).await;

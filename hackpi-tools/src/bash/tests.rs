@@ -675,7 +675,6 @@ fn test_bash_tool_execute_echo() {
     let (_tx, rx) = watch::channel(false);
     let ctx = hackpi_core::tools::ToolContext {
         workspace_root: std::path::PathBuf::from("/tmp"),
-        conversation_id: String::new(),
         signal: rx,
     };
     let params = serde_json::json!({"command": "echo hello"});
@@ -696,7 +695,6 @@ fn test_bash_tool_session_persists_across_calls() {
     let (_tx, rx) = watch::channel(false);
     let ctx = hackpi_core::tools::ToolContext {
         workspace_root: std::path::PathBuf::from("/tmp"),
-        conversation_id: String::new(),
         signal: rx,
     };
 
@@ -836,7 +834,6 @@ fn test_bash_tool_workdir_parameter_affects_session() {
     let (_tx, rx) = watch::channel(false);
     let ctx = hackpi_core::tools::ToolContext {
         workspace_root: std::path::PathBuf::from("/tmp"),
-        conversation_id: String::new(),
         signal: rx,
     };
 
@@ -867,7 +864,6 @@ fn test_bash_tool_workdir_with_dotdot_normalizes() {
     let (_tx, rx) = watch::channel(false);
     let ctx = hackpi_core::tools::ToolContext {
         workspace_root: std::path::PathBuf::from("/tmp"),
-        conversation_id: String::new(),
         signal: rx,
     };
 

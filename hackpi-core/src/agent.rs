@@ -265,7 +265,6 @@ impl Agent {
 
             let ctx = ToolContext {
                 workspace_root: self.workspace_root.clone(),
-                conversation_id: String::new(),
                 signal: signal.clone(),
             };
 

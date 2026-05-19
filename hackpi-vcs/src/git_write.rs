@@ -1332,7 +1332,6 @@ mod tests {
     fn test_ctx() -> ToolContext {
         ToolContext {
             workspace_root: std::env::temp_dir(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         }
     }
@@ -1996,7 +1995,6 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(true);
         let ctx = ToolContext {
             workspace_root: repo.workdir().unwrap().to_path_buf(),
-            conversation_id: String::new(),
             signal: rx,
         };
 
@@ -2012,7 +2010,6 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(true);
         let ctx = ToolContext {
             workspace_root: repo.workdir().unwrap().to_path_buf(),
-            conversation_id: String::new(),
             signal: rx,
         };
 
@@ -2027,7 +2024,6 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(true);
         let ctx = ToolContext {
             workspace_root: repo.workdir().unwrap().to_path_buf(),
-            conversation_id: String::new(),
             signal: rx,
         };
 

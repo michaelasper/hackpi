@@ -558,7 +558,6 @@ mod tests {
         let params = serde_json::json!({ "pattern": "var" });
         let ctx = hackpi_core::tools::ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
         let result = tool.execute(params, &ctx).await;
@@ -597,7 +596,6 @@ mod tests {
         let params = serde_json::json!({ "pattern": "auth" });
         let ctx = hackpi_core::tools::ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
         let result = tool.execute(params, &ctx).await;
@@ -630,7 +628,6 @@ mod tests {
         let params = serde_json::json!({ "pattern": "fn" });
         let ctx = hackpi_core::tools::ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 
@@ -695,7 +692,6 @@ mod tests {
         let params = serde_json::json!({ "pattern": "fn" });
         let ctx = hackpi_core::tools::ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 
@@ -739,7 +735,6 @@ mod tests {
         });
         let ctx = hackpi_core::tools::ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 
@@ -778,7 +773,6 @@ mod tests {
         });
         let ctx = hackpi_core::tools::ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 
@@ -809,7 +803,6 @@ mod tests {
         });
         let ctx = hackpi_core::tools::ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 

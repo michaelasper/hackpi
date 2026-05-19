@@ -249,7 +249,6 @@ mod tests {
         let params = serde_json::json!({ "path": path });
         let ctx = ToolContext {
             workspace_root: workspace_root.to_path_buf(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
         let result = tool.execute(params, &ctx).await;
@@ -330,7 +329,6 @@ mod tests {
         let params = serde_json::json!({ "path": "/etc/passwd" });
         let ctx = ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 
@@ -355,7 +353,6 @@ mod tests {
         let params = serde_json::json!({ "path": "../outside.txt" });
         let ctx = ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 

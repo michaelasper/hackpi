@@ -574,7 +574,6 @@ mod tests {
     fn test_ctx() -> ToolContext {
         ToolContext {
             workspace_root: std::env::temp_dir(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         }
     }

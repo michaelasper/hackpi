@@ -508,7 +508,6 @@ async fn invoke_tool_and_render(
 
     let ctx = ToolContext {
         workspace_root: std::env::current_dir().unwrap_or_default(),
-        conversation_id: String::new(),
         signal: tokio::sync::watch::channel(false).1,
     };
 

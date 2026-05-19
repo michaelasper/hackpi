@@ -166,7 +166,6 @@ mod tests {
         });
         let ctx = ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 
@@ -201,7 +200,6 @@ mod tests {
         });
         let ctx = ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 
@@ -246,7 +244,6 @@ mod tests {
         });
         let ctx = ToolContext {
             workspace_root: link_dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
         let result = tool.execute(params, &ctx).await;
@@ -277,7 +274,6 @@ mod tests {
         });
         let ctx = ToolContext {
             workspace_root: dir.clone(),
-            conversation_id: String::new(),
             signal: tokio::sync::watch::channel(false).1,
         };
 

@@ -567,7 +567,6 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         ToolContext {
             workspace_root: std::env::temp_dir(),
-            conversation_id: String::new(),
             signal: rx,
         }
     }
