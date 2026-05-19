@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     let (tui_tx, mut tui_rx) = mpsc::unbounded_channel::<TuiEvent>();
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (permission_tx, mut permission_rx) = mpsc::unbounded_channel::<PermissionRequest>();
-    let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+    let (mut signal_tx, _signal_rx) = tokio::sync::watch::channel(false);
     let cancelled = Arc::new(AtomicBool::new(false));
 
     let mut app = App::new();
@@ -418,7 +418,14 @@ async fn main() -> anyhow::Result<()> {
                             } else {
                                 tui_tx.send(TuiEvent::Submit(submitted.clone())).ok();
 
-                                let signal_rx_clone = signal_rx.clone();
+                                // Reset both cancellation sources before each new agent run.
+                                // Without this, a previous Ctrl+C interrupt would latch and
+                                // cause the next Agent::run to exit immediately.
+                                cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+                                let (new_tx, new_rx) = tokio::sync::watch::channel(false);
+                                signal_tx = new_tx;
+
+                                let signal_rx_clone = new_rx;
                                 let cancelled_clone = Arc::clone(&cancelled);
                                 let agent_tx_clone = agent_tx.clone();
 
