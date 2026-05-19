@@ -14,6 +14,8 @@ pub struct BashSession {
     pub registry: CommandRegistry,
     pub command_count: u32,
     pub signal: Option<watch::Receiver<bool>>,
+    /// Real host filesystem path, used to run host commands (e.g. `cargo`).
+    pub host_workspace_root: PathBuf,
 }
 
 impl BashSession {
@@ -34,6 +36,7 @@ impl BashSession {
         env.insert("USER".into(), "user".into());
         env.insert("SHELL".into(), "/bin/bash".into());
 
+        let host_root = workspace_dir.clone();
         Self {
             fs,
             env,
@@ -41,6 +44,7 @@ impl BashSession {
             registry: CommandRegistry::new(),
             command_count: 0,
             signal: None,
+            host_workspace_root: host_root,
         }
     }
 
@@ -235,6 +239,7 @@ impl BashSession {
                     stdout,
                     stderr: actual_stderr,
                     signal: self.signal.as_ref(),
+                    host_workspace_root: Some(self.host_workspace_root.clone()),
                 };
 
                 let exit_code = self

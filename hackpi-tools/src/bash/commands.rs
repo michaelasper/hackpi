@@ -12,6 +12,9 @@ pub struct CommandContext<'a> {
     pub stdout: &'a mut Vec<u8>,
     pub stderr: &'a mut Vec<u8>,
     pub signal: Option<&'a tokio::sync::watch::Receiver<bool>>,
+    /// Real host filesystem path for commands that delegate to host processes
+    /// (e.g. `cargo`). When `None`, host-forwarding commands are unavailable.
+    pub host_workspace_root: Option<PathBuf>,
 }
 
 impl CommandContext<'_> {
@@ -57,6 +60,7 @@ impl CommandRegistry {
         cmds.insert("env".to_string(), cmd_env);
         cmds.insert("export".to_string(), cmd_export);
         cmds.insert("ln".to_string(), cmd_ln);
+        cmds.insert("cargo".to_string(), cmd_cargo);
 
         let mut help = HashMap::new();
         help.insert("cd", "cd [path]  Change directory (default: ~)");
@@ -89,6 +93,10 @@ impl CommandRegistry {
         help.insert("env", "env  Print environment variables");
         help.insert("export", "export NAME=value  Set environment variable");
         help.insert("ln", "ln [-s] target link  Create hard or symbolic links");
+        help.insert(
+            "cargo",
+            "cargo [subcommand..]  Run cargo commands on the host (real) filesystem",
+        );
 
         Self {
             commands: cmds,
@@ -648,4 +656,43 @@ fn cmd_export(args: &[String], ctx: &mut CommandContext) -> i32 {
         }
     }
     0
+}
+
+/// Execute `cargo` on the real host filesystem.
+///
+/// This is the bridge between the virtual in-memory shell and the actual
+/// Rust toolchain on the host. It runs `cargo` with the given arguments
+/// in the real workspace root directory.
+///
+/// Returns the exit code from the cargo process, or 1 if the workspace
+/// root is not configured or the process cannot be spawned.
+fn cmd_cargo(args: &[String], ctx: &mut CommandContext) -> i32 {
+    let workspace_root = match &ctx.host_workspace_root {
+        Some(root) => root,
+        None => {
+            let _ = writeln!(ctx.stderr, "cargo: workspace root not configured");
+            return 1;
+        }
+    };
+
+    let output = match std::process::Command::new("cargo")
+        .args(args)
+        .current_dir(workspace_root)
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(ctx.stderr, "cargo: failed to execute: {e}");
+            return 1;
+        }
+    };
+
+    if !output.stdout.is_empty() {
+        let _ = write!(ctx.stdout, "{}", String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        let _ = write!(ctx.stderr, "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    output.status.code().unwrap_or(1)
 }

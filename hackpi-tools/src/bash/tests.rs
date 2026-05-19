@@ -917,6 +917,55 @@ fn test_readlink_on_symlink() {
 }
 
 #[test]
+fn test_cargo_help_shows_description() {
+    let mut session = new_session();
+    let out = session.execute("cargo --help");
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stdout.contains("Run cargo commands on the host"),
+        "cargo --help should show cargo description, got: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn test_cargo_registered_not_command_not_found() {
+    let mut session = new_session();
+    // cargo with no args should attempt host execution (not "command not found")
+    let out = session.execute("cargo");
+    // On systems without cargo or with a bad cwd, exit code may be non-zero,
+    // but it MUST NOT be 127 (command not found)
+    assert_ne!(
+        out.exit_code, 127,
+        "cargo should be a registered command, not 'command not found'"
+    );
+    // It should either succeed (0) or fail with a cargo/process error (non-127)
+}
+
+#[test]
+fn test_cargo_version_runs_on_host() {
+    let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let ctx = hackpi_core::tools::ToolContext {
+        workspace_root: std::path::PathBuf::from("/tmp"),
+        signal: rx,
+    };
+    let params = serde_json::json!({"command": "cargo --version"});
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(tool.execute(params, &ctx));
+    match result {
+        hackpi_core::tools::ToolResult::Success { content } => {
+            assert!(
+                content.contains("cargo"),
+                "expected cargo version output, got: {content}"
+            );
+        }
+        other => panic!("Expected Success, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_concurrent_reads_do_not_deadlock() {
     let fs = Box::new(InMemoryFs::default());
     fs.write(Path::new("/file1.txt"), b"content1").unwrap();
