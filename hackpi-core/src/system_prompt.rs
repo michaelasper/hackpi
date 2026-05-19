@@ -34,7 +34,7 @@ pub fn tools_section() -> &'static str {
 - search_grep: search codebase for regex patterns with context lines
 - write: create new files (will reject writes to existing files)
 - edit: modify existing files using LINE#HASH anchors from read output
-- bash: execute commands in a persistent virtual shell
+- bash: execute commands in a persistent virtual shell (built-in commands: cd, echo, ls, cat, etc.). 'cargo' commands are forwarded to the host toolchain for verification
 - git_read: inspect repository state (status, diff, log, branches, remotes)
 - git_write: modify repository (add, commit, push, pull, checkout, branch, merge, rebase, stash)
 - github: GitHub operations (create/list PRs, issues, releases, comments)
@@ -51,7 +51,7 @@ pub fn workflow_section() -> &'static str {
 # Workflow
 1. Always read a file before editing it.
 2. Use search_grep to find relevant code before making changes.
-3. Verify changes compile and pass tests (cargo check / cargo test).
+3. Verify changes compile and pass tests via the bash tool (cargo check / cargo test).
 4. For new files, use write; for existing files, use edit with LINE#HASH anchors from read output.
 5. When making commits, always git_read status first to verify changes.
 6. When creating PRs, always push first, then use github pr_create.
