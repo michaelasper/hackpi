@@ -95,7 +95,15 @@ impl Tool for ReadTool {
             }
         };
 
-        let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+        let offset: usize = match params.get("offset").and_then(|v| v.as_u64()) {
+            Some(0) => {
+                return ToolResult::SystemError {
+                    message: "offset must be >= 1 (1-indexed line number)".into(),
+                }
+            }
+            Some(n) => n as usize,
+            None => 1,
+        };
         let limit = params
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -110,9 +118,9 @@ impl Tool for ReadTool {
             };
         }
 
-        let start = (offset - 1).min(total_lines);
+        let start = offset.saturating_sub(1).min(total_lines);
         let end = match limit {
-            Some(l) => (start + l).min(total_lines),
+            Some(l) => (start.saturating_add(l)).min(total_lines),
             None => total_lines,
         };
 
@@ -366,6 +374,89 @@ mod tests {
                 );
             }
             other => panic!("expected SystemError for path traversal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_offset_zero_rejected() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("file.txt"), b"line one\nline two\nline three\n").unwrap();
+
+        let tool = ReadTool::new(dir.clone());
+        let params = serde_json::json!({ "path": "file.txt", "offset": 0 });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("offset must be >= 1"),
+                    "expected offset validation error, got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for offset=0, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_offset_zero_with_limit_rejected() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("file.txt"), b"line one\nline two\nline three\n").unwrap();
+
+        let tool = ReadTool::new(dir.clone());
+        let params = serde_json::json!({ "path": "file.txt", "offset": 0, "limit": 10 });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::SystemError { message } => {
+                assert!(
+                    message.contains("offset must be >= 1"),
+                    "expected offset validation error, got: {message}"
+                );
+            }
+            other => panic!("expected SystemError for offset=0 with limit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_offset_one_is_accepted() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("file.txt"), b"line one\nline two\nline three\n").unwrap();
+
+        let tool = ReadTool::new(dir.clone());
+        let params = serde_json::json!({ "path": "file.txt", "offset": 1, "limit": 2 });
+        let ctx = ToolContext {
+            workspace_root: dir.clone(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+
+        let result = tool.execute(params, &ctx).await;
+
+        match result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("line one"),
+                    "expected first line, got: {content}"
+                );
+                assert!(
+                    content.contains("line two"),
+                    "expected second line, got: {content}"
+                );
+                assert!(
+                    !content.contains("line three"),
+                    "should not include third line, got: {content}"
+                );
+            }
+            other => panic!("expected Success for offset=1, got {other:?}"),
         }
     }
 }
