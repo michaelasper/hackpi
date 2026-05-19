@@ -569,9 +569,24 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
         return;
     }
 
-    // Modal dimensions — use the full terminal area frame for reference
+    // Compute the widest command name and description to size columns dynamically.
+    let max_name_width = filtered
+        .iter()
+        .map(|cmd| cmd.name.chars().count())
+        .max()
+        .unwrap_or(10)
+        .max(10);
+    let max_desc_width = filtered
+        .iter()
+        .map(|cmd| cmd.description.chars().count())
+        .max()
+        .unwrap_or(20);
+
+    // Modal dimensions — wide enough for cursor + name column + gap + description + borders.
+    // 2 (cursor "▸ ") + name + 2 (gap "  ") + description + 2 (left/right border padding)
     let frame_area = frame.area();
-    let modal_width = frame_area.width.min(60);
+    let min_modal_width = (2 + max_name_width + 2 + max_desc_width + 2).max(50) as u16;
+    let modal_width = frame_area.width.min(min_modal_width);
     let max_visible = 10; // max items to show at once
     let item_count = filtered.len().min(max_visible);
     // Height: top border (1) + title (1) + items + optional "more" (1) + hint (1) + bottom border (1)
@@ -632,9 +647,19 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
             Style::default().fg(Color::Gray)
         };
 
+        // Truncate the name to the computed column width if it somehow exceeds it,
+        // then pad to ensure consistent column alignment.
+        let display_name = if cmd.name.chars().count() > max_name_width {
+            let truncated: String = cmd.name.chars().take(max_name_width - 1).collect();
+            format!("{truncated}…")
+        } else {
+            format!("{:<width$}", cmd.name, width = max_name_width)
+        };
+
         lines.push(Line::from(vec![
             Span::styled(cursor.to_string(), cmd_style),
-            Span::styled(format!("{:<20}", cmd.name), cmd_style),
+            Span::styled(display_name, cmd_style),
+            Span::styled("  ".to_string(), cmd_style), // separator gap
             Span::styled(cmd.description, desc_style),
         ]));
     }
@@ -2099,6 +2124,94 @@ mod tests {
         assert!(
             cell_str.contains("Enter to create"),
             "should show hint, got: {cell_str}"
+        );
+    }
+
+    /// Regression test for COR-160: Long command names (like /guardrails:onboarding)
+    /// must not overlap with the description text. The modal must be wide enough
+    /// to accommodate the longest command name plus its description without overlap.
+    #[test]
+    fn test_autocomplete_long_command_name_no_overlap() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/guardrails:onboarding".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // The full command name must appear
+        assert!(
+            cell_str.contains("/guardrails:onboarding"),
+            "autocomplete should show the full command name, got: {cell_str}"
+        );
+
+        // The description must also appear
+        assert!(
+            cell_str.contains("Write a preset guardrails config"),
+            "autocomplete should show the description for /guardrails:onboarding, got: {cell_str}"
+        );
+    }
+
+    /// Regression test for COR-160: When filtering shows commands with long names,
+    /// the name column width must adapt to the longest filtered command name.
+    #[test]
+    fn test_autocomplete_name_column_adapts_to_widest_command() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        // Filter to just guardrails commands — the longest is /guardrails:onboarding (22 chars)
+        let mut app = App::new();
+        app.input = "/gu".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // All three guardrails commands should be visible with their descriptions
+        assert!(
+            cell_str.contains("/guardrails:status"),
+            "should show /guardrails:status, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("/guardrails:clean"),
+            "should show /guardrails:clean, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("/guardrails:onboarding"),
+            "should show /guardrails:onboarding, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("Show guardrails status"),
+            "should show description for status, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("Clear session cache"),
+            "should show description for clean, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("Write a preset guardrails config"),
+            "should show description for onboarding, got: {cell_str}"
         );
     }
 
