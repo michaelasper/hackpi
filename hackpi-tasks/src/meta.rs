@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Internal metadata for the task store, persisted as `_meta.json`.
@@ -27,13 +30,16 @@ impl Meta {
         tasks_dir.join("_meta.json")
     }
 
-    /// Load meta from disk, or create a default if it doesn't exist.
+    /// Load meta from disk, or create a default if it doesn't exist or is empty.
     pub(crate) async fn load(tasks_dir: &Path) -> Result<Self> {
         let path = Self::path(tasks_dir);
         if path.exists() {
             let content = tokio::fs::read_to_string(&path)
                 .await
                 .with_context(|| format!("reading {}", path.display()))?;
+            if content.trim().is_empty() {
+                return Ok(Meta::default());
+            }
             let meta: Meta = serde_json::from_str(&content)
                 .with_context(|| format!("parsing {}", path.display()))?;
             Ok(meta)
@@ -52,6 +58,33 @@ impl Meta {
         Ok(())
     }
 
+    /// Synchronous version of `load` for use inside `spawn_blocking` where
+    /// `tokio::fs` is not available.
+    pub(crate) fn load_sync(tasks_dir: &Path) -> Result<Self> {
+        let path = Self::path(tasks_dir);
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            if content.trim().is_empty() {
+                return Ok(Meta::default());
+            }
+            let meta: Meta = serde_json::from_str(&content)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            Ok(meta)
+        } else {
+            Ok(Meta::default())
+        }
+    }
+
+    /// Synchronous version of `save` for use inside `spawn_blocking` where
+    /// `tokio::fs` is not available.
+    pub(crate) fn save_sync(&self, tasks_dir: &Path) -> Result<()> {
+        let path = Self::path(tasks_dir);
+        let content = serde_json::to_string_pretty(self).with_context(|| "serializing meta")?;
+        std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
     /// Format the next ID as `TSK-XXX` (zero-padded to at least 3 digits).
     pub(crate) fn format_id(id: u32) -> String {
         if id < 1000 {
@@ -63,35 +96,99 @@ impl Meta {
 }
 
 /// Thread-safe ID generator backed by the meta file.
+///
+/// Uses both an in-process `Mutex` and a cross-process file lock (via `fs2`) to
+/// guarantee unique ID allocation even when multiple `MetaIdGenerator` instances
+/// (potentially in different processes) point at the same directory.
 pub(crate) struct MetaIdGenerator {
-    meta: Mutex<Meta>,
+    /// In-process mutex serializing calls within the same process.
+    guard: Mutex<()>,
     tasks_dir: PathBuf,
+    /// File handle to `_meta.json`, held open for the lifetime of the generator.
+    /// Used with `fs2::FileExt` for cross-process exclusive locking.
+    lock_file: Arc<std::fs::File>,
 }
 
 impl MetaIdGenerator {
-    /// Create a new generator, loading or initializing meta from disk.
+    /// Create a new generator, opening (or creating) `_meta.json` for locking.
     pub async fn new(tasks_dir: PathBuf) -> Result<Self> {
         // Ensure the tasks directory exists
         tokio::fs::create_dir_all(&tasks_dir)
             .await
             .with_context(|| format!("creating tasks directory {}", tasks_dir.display()))?;
 
+        let meta_path = Meta::path(&tasks_dir);
+
+        // Open (or create) the meta file. We keep this handle open for the
+        // lifetime of the generator to use as a cross-process lock.
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&meta_path)
+            .with_context(|| format!("opening meta file {}", meta_path.display()))?;
+
+        // Ensure the meta file has valid initial content if it was just created
         let meta = Meta::load(&tasks_dir).await?;
+        meta.save(&tasks_dir).await?;
+
         Ok(Self {
-            meta: Mutex::new(meta),
+            guard: Mutex::new(()),
             tasks_dir,
+            lock_file: Arc::new(lock_file),
         })
     }
 
-    /// Allocate the next ID, persisting the updated meta atomically.
+    /// Allocate the next ID, using a cross-process file lock to guarantee
+    /// uniqueness even when multiple generators share the same directory.
+    ///
+    /// The critical section (read–increment–write) runs inside a
+    /// `spawn_blocking` call where the exclusive file lock is held, ensuring
+    /// that only one writer touches `_meta.json` at a time globally.
+    ///
     /// Returns the formatted task ID string (e.g., "TSK-001").
     pub async fn next_id(&self) -> Result<String> {
-        let mut meta = self.meta.lock().await;
-        let id = meta.next_id;
-        meta.next_id += 1;
+        // In-process serialization — no two concurrent calls from the same
+        // generator will proceed past this point.
+        let _guard = self.guard.lock().await;
 
-        // Persist the updated meta
-        meta.save(&self.tasks_dir).await?;
+        let lock_file = Arc::clone(&self.lock_file);
+        let tasks_dir = self.tasks_dir.clone();
+
+        // Cross-process locking + I/O happens on a blocking thread since
+        // `fs2::FileExt::lock_exclusive` and `std::fs` operations are
+        // synchronous.
+        let id = tokio::task::spawn_blocking(move || -> Result<u32> {
+            // Acquire cross-process exclusive lock. This will block until the
+            // lock is available (no other process holds it).
+            lock_file
+                .lock_exclusive()
+                .with_context(|| "acquiring exclusive lock on _meta.json")?;
+
+            // Re-read meta from disk — another process may have changed it
+            // since we last looked.
+            let meta = Meta::load_sync(&tasks_dir)?;
+
+            let id = meta.next_id;
+
+            // Write the incremented value back
+            let next = Meta {
+                next_id: meta.next_id + 1,
+                ..meta
+            };
+            next.save_sync(&tasks_dir)?;
+
+            // Explicitly release the lock so the next waiter can proceed
+            // immediately instead of waiting for the file handle to drop.
+            lock_file
+                .unlock()
+                .with_context(|| "releasing exclusive lock on _meta.json")?;
+
+            Ok(id)
+        })
+        .await
+        .with_context(|| "blocking task for meta lock panicked")??;
 
         Ok(Meta::format_id(id))
     }
@@ -261,6 +358,40 @@ mod tests {
         assert!(
             err.contains("_meta.json"),
             "error should mention the meta file, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn id_generator_cross_instance_duplicate_prevention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = dir.path().join("tasks");
+
+        // Two separate generators pointing at the same directory
+        let gen1 = MetaIdGenerator::new(tasks_dir.clone()).await.expect("gen1");
+        let gen2 = MetaIdGenerator::new(tasks_dir.clone()).await.expect("gen2");
+
+        // Allocate IDs from both generators concurrently
+        let ids1 = gen1.next_id().await.expect("id1");
+        let ids2 = gen2.next_id().await.expect("id2");
+        let ids3 = gen1.next_id().await.expect("id3");
+        let ids4 = gen2.next_id().await.expect("id4");
+
+        let ids = vec![ids1, ids2, ids3, ids4];
+        let mut sorted = ids.clone();
+        sorted.sort();
+        let unique_count = sorted.len();
+        sorted.dedup();
+        assert_eq!(
+            unique_count,
+            sorted.len(),
+            "all IDs should be unique across separate generators, got: {ids:?}"
+        );
+
+        // IDs should match TSK-001 through TSK-004
+        let expected: Vec<String> = (1..=4).map(Meta::format_id).collect();
+        assert_eq!(
+            sorted, expected,
+            "IDs should be sequential across generators"
         );
     }
 
