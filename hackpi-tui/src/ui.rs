@@ -48,6 +48,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.pending_permission.is_some() {
         render_permission_modal(frame, area, app);
     }
+
+    if app.creating_task {
+        render_task_create_prompt(frame, chunks[2], app);
+    }
 }
 
 /// Render the tab header with active/inactive tab highlighting and version/usage info.
@@ -225,7 +229,7 @@ fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
 
     if app.task_list_cache.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
-            "  No tasks. Use /task create <title> to add one.",
+            "  No tasks. Press 'n' to create one.",
             Style::default().fg(Color::DarkGray),
         ))));
     } else {
@@ -288,7 +292,7 @@ fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
     // Footer showing available commands
     items.push(ListItem::new(Line::from("")));
     items.push(ListItem::new(Line::from(Span::styled(
-        "  ↑/↓ navigate  Enter detail  Esc back  /task create <title>  /task move <id> <state>",
+        "  ↑/↓ navigate  Enter detail  Esc back  n new task  /task move <id> <state>",
         Style::default().fg(Color::DarkGray),
     ))));
 
@@ -731,6 +735,54 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
         .alignment(Alignment::Left);
 
     frame.render_widget(paragraph, modal_area);
+}
+
+/// Render the inline task creation prompt overlaid on the input area.
+fn render_task_create_prompt(frame: &mut Frame, area: Rect, app: &App) {
+    // Clear the input area
+    frame.render_widget(Clear, area);
+
+    let input_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // label
+            Constraint::Length(1), // input field
+            Constraint::Length(1), // hint
+        ])
+        .split(area);
+
+    // Label line
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " New Task:",
+            Style::default()
+                .fg(Color::Rgb(255, 200, 0))
+                .add_modifier(Modifier::BOLD),
+        )))
+        .style(Style::default().bg(Color::Black)),
+        input_area[0],
+    );
+
+    // Input field with cursor
+    let input_text = format!(" {}█", app.task_create_input);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            input_text,
+            Style::default().fg(Color::White),
+        )))
+        .style(Style::default().bg(Color::Black)),
+        input_area[1],
+    );
+
+    // Hint line
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " Enter to create · Esc to cancel",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .style(Style::default().bg(Color::Black)),
+        input_area[2],
+    );
 }
 
 #[cfg(test)]
@@ -1891,6 +1943,102 @@ mod tests {
         assert!(
             cell_str.contains("/task"),
             "detail view should show contextual commands, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_board_empty_state_mentions_n_key() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.task_list_cache = vec![];
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Press 'n'"),
+            "empty state should mention 'n' key, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_board_footer_shows_n_key() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.task_list_cache = vec![hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: "Test".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::None,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("n new task"),
+            "footer should mention 'n new task', got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_render_task_create_prompt_shows_input() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.creating_task = true;
+        app.task_create_input = "My new task".to_string();
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("New Task"),
+            "should show 'New Task' prompt label, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("My new task"),
+            "should show task input text, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("Enter to create"),
+            "should show hint, got: {cell_str}"
         );
     }
 }

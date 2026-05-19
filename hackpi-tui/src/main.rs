@@ -31,6 +31,7 @@ fn build_system_prompt() -> String {
 }
 
 #[tokio::main]
+#[allow(clippy::await_holding_lock)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -260,6 +261,23 @@ async fn main() -> anyhow::Result<()> {
                                 input.handle_key(key);
                             }
                         }
+                    } else if app.creating_task {
+                        // Task creation inline prompt is active
+                        match key.code {
+                            KeyCode::Enter => {
+                                app.submit_create_task();
+                            }
+                            KeyCode::Esc => {
+                                app.cancel_create_task();
+                            }
+                            KeyCode::Backspace => {
+                                app.task_create_input.pop();
+                            }
+                            KeyCode::Char(ch) => {
+                                app.task_create_input.push(ch);
+                            }
+                            _ => {}
+                        }
                     } else {
                         match key.code {
                             KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
@@ -316,6 +334,14 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
+                            KeyCode::Char('n') => {
+                                if matches!(
+                                    app.active_view,
+                                    AppView::TaskBoard | AppView::TaskDetail(_)
+                                ) {
+                                    app.begin_create_task();
+                                }
+                            }
                             KeyCode::PageUp => {
                                 app.scroll_offset = app.scroll_offset.saturating_sub(5);
                             }
@@ -346,15 +372,20 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(submitted) = input.last_submitted() {
                             // Check for slash commands first
                             if submitted.starts_with('/') {
+                                // Guard is held across await because handle_slash_command
+                                // is async and needs mutable access to the evaluator.
+                                // Dropping the guard after the call is safe since no
+                                // other task touches the evaluator concurrently here.
                                 let mut guard = guard_evaluator.write().unwrap();
                                 handle_slash_command(
                                     &submitted,
                                     &mut app,
                                     &tui_tx,
-                                    &mut *guard,
+                                    &mut guard,
                                     &tools,
                                 )
                                 .await;
+                                drop(guard);
                                 // Refresh task cache after task operations on TaskBoard
                                 if submitted.starts_with("/task") {
                                     if matches!(app.active_view, AppView::TaskBoard) {

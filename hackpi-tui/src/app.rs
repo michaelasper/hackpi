@@ -84,6 +84,10 @@ pub struct App {
     pub autocomplete_visible: bool,
     /// Currently selected index in the autocomplete list.
     pub autocomplete_selected: usize,
+    /// Whether the task creation inline prompt is active in the task board.
+    pub creating_task: bool,
+    /// Buffer for the task title being entered during task creation.
+    pub task_create_input: String,
 }
 
 impl Default for App {
@@ -112,6 +116,8 @@ impl App {
             task_detail_blocking: Vec::new(),
             autocomplete_visible: false,
             autocomplete_selected: 0,
+            creating_task: false,
+            task_create_input: String::new(),
             loading_frame: 0,
         }
     }
@@ -404,6 +410,72 @@ impl App {
             _ => {
                 self.active_view = AppView::Conversation;
             }
+        }
+    }
+
+    /// Enter the task creation prompt mode. Only valid in TaskBoard view.
+    pub fn begin_create_task(&mut self) {
+        if matches!(
+            self.active_view,
+            AppView::TaskBoard | AppView::TaskDetail(_)
+        ) {
+            self.creating_task = true;
+            self.task_create_input.clear();
+        }
+    }
+
+    /// Cancel the task creation prompt mode.
+    pub fn cancel_create_task(&mut self) {
+        self.creating_task = false;
+        self.task_create_input.clear();
+    }
+
+    /// Submit the task creation. Returns `Some(task_id)` on success, `None` on failure.
+    /// On success, refreshes the task list cache and selects the newly created task.
+    pub fn submit_create_task(&mut self) -> Option<String> {
+        let title = self.task_create_input.trim().to_string();
+        if title.is_empty() {
+            self.status_message = "Task title cannot be empty.".to_string();
+            return None;
+        }
+
+        let result = self.create_task_sync(&title);
+        self.creating_task = false;
+        self.task_create_input.clear();
+
+        match result {
+            Some(task) => {
+                let id = task.id.clone();
+                self.status_message = format!("Created {}: \"{}\"", id, task.title);
+                self.refresh_task_cache();
+                // Select the newly created task
+                for (i, t) in self.task_list_cache.iter().enumerate() {
+                    if t.id == id {
+                        self.selected_task_idx = i;
+                        break;
+                    }
+                }
+                Some(id)
+            }
+            None => {
+                self.status_message = "Failed to create task.".to_string();
+                None
+            }
+        }
+    }
+
+    /// Internal: create a task synchronously via the task store.
+    fn create_task_sync(&self, title: &str) -> Option<hackpi_tasks::Task> {
+        if let Some(ref store) = self.task_store {
+            let store_clone: Arc<dyn hackpi_tasks::TaskStore> =
+                Arc::clone(store) as Arc<dyn hackpi_tasks::TaskStore>;
+            let new_task = hackpi_tasks::NewTask::new(title.to_string());
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async { store_clone.create(&new_task).await.ok() })
+            })
+        } else {
+            None
         }
     }
 }
@@ -2423,5 +2495,96 @@ mod tests {
         app.update_autocomplete_state();
         assert!(!app.autocomplete_visible);
         assert_eq!(app.autocomplete_selected, 0);
+    }
+
+    // ── Task creation prompt tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_creating_task_default_false() {
+        let app = App::new();
+        assert!(!app.creating_task);
+        assert!(app.task_create_input.is_empty());
+    }
+
+    #[test]
+    fn test_begin_create_task_in_task_board() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskBoard;
+        app.begin_create_task();
+        assert!(app.creating_task);
+        assert!(app.task_create_input.is_empty());
+    }
+
+    #[test]
+    fn test_begin_create_task_in_task_detail() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskDetail("TSK-001".to_string());
+        app.begin_create_task();
+        assert!(app.creating_task);
+    }
+
+    #[test]
+    fn test_begin_create_task_ignored_in_conversation() {
+        let mut app = App::new();
+        app.active_view = AppView::Conversation;
+        app.begin_create_task();
+        assert!(!app.creating_task);
+    }
+
+    #[test]
+    fn test_cancel_create_task() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskBoard;
+        app.begin_create_task();
+        app.task_create_input = "some title".to_string();
+        app.cancel_create_task();
+        assert!(!app.creating_task);
+        assert!(app.task_create_input.is_empty());
+    }
+
+    #[test]
+    fn test_submit_create_task_empty_title_fails() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskBoard;
+        app.creating_task = true;
+        app.task_create_input = "   ".to_string();
+        let result = app.submit_create_task();
+        assert!(result.is_none());
+        assert!(app.status_message.contains("empty"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_submit_create_task_success() {
+        let (mut app, _dir) = make_app_with_task_store().await;
+        app.active_view = AppView::TaskBoard;
+        app.creating_task = true;
+        app.task_create_input = "Test task from TUI".to_string();
+
+        let result = app.submit_create_task();
+        assert!(result.is_some(), "should return task ID on success");
+        let id = result.unwrap();
+        assert!(
+            id.starts_with("TSK-"),
+            "task ID should start with TSK-, got: {id}"
+        );
+
+        // Should have refreshed the cache and selected the new task
+        assert!(!app.task_list_cache.is_empty());
+        assert_eq!(app.task_list_cache[0].title, "Test task from TUI");
+        assert_eq!(app.selected_task_idx, 0);
+        assert!(!app.creating_task);
+        assert!(app.task_create_input.is_empty());
+        assert!(app.status_message.contains(&id));
+    }
+
+    #[test]
+    fn test_submit_create_task_no_store() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskBoard;
+        app.creating_task = true;
+        app.task_create_input = "Test".to_string();
+        let result = app.submit_create_task();
+        assert!(result.is_none());
+        assert!(app.status_message.contains("Failed"));
     }
 }
