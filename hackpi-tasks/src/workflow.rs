@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::LazyLock;
 
 // ── Transition ──────────────────────────────────────────────────────────────
 
@@ -69,11 +70,16 @@ transitions:
 agent_profile: default
 "#;
 
+/// Cached default workflow profile, parsed once to avoid per-call YAML parsing.
+static DEFAULT_WORKFLOW: LazyLock<WorkflowProfile> = LazyLock::new(|| {
+    WorkflowProfile::parse_yaml(DEFAULT_WORKFLOW_YAML)
+        .expect("built-in default workflow YAML should always be valid")
+});
+
 impl WorkflowProfile {
     /// Returns the built-in default workflow profile.
     pub fn default_workflow() -> Self {
-        Self::parse_yaml(DEFAULT_WORKFLOW_YAML)
-            .expect("built-in default workflow YAML should always be valid")
+        DEFAULT_WORKFLOW.clone()
     }
 
     /// Parse a workflow profile from a YAML string.
