@@ -61,6 +61,29 @@ impl ApiClient {
             .send()
             .await?;
 
+        // Check HTTP status before consuming the body stream.
+        // Non-success statuses (4xx, 5xx) indicate auth failures, server
+        // errors, or proxy issues — return a structured error with a
+        // bounded body excerpt so the caller sees an actionable message.
+        let status = response.status();
+        if !status.is_success() {
+            let body_preview = response
+                .bytes()
+                .await
+                .map(|b| {
+                    let preview = String::from_utf8_lossy(&b);
+                    if preview.len() > 500 {
+                        format!("{}... (truncated)", &preview[..500])
+                    } else {
+                        preview.to_string()
+                    }
+                })
+                .unwrap_or_else(|_| "<failed to read body>".to_string());
+            return Err(anyhow::anyhow!(
+                "API request failed with HTTP {status}: {body_preview}"
+            ));
+        }
+
         let stream = response.bytes_stream().map(|r| r.map(|b| b.to_vec()));
         process_sse_stream(stream, tx).await
     }
@@ -119,6 +142,11 @@ where
         }
     }
 
+    // The byte stream ended without a [DONE] frame. Some servers
+    // (e.g., ds4-server) do not send [DONE], so treat this as a
+    // warning rather than a hard error. The caller has already
+    // received all events sent before the stream closed.
+    tracing::warn!("SSE stream ended without [DONE] frame; stream may be truncated");
     Ok(())
 }
 
@@ -133,6 +161,7 @@ pub enum ApiEvent {
 mod tests {
     use super::*;
     use futures::stream;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_api_client_has_connect_timeout() {
@@ -141,6 +170,67 @@ mod tests {
         assert!(
             result.is_ok(),
             "ApiClient::new should succeed with default config"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_messages_http_401_returns_error() {
+        let mock_server = MockServer::start().await;
+
+        // A 401 response with an error body
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(
+                r#"{"error":{"message":"Invalid API key","type":"authentication_error"}}"#,
+            ))
+            .mount(&mock_server)
+            .await;
+
+        let config = ApiConfig {
+            endpoint: format!("{}/v1/messages", mock_server.uri()),
+            ..ApiConfig::default()
+        };
+        let client = ApiClient::new(config).expect("should create client");
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+
+        let result = client.send_messages(&[], &[], "", tx).await;
+
+        assert!(
+            result.is_err(),
+            "HTTP 401 should return an error, got Ok(())"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("401") || err.contains("status") || err.contains("Unauthorized"),
+            "error should mention the HTTP status: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_messages_http_500_returns_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&mock_server)
+            .await;
+
+        let config = ApiConfig {
+            endpoint: format!("{}/v1/messages", mock_server.uri()),
+            ..ApiConfig::default()
+        };
+        let client = ApiClient::new(config).expect("should create client");
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+
+        let result = client.send_messages(&[], &[], "", tx).await;
+
+        assert!(
+            result.is_err(),
+            "HTTP 500 should return an error, got Ok(())"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("500") || err.contains("status") || err.contains("Server Error"),
+            "error should mention the HTTP status: {err}"
         );
     }
 
@@ -382,5 +472,78 @@ mod tests {
             Some("é"),
             "delta text should have correct UTF-8 character"
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_incomplete_stream_logs_warning() {
+        // Stream ends without [DONE] — should log a warning and succeed
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(
+            b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"Hello\"}}\n".to_vec(),
+        )];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        assert!(
+            result.is_ok(),
+            "incomplete SSE stream (no [DONE]) should succeed with a warning"
+        );
+
+        // The event should still have been received
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Error(_) => {}
+                ApiEvent::Done => break,
+            }
+        }
+        assert_eq!(events.len(), 1, "should have received the event");
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_empty_stream_logs_warning() {
+        // Empty stream with no chunks at all — no [DONE] seen, should succeed
+        // with a warning
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![];
+
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        assert!(
+            result.is_ok(),
+            "empty SSE stream (no [DONE]) should succeed with a warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_done_at_end_still_succeeds() {
+        // Stream with [DONE] at the end should still succeed
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
+            Ok(
+                b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"Hello\"}}\n"
+                    .to_vec(),
+            ),
+            Ok(b"data: [DONE]\n".to_vec()),
+        ];
+
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        assert!(
+            result.is_ok(),
+            "SSE stream ending with [DONE] should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_only_done_succeeds() {
+        // Only [DONE] with no events should succeed
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![Ok(b"data: [DONE]\n".to_vec())];
+
+        let (tx, _rx) = mpsc::unbounded_channel::<ApiEvent>();
+        let result = process_sse_stream(stream::iter(chunks), tx).await;
+
+        assert!(result.is_ok(), "SSE stream with only [DONE] should succeed");
     }
 }
