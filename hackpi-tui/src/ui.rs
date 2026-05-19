@@ -110,6 +110,7 @@ fn tool_card_color(name: &str) -> Color {
         "git_read" => Color::Rgb(100, 180, 100), // green — read-only, safe
         "git_write" => Color::Rgb(255, 140, 0),  // orange — mutation, caution
         "github" => Color::Rgb(255, 255, 255),   // white — external API
+        "task" => Color::Rgb(255, 200, 0),       // amber — task management
         _ => Color::DarkGray,
     }
 }
@@ -894,6 +895,11 @@ mod tests {
     #[test]
     fn test_tool_card_color_for_github() {
         assert_eq!(tool_card_color("github"), Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn test_tool_card_color_for_task() {
+        assert_eq!(tool_card_color("task"), Color::Rgb(255, 200, 0));
     }
 
     #[test]

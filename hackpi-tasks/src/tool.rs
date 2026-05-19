@@ -141,8 +141,12 @@ impl TaskTool {
         if let Some(desc) = params.get("description").and_then(|v| v.as_str()) {
             input.description = Some(desc.to_string());
         }
-        if let Some(priority) = parse_priority(params) {
-            input.priority = Some(priority);
+        match parse_priority(params) {
+            Ok(Some(priority)) => input.priority = Some(priority),
+            Ok(None) => {}
+            Err(e) => {
+                return ToolResult::SystemError { message: e };
+            }
         }
         if let Some(labels) = parse_string_array(params, "labels") {
             input.labels = Some(labels);
@@ -247,8 +251,12 @@ impl TaskTool {
         if let Some(description) = params.get("description").and_then(|v| v.as_str()) {
             update.description = Some(description.to_string());
         }
-        if let Some(priority) = parse_priority(params) {
-            update.priority = Some(priority);
+        match parse_priority(params) {
+            Ok(Some(priority)) => update.priority = Some(priority),
+            Ok(None) => {}
+            Err(e) => {
+                return ToolResult::SystemError { message: e };
+            }
         }
         if let Some(labels) = parse_string_array(params, "labels") {
             update.labels = Some(labels);
@@ -455,18 +463,18 @@ impl TaskTool {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn parse_priority(params: &Value) -> Option<TaskPriority> {
-    params
-        .get("priority")
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s {
-            "none" => Some(TaskPriority::None),
-            "low" => Some(TaskPriority::Low),
-            "medium" => Some(TaskPriority::Medium),
-            "high" => Some(TaskPriority::High),
-            "urgent" => Some(TaskPriority::Urgent),
-            _ => None,
-        })
+fn parse_priority(params: &Value) -> Result<Option<TaskPriority>, String> {
+    match params.get("priority").and_then(|v| v.as_str()) {
+        Some(s) => match s {
+            "none" => Ok(Some(TaskPriority::None)),
+            "low" => Ok(Some(TaskPriority::Low)),
+            "medium" => Ok(Some(TaskPriority::Medium)),
+            "high" => Ok(Some(TaskPriority::High)),
+            "urgent" => Ok(Some(TaskPriority::Urgent)),
+            _ => Err(format!("Invalid priority: '{s}'. Valid values: none, low, medium, high, urgent")),
+        },
+        None => Ok(None),
+    }
 }
 
 fn parse_string_array(params: &Value, key: &str) -> Option<Vec<String>> {
@@ -667,26 +675,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_with_invalid_priority_uses_none() {
+    async fn test_create_with_invalid_priority_returns_error() {
         let (_dir, store) = setup_store().await;
-        let tool = make_tool(store.clone());
+        let tool = make_tool(store);
         let result = execute(
             &tool,
             json!({
                 "operation": "create",
                 "title": "Task",
-                "priority": "invalid"
+                "priority": "super_high"
             }),
         )
         .await;
-        match &result {
-            ToolResult::Success { content } => {
-                assert!(content.contains("Created TSK-001"));
-            }
-            _ => panic!("Expected Success, got: {result:?}"),
-        }
-        let task = store.get("TSK-001").await.unwrap().unwrap();
-        assert_eq!(task.priority, TaskPriority::None);
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("Invalid priority")),
+            "Expected SystemError for invalid priority, got: {result:?}"
+        );
     }
 
     // ── List operation ───────────────────────────────────────────────────
