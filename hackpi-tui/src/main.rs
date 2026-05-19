@@ -380,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // Sync input buffer to app.input for display after every key event
                     app.input = input.buffer.clone();
+                    app.input_cursor = input.cursor;
                     // Update autocomplete visibility based on current input
                     app.update_autocomplete_state();
 

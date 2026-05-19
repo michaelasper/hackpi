@@ -92,6 +92,9 @@ pub struct App {
     pub creating_task: bool,
     /// Buffer for the task title being entered during task creation.
     pub task_create_input: String,
+    /// Character offset of the cursor within the input buffer.
+    /// Synced from `InputHandler::cursor` so the UI can position the terminal cursor.
+    pub input_cursor: usize,
 }
 
 impl Default for App {
@@ -124,6 +127,7 @@ impl App {
             creating_task: false,
             task_create_input: String::new(),
             loading_frame: 0,
+            input_cursor: 0,
         }
     }
 
