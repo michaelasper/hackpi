@@ -25,6 +25,7 @@ pub fn make_rule(
         }),
         path_pattern: path_pattern.map(|s| s.to_string()),
         command_pattern: command_pattern.map(|s| s.to_string()),
+        operation: None,
         action,
     }
 }

@@ -1,15 +1,15 @@
-/// Structured system prompt builder for hackpi.
-///
-/// Decomposes the flat prompt into four independently tunable sections
-/// as specified in DESIGN.md:
-///
-/// 1. **Identity** — who the agent is
-/// 2. **Tools** — available tools and their usage
-/// 3. **Workflow** — step-by-step approach
-/// 4. **Rules** — constraints and best practices
-///
-/// Each section is a separate function, making it easy to adjust specific
-/// aspects without affecting the rest.
+//! Structured system prompt builder for hackpi.
+//!
+//! Decomposes the flat prompt into four independently tunable sections
+//! as specified in DESIGN.md:
+//!
+//! 1. **Identity** — who the agent is
+//! 2. **Tools** — available tools and their usage
+//! 3. **Workflow** — step-by-step approach
+//! 4. **Rules** — constraints and best practices
+//!
+//! Each section is a separate function, making it easy to adjust specific
+//! aspects without affecting the rest.
 
 // ── Section 1: Identity ──────────────────────────────────────────────────────
 

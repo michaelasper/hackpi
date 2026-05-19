@@ -84,6 +84,9 @@ pub struct PermissionRule {
     pub path_pattern: Option<String>,
     /// Optional command substring pattern — None means path-only rules.
     pub command_pattern: Option<String>,
+    /// Optional operation filter (Read/Write) for file protection rules.
+    /// When None, the rule applies to all operations.
+    pub operation: Option<FileOp>,
     /// What to do when this rule matches.
     pub action: RuleAction,
 }
@@ -560,6 +563,7 @@ mod tests {
             }),
             path_pattern: Some("./docs/**".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         };
         assert!(rule.path_pattern.is_some());
@@ -575,6 +579,7 @@ mod tests {
             }),
             path_pattern: None,
             command_pattern: Some("curl *".into()),
+            operation: None,
             action: RuleAction::Deny,
         };
         assert!(rule.path_pattern.is_none());
@@ -587,6 +592,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("./secrets/**".into()),
             command_pattern: Some("cat".into()),
+            operation: None,
             action: RuleAction::Ask,
         };
         assert!(rule.path_pattern.is_some());
@@ -599,6 +605,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         };
         assert!(rule.path_pattern.is_none());
@@ -616,6 +623,7 @@ mod tests {
             }),
             path_pattern: Some("./docs/**".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         };
         // Manually construct the JSON representation

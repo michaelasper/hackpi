@@ -380,6 +380,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("*.env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -395,6 +396,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("*.env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
 
@@ -410,6 +412,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("*.env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Ask,
         }];
 
@@ -428,6 +431,7 @@ mod tests {
             }),
             path_pattern: Some("*.env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -446,6 +450,7 @@ mod tests {
             }),
             path_pattern: Some("*.env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -461,6 +466,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("rm".into()),
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -476,6 +482,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("*.env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -535,6 +542,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some(".env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
 
@@ -549,6 +557,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("*.rs".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -563,6 +572,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("**/.git/**".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Ask,
         }];
 
@@ -643,12 +653,14 @@ mod tests {
                 tool_pattern: None,
                 path_pattern: Some(".env".into()),
                 command_pattern: None,
+                operation: None,
                 action: RuleAction::Allow,
             },
             PermissionRule {
                 tool_pattern: None,
                 path_pattern: Some(".env".into()),
                 command_pattern: None,
+                operation: None,
                 action: RuleAction::Ask,
             },
         ];
@@ -742,6 +754,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("logs/**".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = check(path, &FileOp::Read, &rules, "read");
@@ -758,6 +771,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("**/node_modules/**".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = check(path, &FileOp::Read, &rules, "read");

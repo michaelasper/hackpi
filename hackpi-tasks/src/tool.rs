@@ -471,7 +471,9 @@ fn parse_priority(params: &Value) -> Result<Option<TaskPriority>, String> {
             "medium" => Ok(Some(TaskPriority::Medium)),
             "high" => Ok(Some(TaskPriority::High)),
             "urgent" => Ok(Some(TaskPriority::Urgent)),
-            _ => Err(format!("Invalid priority: '{s}'. Valid values: none, low, medium, high, urgent")),
+            _ => Err(format!(
+                "Invalid priority: '{s}'. Valid values: none, low, medium, high, urgent"
+            )),
         },
         None => Ok(None),
     }

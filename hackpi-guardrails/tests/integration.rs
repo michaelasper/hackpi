@@ -371,9 +371,14 @@ fn test_invalid_json_one_file_others_still_load() {
     let paths = SettingsPaths::new(dir.path());
     let rules = hackpi_guardrails::config::load_all(&paths)
         .expect("should return partial results when one file has invalid JSON");
-    assert!(!rules.is_empty(), "should still have rules from valid files");
     assert!(
-        rules.iter().any(|r| r.action == hackpi_guardrails::RuleAction::Allow),
+        !rules.is_empty(),
+        "should still have rules from valid files"
+    );
+    assert!(
+        rules
+            .iter()
+            .any(|r| r.action == hackpi_guardrails::RuleAction::Allow),
         "should contain the allow rule from valid hackpi config"
     );
 }

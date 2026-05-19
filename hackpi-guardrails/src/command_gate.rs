@@ -594,6 +594,7 @@ mod tests {
             }),
             path_pattern: None,
             command_pattern: Some("rm -rf".into()),
+            operation: None,
             action: RuleAction::Allow,
         }];
         let result = check("rm -rf /", &rules, "bash");
@@ -607,6 +608,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("curl".into()),
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = check("curl http://example.com", &rules, "bash");
@@ -624,6 +626,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("rm -rf".into()),
+            operation: None,
             action: RuleAction::Allow,
         }];
         let result = check("rm -rf /etc", &rules, "bash");
@@ -641,6 +644,7 @@ mod tests {
             }),
             path_pattern: None,
             command_pattern: Some("sudo".into()),
+            operation: None,
             action: RuleAction::Deny,
         }];
         // Rule is scoped to "read", but we're checking "bash"
@@ -664,6 +668,7 @@ mod tests {
             }),
             path_pattern: None,
             command_pattern: Some("npm".into()),
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = check("npm install", &rules, "bash");
@@ -715,6 +720,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("*.env".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = check_command_against_rules("echo hello", &rules, "bash");
@@ -727,6 +733,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("rm".into()),
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = check_command_against_rules("rm -rf /", &rules, "bash");
@@ -745,6 +752,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("rm -rf".into()),
+            operation: None,
             action: RuleAction::Allow,
         }];
         let result = check_command_against_rules("rm -rf /", &rules, "bash");
@@ -757,6 +765,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("dangerous".into()),
+            operation: None,
             action: RuleAction::Ask,
         }];
         let result = check_command_against_rules("run dangerous command", &rules, "bash");
@@ -779,12 +788,14 @@ mod tests {
                 tool_pattern: None,
                 path_pattern: None,
                 command_pattern: Some("rm".into()),
+                operation: None,
                 action: RuleAction::Deny,
             },
             PermissionRule {
                 tool_pattern: None,
                 path_pattern: None,
                 command_pattern: Some("rm -rf".into()),
+                operation: None,
                 action: RuleAction::Allow,
             },
         ];
@@ -1105,6 +1116,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("git status".into()),
+            operation: None,
             action: RuleAction::Allow,
         }];
         let result = check("git status", &rules, "bash");

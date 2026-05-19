@@ -232,6 +232,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("*.env".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -247,6 +248,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("**/*.env".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -268,6 +270,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("docs/**".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
 
@@ -284,12 +287,14 @@ mod tests {
                 tool_pattern: None,
                 path_pattern: Some("secrets/**".to_string()),
                 command_pattern: None,
+                operation: None,
                 action: RuleAction::Deny,
             },
             PermissionRule {
                 tool_pattern: None,
                 path_pattern: Some("secrets/key.pem".to_string()),
                 command_pattern: None,
+                operation: None,
                 action: RuleAction::Allow,
             },
         ];
@@ -313,6 +318,7 @@ mod tests {
             }),
             path_pattern: Some("**/*.env".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -332,6 +338,7 @@ mod tests {
             }),
             path_pattern: Some("**/*.env".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -352,6 +359,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("**/secrets/**".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -373,6 +381,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("/etc/**".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -392,6 +401,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("rm".to_string()),
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -408,6 +418,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("**".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Ask,
         }];
 
@@ -461,6 +472,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("/tmp/**".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -487,6 +499,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("/tmp/cor8-test-allowed-file".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
 
@@ -505,6 +518,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("**/*.env".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -529,6 +543,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("docs/**".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
 
@@ -550,6 +565,7 @@ mod tests {
             }),
             path_pattern: Some("secret.txt".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
 
@@ -588,6 +604,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("/tmp/**".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
 

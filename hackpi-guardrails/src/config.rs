@@ -227,6 +227,7 @@ fn permission_string_to_rule(s: &str, action: RuleAction) -> Option<PermissionRu
             None
         },
         command_pattern: if !is_path_tool { Some(pattern) } else { None },
+        operation: None,
         action,
     })
 }
@@ -256,6 +257,7 @@ pub fn parse_path_access_block(config: &Value) -> Result<Vec<PermissionRule>, St
                     tool_pattern: None,
                     path_pattern: Some(pattern.to_string()),
                     command_pattern: None,
+                    operation: None,
                     action: RuleAction::Deny,
                 });
             }
@@ -270,6 +272,7 @@ pub fn parse_path_access_block(config: &Value) -> Result<Vec<PermissionRule>, St
                     tool_pattern: None,
                     path_pattern: Some(pattern.to_string()),
                     command_pattern: None,
+                    operation: None,
                     action: RuleAction::Allow,
                 });
             }
@@ -283,6 +286,7 @@ pub fn parse_path_access_block(config: &Value) -> Result<Vec<PermissionRule>, St
                 tool_pattern: None,
                 path_pattern: Some("**".to_string()),
                 command_pattern: None,
+                operation: None,
                 action: RuleAction::Ask,
             });
         }
@@ -326,6 +330,7 @@ pub fn parse_command_gate_block(config: &Value) -> Result<Vec<PermissionRule>, S
                     tool_pattern: None,
                     path_pattern: None,
                     command_pattern: Some(pattern.to_string()),
+                    operation: None,
                     action: RuleAction::Deny,
                 });
             }
@@ -350,6 +355,7 @@ pub fn parse_command_gate_block(config: &Value) -> Result<Vec<PermissionRule>, S
                 tool_pattern: None,
                 path_pattern: None,
                 command_pattern: Some(pattern.clone()),
+                operation: None,
                 action,
             });
         }
@@ -363,6 +369,7 @@ pub fn parse_command_gate_block(config: &Value) -> Result<Vec<PermissionRule>, S
                     tool_pattern: None,
                     path_pattern: None,
                     command_pattern: Some(pattern.to_string()),
+                    operation: None,
                     action: RuleAction::Ask,
                 });
             }
@@ -377,6 +384,7 @@ pub fn parse_command_gate_block(config: &Value) -> Result<Vec<PermissionRule>, S
                     tool_pattern: None,
                     path_pattern: None,
                     command_pattern: Some(pattern.to_string()),
+                    operation: None,
                     action: RuleAction::Allow,
                 });
             }
@@ -417,12 +425,14 @@ pub fn vcs_bypass_rules() -> Vec<PermissionRule> {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("git".to_string()),
+            operation: None,
             action: RuleAction::Allow,
         },
         PermissionRule {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("gh".to_string()),
+            operation: None,
             action: RuleAction::Allow,
         },
     ]
@@ -473,6 +483,7 @@ pub fn parse_file_protection_block(config: &Value) -> Result<Vec<PermissionRule>
                     tool_pattern: None,
                     path_pattern: Some(pattern.clone()),
                     command_pattern: None,
+                    operation: None,
                     action,
                 });
             }
@@ -579,10 +590,22 @@ mod tests {
         let rules = load_all(&paths).expect("should return partial results");
         assert!(!rules.is_empty(), "should have rules from valid files");
 
-        let allow_rules: Vec<_> = rules.iter().filter(|r| r.action == RuleAction::Allow).collect();
-        let deny_rules: Vec<_> = rules.iter().filter(|r| r.action == RuleAction::Deny).collect();
-        assert!(!allow_rules.is_empty(), "should have allow rule from hackpi config");
-        assert!(!deny_rules.is_empty(), "should have deny rule from claude_project config");
+        let allow_rules: Vec<_> = rules
+            .iter()
+            .filter(|r| r.action == RuleAction::Allow)
+            .collect();
+        let deny_rules: Vec<_> = rules
+            .iter()
+            .filter(|r| r.action == RuleAction::Deny)
+            .collect();
+        assert!(
+            !allow_rules.is_empty(),
+            "should have allow rule from hackpi config"
+        );
+        assert!(
+            !deny_rules.is_empty(),
+            "should have deny rule from claude_project config"
+        );
     }
 
     // ── load_hackpi_config: All sections ──────────────────────────────────
@@ -1254,12 +1277,14 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("/high-priority-deny".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let source2 = vec![PermissionRule {
             tool_pattern: None,
             path_pattern: Some("/low-priority-allow".to_string()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
 
@@ -1281,18 +1306,21 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let s2 = vec![PermissionRule {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
         let s3 = vec![PermissionRule {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: None,
+            operation: None,
             action: RuleAction::Ask,
         }];
 

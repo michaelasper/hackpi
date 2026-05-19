@@ -230,12 +230,14 @@ mod tests {
                 }),
                 path_pattern: Some("./docs/**".into()),
                 command_pattern: None,
+                operation: None,
                 action: RuleAction::Allow,
             },
             PermissionRule {
                 tool_pattern: None,
                 path_pattern: None,
                 command_pattern: Some("npm install".into()),
+                operation: None,
                 action: RuleAction::Deny,
             },
         ];
@@ -254,6 +256,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("[invalid-glob".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = validate(&rules);
@@ -273,6 +276,7 @@ mod tests {
             }),
             path_pattern: Some("./foo".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = validate(&rules);
@@ -289,6 +293,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("".into()),
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = validate(&rules);
@@ -307,6 +312,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: None,
+            operation: None,
             action: RuleAction::Allow,
         }];
         assert!(validate(&rules).is_ok());
@@ -319,6 +325,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("**/[a-z]*/?.txt".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         assert!(validate(&rules).is_ok());
@@ -421,6 +428,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: None,
             command_pattern: Some("".into()),
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = validate(&rules);
@@ -440,6 +448,7 @@ mod tests {
             }),
             path_pattern: Some("./foo".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = validate(&rules);
@@ -456,6 +465,7 @@ mod tests {
             tool_pattern: None,
             path_pattern: Some("[invalid-glob".into()),
             command_pattern: None,
+            operation: None,
             action: RuleAction::Deny,
         }];
         let result = validate(&rules);
