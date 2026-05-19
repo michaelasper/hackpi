@@ -319,7 +319,10 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             KeyCode::Enter => {
-                                if matches!(app.active_view, AppView::TaskBoard) {
+                                let has_input = !input.buffer.trim().is_empty();
+                                if matches!(app.active_view, AppView::TaskBoard)
+                                    && !has_input
+                                {
                                     app.enter_task_detail();
                                 } else if !matches!(app.state, AppState::Generating) {
                                     input.handle_key(key);

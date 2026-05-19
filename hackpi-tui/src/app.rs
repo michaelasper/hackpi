@@ -382,7 +382,10 @@ impl App {
     pub fn update_autocomplete_state(&mut self) {
         let should_show = self.input.starts_with('/')
             && matches!(self.state, AppState::Resting)
-            && matches!(self.active_view, AppView::Conversation);
+            && matches!(
+                self.active_view,
+                AppView::Conversation | AppView::TaskBoard | AppView::TaskDetail(_)
+            );
 
         if should_show && !self.filtered_commands().is_empty() {
             self.autocomplete_visible = true;
@@ -2362,12 +2365,39 @@ mod tests {
     }
 
     #[test]
-    fn test_autocomplete_update_hidden_in_task_view() {
+    fn test_autocomplete_update_visible_in_task_board_view() {
         let mut app = App::new();
         app.active_view = AppView::TaskBoard;
         app.input = "/".to_string();
         app.update_autocomplete_state();
-        assert!(!app.autocomplete_visible);
+        assert!(
+            app.autocomplete_visible,
+            "autocomplete should be visible in TaskBoard when typing /"
+        );
+    }
+
+    #[test]
+    fn test_autocomplete_update_visible_in_task_detail_view() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskDetail("TSK-001".to_string());
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(
+            app.autocomplete_visible,
+            "autocomplete should be visible in TaskDetail when typing /"
+        );
+    }
+
+    #[test]
+    fn test_autocomplete_update_hidden_in_task_graph_view() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskGraph;
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(
+            !app.autocomplete_visible,
+            "autocomplete should be hidden in TaskGraph placeholder view"
+        );
     }
 
     #[test]
