@@ -550,6 +550,20 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 
     let paragraph = Paragraph::new(display).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, input_area);
+
+    // Show the terminal cursor at the current typing position.
+    // Only when the user can type (Resting state, no active modals).
+    if matches!(app.state, AppState::Resting)
+        && app.pending_permission.is_none()
+        && !app.creating_task
+    {
+        let prefix_len: u16 = prefix.len() as u16;
+        let cursor_col = input_area.x + prefix_len + app.input_cursor as u16;
+        let cursor_row = input_area.y;
+        // Clamp cursor to the input area bounds to avoid panics on narrow terminals.
+        let clamped_col = cursor_col.min(input_area.right().saturating_sub(1));
+        frame.set_cursor_position((clamped_col, cursor_row));
+    }
 }
 
 /// Spinner frames for the animated loading indicator.
@@ -2518,6 +2532,87 @@ mod tests {
         assert!(
             cell_str.contains("○ me: hello"),
             "conversation should show user message, got: {cell_str}"
+        );
+    }
+
+    // ── Input cursor visibility tests (COR-162) ──────────────────────────────
+
+    /// Regression test for COR-162: The terminal cursor must be visible and
+    /// positioned at the current typing position when the app is in Resting state.
+    #[test]
+    fn test_input_cursor_visible_at_typing_position() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "hello".to_string();
+        app.input_cursor = 3; // cursor between "hel" and "lo"
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        // Cursor should be positioned at:
+        //   x = input_area.x + prefix_len ("> " = 2) + cursor_offset (3) = 5
+        //   y = input_area.y (first row of input inner area)
+        // Layout: row 0 = tab header, rows 1-19 = content, rows 20-22 = input block.
+        // input_block has Borders::TOP, so inner area starts at row 21.
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            pos.x, 5,
+            "cursor x should be at col 5 (prefix 2 + cursor offset 3), got {}",
+            pos.x
+        );
+        assert_eq!(
+            pos.y, 21,
+            "cursor y should be at input inner area row 21, got {}",
+            pos.y
+        );
+    }
+
+    /// When the input is empty, the cursor should still be visible right after
+    /// the "> " prefix in Resting state.
+    #[test]
+    fn test_input_cursor_visible_when_empty() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+        // Default: input is empty, cursor at 0, state is Resting
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            pos.x, 2,
+            "cursor x should be at col 2 (after '> ' prefix), got {}",
+            pos.x
+        );
+        assert_eq!(
+            pos.y, 21,
+            "cursor y should be at input inner area row 21, got {}",
+            pos.y
+        );
+    }
+
+    /// Cursor should be at the end of typed text when cursor == input.len().
+    #[test]
+    fn test_input_cursor_at_end_of_text() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "test".to_string();
+        app.input_cursor = 4; // at end
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            pos.x, 6,
+            "cursor x should be at col 6 (prefix 2 + text len 4), got {}",
+            pos.x
         );
     }
 }
