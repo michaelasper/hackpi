@@ -306,7 +306,8 @@ async fn main() -> anyhow::Result<()> {
                                 } else if matches!(app.active_view, AppView::TaskDetail(_)) {
                                     app.task_detail_prev();
                                 } else {
-                                    app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                                    app.auto_scroll = false;
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
                                 }
                             }
                             KeyCode::Down => {
@@ -315,7 +316,8 @@ async fn main() -> anyhow::Result<()> {
                                 } else if matches!(app.active_view, AppView::TaskDetail(_)) {
                                     app.task_detail_next();
                                 } else {
-                                    app.scroll_offset = app.scroll_offset.saturating_add(5);
+                                    app.auto_scroll = false;
+                                    app.scroll_offset = app.scroll_offset.saturating_add(3);
                                 }
                             }
                             KeyCode::Enter => {
@@ -346,16 +348,27 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             KeyCode::PageUp => {
-                                app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                                if matches!(app.active_view, AppView::Conversation) {
+                                    app.auto_scroll = false;
+                                }
+                                app.scroll_offset = app.scroll_offset.saturating_sub(10);
                             }
                             KeyCode::PageDown => {
-                                app.scroll_offset = app.scroll_offset.saturating_add(5);
+                                if matches!(app.active_view, AppView::Conversation) {
+                                    app.auto_scroll = false;
+                                }
+                                app.scroll_offset = app.scroll_offset.saturating_add(10);
                             }
                             KeyCode::Home => {
+                                if matches!(app.active_view, AppView::Conversation) {
+                                    app.auto_scroll = false;
+                                }
                                 app.scroll_offset = 0;
                             }
                             KeyCode::End => {
-                                app.scroll_offset = usize::MAX;
+                                if matches!(app.active_view, AppView::Conversation) {
+                                    app.auto_scroll = true;
+                                }
                             }
                             _ => {
                                 if !matches!(app.state, AppState::Generating) {
