@@ -142,6 +142,10 @@ impl Tool for GitHubTool {
                     "type": "boolean",
                     "description": "Create release as prerelease"
                 },
+                "name": {
+                    "type": "string",
+                    "description": "Release name (defaults to tag_name if omitted)"
+                },
                 "tag_name": {
                     "type": "string",
                     "description": "Tag name for release creation"
@@ -478,14 +482,10 @@ impl Tool for GitHubTool {
                         }
                     }
                 };
-                let name = match params.get("name").and_then(|v| v.as_str()) {
-                    Some(n) => n,
-                    None => {
-                        return ToolResult::SystemError {
-                            message: "Missing 'name' parameter for release_create.".into(),
-                        }
-                    }
-                };
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(tag_name);
                 let body = params.get("body").and_then(|v| v.as_str());
                 let draft = params
                     .get("draft")
@@ -1518,6 +1518,54 @@ mod tests {
                 );
             }
             _ => panic!("Expected Success, got: {result:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_create_defaults_name_from_tag_name() {
+        let server = MockServer::start().await;
+        let mut config = test_config();
+        config.github_base_url = server.uri();
+        setup_token_mock(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/releases"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "tag_name": "v2.0.0",
+                "name": "v2.0.0",
+                "body": null,
+                "draft": false,
+                "prerelease": false,
+                "html_url": "https://github.com/owner/repo/releases/tag/v2.0.0",
+                "created_at": "2024-06-01T00:00:00Z",
+                "published_at": "2024-06-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let tool = GitHubTool::new(PathBuf::from("/tmp"), config);
+        // No "name" parameter — should fall back to tag_name
+        let result = tool
+            .execute(
+                json!({
+                    "operation": "release_create",
+                    "owner": "owner",
+                    "repo": "repo",
+                    "tag_name": "v2.0.0",
+                    "draft": false,
+                    "prerelease": false
+                }),
+                &test_ctx(),
+            )
+            .await;
+        match &result {
+            ToolResult::Success { content } => {
+                assert!(
+                    content.contains("Created release v2.0.0"),
+                    "Expected 'Created release v2.0.0' in output, got: {content}"
+                );
+            }
+            _ => panic!("Expected Success when name is omitted, got: {result:?}"),
         }
     }
 
