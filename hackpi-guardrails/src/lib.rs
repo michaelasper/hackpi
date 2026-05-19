@@ -4,6 +4,7 @@ pub mod file_protection;
 pub mod hot_reload;
 pub mod path_guard;
 pub mod pattern;
+pub mod vcs_operation_gate;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +39,7 @@ pub enum GuardType {
     PathAccess,
     CommandGate,
     FileProtection,
+    GitWriteOperation,
 }
 
 impl std::fmt::Display for GuardType {
@@ -46,6 +48,7 @@ impl std::fmt::Display for GuardType {
             GuardType::PathAccess => write!(f, "PathAccess"),
             GuardType::CommandGate => write!(f, "CommandGate"),
             GuardType::FileProtection => write!(f, "FileProtection"),
+            GuardType::GitWriteOperation => write!(f, "GitWriteOperation"),
         }
     }
 }
@@ -157,10 +160,12 @@ impl GuardEvaluator {
 
     /// Check whether a tool call is allowed.
     ///
-    /// Examines the `command` and `path` parameters from the tool call,
-    /// routing them through the appropriate guard components:
+    /// Examines the `command`, `path`, and (for git_write) `operation`
+    /// parameters from the tool call, routing them through the appropriate
+    /// guard components:
     /// - `command` → `command_gate`
     /// - `path` → `file_protection` + `path_guard`
+    /// - `operation` (git_write) → `vcs_operation_gate`
     ///
     /// Returns `Allow` if all guards pass, `Deny` with a reason if any
     /// guard blocks, or `Ask` with a reason if user input is needed.
@@ -203,6 +208,20 @@ impl GuardEvaluator {
             );
             if !matches!(pg_result, GuardResult::Allow) {
                 return pg_result;
+            }
+        }
+
+        // Check git_write operation gate (git_write tool)
+        // Destructive operations like reset --hard, push --force, branch_delete,
+        // merge, rebase, stash_pop, and checkout are guarded even when they
+        // don't carry a guarded command/path parameter.
+        if tool_name.eq_ignore_ascii_case("git_write") {
+            if let Some(operation) = params.get("operation").and_then(|v| v.as_str()) {
+                let result =
+                    vcs_operation_gate::check(operation, params, &self.config_rules, tool_name);
+                if !matches!(result, GuardResult::Allow) {
+                    return result;
+                }
             }
         }
 
@@ -818,6 +837,253 @@ mod tests {
         );
     }
 
+    // ── GitWrite Operation Guardrail Tests ────────────────────────────────
+
+    #[test]
+    fn test_git_write_reset_hard_denied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "operation": "reset",
+            "mode": "hard",
+            "revision": "HEAD~1"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("reset") || msg.contains("destructive"),
+                    "deny msg should mention reset: {msg}"
+                );
+            }
+            other => panic!("expected Deny for git_write reset --hard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_write_force_push_denied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "operation": "push",
+            "force": true,
+            "remote": "origin",
+            "branch": "main"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                let msg_lower = msg.to_lowercase();
+                assert!(
+                    msg_lower.contains("push") || msg_lower.contains("destructive"),
+                    "deny msg should mention push: {msg}"
+                );
+            }
+            other => panic!("expected Deny for git_write push --force, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_write_branch_delete_asks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "operation": "branch_delete",
+            "branch": "old-feature"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Ask(reason) => {
+                assert_eq!(reason.guard, GuardType::GitWriteOperation);
+                assert!(
+                    reason.details.contains("branch_delete"),
+                    "ask msg should mention branch_delete: {}",
+                    reason.details
+                );
+            }
+            other => panic!("expected Ask for git_write branch_delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_write_merge_asks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "operation": "merge",
+            "branch": "feature"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Ask(reason) => {
+                assert_eq!(reason.guard, GuardType::GitWriteOperation);
+                assert!(
+                    reason.details.contains("merge"),
+                    "ask msg should mention merge: {}",
+                    reason.details
+                );
+            }
+            other => panic!("expected Ask for git_write merge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_write_rebase_asks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "operation": "rebase",
+            "onto": "main"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Ask(reason) => {
+                assert_eq!(reason.guard, GuardType::GitWriteOperation);
+                assert!(
+                    reason.details.contains("rebase"),
+                    "ask msg should mention rebase: {}",
+                    reason.details
+                );
+            }
+            other => panic!("expected Ask for git_write rebase, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_write_stash_pop_asks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "operation": "stash_pop",
+            "index": 0
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Ask(reason) => {
+                assert_eq!(reason.guard, GuardType::GitWriteOperation);
+                assert!(
+                    reason.details.contains("stash_pop"),
+                    "ask msg should mention stash_pop: {}",
+                    reason.details
+                );
+            }
+            other => panic!("expected Ask for git_write stash_pop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_write_checkout_asks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({
+            "operation": "checkout",
+            "branch": "main"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Ask(reason) => {
+                assert_eq!(reason.guard, GuardType::GitWriteOperation);
+                assert!(
+                    reason.details.contains("checkout"),
+                    "ask msg should mention checkout: {}",
+                    reason.details
+                );
+            }
+            other => panic!("expected Ask for git_write checkout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_git_write_add_and_commit_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        // add should be allowed (non-destructive)
+        let params = json!({
+            "operation": "add",
+            "paths": ["src/main.rs"]
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        assert_eq!(result, GuardResult::Allow, "add should be allowed");
+
+        // commit should be allowed (non-destructive)
+        let params = json!({
+            "operation": "commit",
+            "message": "fix: something"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        assert_eq!(result, GuardResult::Allow, "commit should be allowed");
+    }
+
+    #[test]
+    fn test_git_write_allow_rule_overrides_destructive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Create config that allows reset
+        // Note: permission string uses "git_write" (underscore) to match
+        // the known tool name in the guard system
+        let hackpi = dir.path().join(".hackpi/guardrails.json");
+        std::fs::create_dir_all(hackpi.parent().unwrap()).expect("create dir");
+        std::fs::write(
+            &hackpi,
+            r#"{"permissions": {"allow": ["git_write(reset)"]}}"#,
+        )
+        .expect("write");
+
+        evaluator.load_rules().expect("load rules");
+
+        let params = json!({
+            "operation": "reset",
+            "mode": "hard",
+            "revision": "HEAD"
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn test_git_write_deny_rule_overrides_default_allow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+
+        // Create config that denies add
+        let hackpi = dir.path().join(".hackpi/guardrails.json");
+        std::fs::create_dir_all(hackpi.parent().unwrap()).expect("create dir");
+        std::fs::write(&hackpi, r#"{"permissions": {"deny": ["git_write(add)"]}}"#).expect("write");
+
+        evaluator.load_rules().expect("load rules");
+
+        let params = json!({
+            "operation": "add",
+            "paths": ["."]
+        });
+        let result = evaluator.check_tool("git_write", &params);
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(msg.contains("add"), "deny msg should mention add: {msg}");
+            }
+            other => panic!("expected Deny for git_write add (config deny), got {other:?}"),
+        }
+    }
+
     // ── GuardType Display Tests ──────────────────────────────────────────
 
     #[test]
@@ -825,6 +1091,10 @@ mod tests {
         assert_eq!(GuardType::PathAccess.to_string(), "PathAccess");
         assert_eq!(GuardType::CommandGate.to_string(), "CommandGate");
         assert_eq!(GuardType::FileProtection.to_string(), "FileProtection");
+        assert_eq!(
+            GuardType::GitWriteOperation.to_string(),
+            "GitWriteOperation"
+        );
     }
 
     // ── append_to_permissions Tests ──────────────────────────────────────

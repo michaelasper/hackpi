@@ -3,7 +3,15 @@ use globset::{Glob, GlobMatcher};
 use std::path::Path;
 
 /// Known tool names recognized by the guard system.
-const KNOWN_TOOLS: &[&str] = &["bash", "read", "write", "edit", "search_grep", "searchgrep"];
+const KNOWN_TOOLS: &[&str] = &[
+    "bash",
+    "read",
+    "write",
+    "edit",
+    "search_grep",
+    "searchgrep",
+    "git_write",
+];
 
 /// Check if a tool name is one of the known tools.
 ///
