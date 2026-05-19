@@ -591,6 +591,13 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
     // Clear the area behind the modal
     frame.render_widget(Clear, modal_area);
 
+    // Compute scroll offset so the selected item stays within the visible window.
+    let scroll_offset = if app.autocomplete_selected >= max_visible {
+        app.autocomplete_selected - max_visible + 1
+    } else {
+        0
+    };
+
     // Build list lines
     let mut lines: Vec<Line> = Vec::new();
 
@@ -602,10 +609,12 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     )));
 
-    // Command items
+    // Command items — render the visible slice [scroll_offset..scroll_offset+display_count]
     let display_count: usize = filtered.len().min(max_visible);
-    for (i, cmd) in filtered.iter().enumerate().take(display_count) {
-        let is_selected = i == app.autocomplete_selected;
+    let visible_slice = filtered.iter().skip(scroll_offset).take(display_count);
+    for (i, cmd) in visible_slice.enumerate() {
+        let actual_index = scroll_offset + i;
+        let is_selected = actual_index == app.autocomplete_selected;
         let cursor = if is_selected { "▸ " } else { "  " };
 
         let cmd_style = if is_selected {
@@ -630,10 +639,17 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
         ]));
     }
 
-    // Hint line
+    // Hint line — show when total filtered items exceed the visible window
     if filtered.len() > max_visible {
+        let remaining = filtered.len().saturating_sub(scroll_offset + max_visible);
+        let before = scroll_offset;
+        let hint = match (before, remaining) {
+            (0, r) => format!("  ↓ {r} more"),
+            (b, 0) => format!("  ↑ {b} above"),
+            (b, r) => format!("  ↑ {b} above · ↓ {r} more"),
+        };
         lines.push(Line::from(Span::styled(
-            format!("  … and {} more", filtered.len() - max_visible),
+            hint,
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -1881,6 +1897,50 @@ mod tests {
         assert!(
             !cell_str.contains("Slash Commands"),
             "autocomplete should not render when not visible"
+        );
+    }
+
+    #[test]
+    fn test_render_autocomplete_modal_scrolls_to_follow_selection() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        // Navigate to the last command (index 10 = /tasks, the 11th item).
+        // With max_visible = 10, this should trigger a scroll so the
+        // selected item is visible while the first item is scrolled out.
+        let filtered = app.filtered_commands();
+        let last_idx = filtered.len() - 1;
+        app.autocomplete_selected = last_idx;
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // The selected command (/tasks) must be visible in the modal
+        let last_cmd = filtered[last_idx].name;
+        assert!(
+            cell_str.contains(last_cmd),
+            "selected command {last_cmd} should be visible after scrolling (buffer len={})",
+            cell_str.len()
+        );
+
+        // The scroll hint should indicate items were scrolled out of view
+        assert!(
+            cell_str.contains("above"),
+            "scroll hint should indicate items above the visible window (buffer len={})",
+            cell_str.len()
         );
     }
 
