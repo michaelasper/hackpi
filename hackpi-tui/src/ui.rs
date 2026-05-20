@@ -10,8 +10,60 @@ use ratatui::{
 
 use crate::app::App;
 
-pub fn render(frame: &mut Frame, app: &App) {
-    let area = frame.area();
+// ── Minimum terminal size gate ──────────────────────────────────────────────
+
+/// Minimum terminal width required for the TUI to render properly.
+pub const MIN_TERMINAL_WIDTH: u16 = 80;
+/// Minimum terminal height required for the TUI to render properly.
+pub const MIN_TERMINAL_HEIGHT: u16 = 24;
+
+/// Returns `true` if the terminal is too small to render the full TUI layout.
+///
+/// When too small, callers should render [`render_too_small`] instead of the
+/// normal layout to avoid clipping, overlapping, or panics.
+pub fn is_too_small(area: Rect) -> bool {
+    area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT
+}
+
+/// Renders a centered "terminal too small" message.
+///
+/// Displays the minimum required dimensions and the current terminal size so
+/// the user knows how much they need to resize.
+pub fn render_too_small(frame: &mut Frame, area: Rect) {
+    let text = format!(
+        "Terminal too small\n\
+         Minimum: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\n\
+         Current: {}x{}",
+        area.width, area.height
+    );
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().fg(Color::Red))
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, area);
+}
+
+// ── Root layout helper ─────────────────────────────────────────────────────
+
+/// The four major screen regions produced by [`split_root`].
+pub struct RootLayout {
+    /// Tab header row (height 1).
+    pub header: Rect,
+    /// Main content area (fills remaining vertical space).
+    pub main: Rect,
+    /// Input area (height 3).
+    pub input: Rect,
+    /// Status bar row (height 1).
+    pub status: Rect,
+}
+
+/// Split the full terminal area into the four standard TUI regions.
+///
+/// Layout (top to bottom):
+/// 1. Tab header (1 line)
+/// 2. Main content (fills remaining)
+/// 3. Input area (3 lines)
+/// 4. Status bar (1 line)
+pub fn split_root(area: Rect) -> RootLayout {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -22,28 +74,102 @@ pub fn render(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    render_tab_header(frame, chunks[0], &app.active_view, app);
+    RootLayout {
+        header: chunks[0],
+        main: chunks[1],
+        input: chunks[2],
+        status: chunks[3],
+    }
+}
+
+// ── Responsive modal helpers ───────────────────────────────────────────────
+
+/// Return a rect of the given percentage of `area`, centered within it.
+///
+/// Both `width_pct` and `height_pct` are clamped to `[1, 100]`. The returned
+/// rect is guaranteed to fit within `area`.
+pub fn centered_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
+    let w_pct = width_pct.clamp(1, 100);
+    let h_pct = height_pct.clamp(1, 100);
+
+    let width = (area.width * w_pct / 100).max(1);
+    let height = (area.height * h_pct / 100).max(1);
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Return a responsive modal rect that is a percentage of `area`, capped at
+/// `preferred_{width,height}`, and never exceeds `area`'s dimensions.
+///
+/// Use this for modals that should scale with the terminal but not exceed a
+/// comfortable maximum size.
+pub fn modal_rect(
+    area: Rect,
+    preferred_width: u16,
+    preferred_height: u16,
+    width_pct: u16,
+    height_pct: u16,
+) -> Rect {
+    let max_w = (area.width * width_pct / 100).max(1);
+    let max_h = (area.height * height_pct / 100).max(1);
+
+    let width = preferred_width.min(max_w).min(area.width);
+    let height = preferred_height.min(max_h).min(area.height);
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+// ── Main render entry point ────────────────────────────────────────────────
+
+pub fn render(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    // Gate: if terminal is too small, show resize message instead of layout
+    if is_too_small(area) {
+        render_too_small(frame, area);
+        return;
+    }
+
+    let root = split_root(area);
+
+    render_tab_header(frame, root.header, &app.active_view, app);
 
     match &app.active_view {
         AppView::Conversation => {
-            render_conversation(frame, chunks[1], app);
+            render_conversation(frame, root.main, app);
         }
         AppView::TaskDetail(_) => {
-            render_task_detail(frame, chunks[1], app);
+            render_task_detail(frame, root.main, app);
         }
         AppView::TaskBoard => {
-            render_task_board(frame, chunks[1], app);
+            render_task_board(frame, root.main, app);
         }
         AppView::TaskGraph => {
-            render_placeholder(frame, chunks[1], "Graph view coming soon...");
+            render_placeholder(frame, root.main, "Graph view coming soon...");
         }
     }
 
-    render_input(frame, chunks[2], app);
-    render_status(frame, chunks[3], app);
+    render_input(frame, root.input, app);
+    render_status(frame, root.status, app);
 
     if app.autocomplete_visible {
-        render_autocomplete_modal(frame, chunks[2], app);
+        render_autocomplete_modal(frame, root.input, app);
     }
 
     if app.pending_permission.is_some() {
@@ -51,7 +177,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     if app.creating_task {
-        render_task_create_prompt(frame, chunks[2], app);
+        render_task_create_prompt(frame, root.input, app);
     }
 
     if app.help_visible {
@@ -627,10 +753,9 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         AppState::Interrupted => Style::default().fg(Color::Red),
     };
 
-    frame.render_widget(
-        Paragraph::new(text).style(style).wrap(Wrap { trim: true }),
-        area,
-    );
+    // Use Line::raw (no wrapping) so the status bar never wraps to the next
+    // line, which would overlap with other layout regions on narrow terminals.
+    frame.render_widget(Paragraph::new(Line::from(text)).style(style), area);
 }
 
 /// Render the slash command autocomplete popover above the input area.
@@ -663,8 +788,9 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
     // Height: top border (1) + title (1) + items + optional "more" (1) + hint (1) + bottom border (1)
     let modal_height = (item_count + 5).min(16) as u16;
 
-    // Position above the input area, indented from the left, clamped to top of screen
-    let x = input_area.x + 2;
+    // Position above the input area, indented from the left, clamped to top of screen.
+    // Clamp x so the modal doesn't overflow the right edge of the terminal.
+    let x = (input_area.x + 2).min(frame_area.width.saturating_sub(modal_width));
     let y = input_area.y.saturating_sub(modal_height).max(1); // leave room for tab header
 
     let modal_area = Rect {
@@ -767,6 +893,16 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
     frame.render_widget(paragraph, modal_area);
 }
 
+/// Truncate a string to at most `max_len` characters, appending "…" if truncated.
+fn truncate_for_display(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
+}
+
 #[allow(clippy::vec_init_then_push)]
 fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
     let prompt = match &app.pending_permission {
@@ -774,23 +910,34 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
         None => return,
     };
 
-    // Modal dimensions: 60 chars wide, proportional height
-    let modal_width = 60;
-    let modal_height = 15;
-    let x = (area.width.saturating_sub(modal_width)) / 2;
-    let y = (area.height.saturating_sub(modal_height)) / 2;
-    let modal_area = Rect {
-        x,
-        y,
-        width: modal_width.min(area.width),
-        height: modal_height.min(area.height),
-    };
+    // Responsive modal sizing: 70% of terminal width/height, capped at 60x15
+    let modal_area = modal_rect(area, 60, 15, 70, 70);
 
     // Clear the area behind the modal
     frame.render_widget(Clear, modal_area);
 
     let reason = &prompt.reason;
     let guard_name = format!("{}", reason.guard);
+
+    // Determine usable width inside borders (2 chars for left/right borders)
+    let content_width = modal_area.width.saturating_sub(2) as usize;
+
+    // Truncate long values to avoid overflowing the modal
+    let details_truncated = if content_width > 10 {
+        truncate_for_display(&reason.details, content_width.saturating_sub(10))
+    } else {
+        truncate_for_display(&reason.details, 20)
+    };
+    let tool_truncated = if content_width > 8 {
+        truncate_for_display(&reason.tool, content_width.saturating_sub(8))
+    } else {
+        truncate_for_display(&reason.tool, 20)
+    };
+    let guard_truncated = if content_width > 8 {
+        truncate_for_display(&guard_name, content_width.saturating_sub(8))
+    } else {
+        truncate_for_display(&guard_name, 20)
+    };
 
     // Build modal content lines
     let mut lines: Vec<Line> = Vec::new();
@@ -802,19 +949,19 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
     )));
     lines.push(Line::from(""));
 
-    // Details
+    // Details (truncated to modal width)
     lines.push(Line::from(vec![
         Span::styled(" Pattern: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(&reason.details),
+        Span::raw(details_truncated),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(" Tool: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(&reason.tool),
+        Span::raw(tool_truncated),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" Guard: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(&guard_name),
+        Span::raw(guard_truncated),
     ]));
     lines.push(Line::from(""));
 
@@ -906,20 +1053,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let context = app_key_context(app);
     let bindings = super::interaction::help_bindings(context);
 
-    // Modal dimensions
-    let modal_width = 60u16;
-    // Height: top border (1) + title (1) + empty (1) + bindings + bottom border (1)
+    // Responsive modal: 70% width, capped at 60. Height adapts to content.
     let binding_count = bindings.len() as u16;
-    let modal_height = (binding_count + 4).clamp(8, 24);
-
-    let x = (area.width.saturating_sub(modal_width)) / 2;
-    let y = (area.height.saturating_sub(modal_height)) / 2;
-    let modal_area = Rect {
-        x,
-        y,
-        width: modal_width.min(area.width),
-        height: modal_height.min(area.height),
-    };
+    let preferred_height = (binding_count + 4).clamp(8, 24);
+    let modal_area = modal_rect(area, 60, preferred_height, 70, 70);
 
     frame.render_widget(Clear, modal_area);
 
@@ -2256,13 +2393,14 @@ mod tests {
     #[test]
     fn test_conversation_many_messages_auto_shows_latest() {
         use ratatui::backend::TestBackend;
-        // Use a small terminal to force scrolling
-        let backend = TestBackend::new(80, 10);
+        // Use minimum valid terminal size; content area is ~19 rows.
+        // 20 messages with prefix + number + empty line = ~80 lines → overflows.
+        let backend = TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
         let mut app = App::new();
 
-        // Add enough messages to overflow the small area
+        // Add enough messages to overflow the area
         for i in 0..20 {
             app.handle_event(TuiEvent::Submit(format!("message number {i}")));
             app.handle_event(TuiEvent::Done);
@@ -2291,7 +2429,8 @@ mod tests {
     #[test]
     fn test_conversation_manual_scroll_prevents_auto_scroll() {
         use ratatui::backend::TestBackend;
-        let backend = TestBackend::new(80, 10);
+        // Minimum valid terminal size. Content area is ~19 rows.
+        let backend = TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
         let mut app = App::new();
@@ -2747,6 +2886,481 @@ mod tests {
             pos.x, 6,
             "cursor x should be at col 6 (prefix 2 + text len 4), got {}",
             pos.x
+        );
+    }
+
+    // ── COR-277: Terminal size gate tests ────────────────────────────────────
+
+    #[test]
+    fn test_is_too_small_returns_true_for_small_terminal() {
+        let area_60x20 = Rect::new(0, 0, 60, 20);
+        assert!(
+            is_too_small(area_60x20),
+            "60x20 should be too small (width < 80)"
+        );
+
+        let area_80x20 = Rect::new(0, 0, 80, 20);
+        assert!(
+            is_too_small(area_80x20),
+            "80x20 should be too small (height < 24)"
+        );
+
+        let area_60x24 = Rect::new(0, 0, 60, 24);
+        assert!(
+            is_too_small(area_60x24),
+            "60x24 should be too small (width < 80)"
+        );
+    }
+
+    #[test]
+    fn test_is_too_small_returns_false_for_minimum_terminal() {
+        let area_80x24 = Rect::new(0, 0, 80, 24);
+        assert!(!is_too_small(area_80x24), "80x24 should be large enough");
+    }
+
+    #[test]
+    fn test_is_too_small_returns_false_for_large_terminal() {
+        let area_120x40 = Rect::new(0, 0, 120, 40);
+        assert!(!is_too_small(area_120x40), "120x40 should be large enough");
+
+        let area_200x60 = Rect::new(0, 0, 200, 60);
+        assert!(!is_too_small(area_200x60), "200x60 should be large enough");
+    }
+
+    #[test]
+    fn test_render_too_small_shows_resize_message() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Terminal too small"),
+            "should show resize message on small terminal, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("80x24"),
+            "should show minimum dimensions, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("60x20"),
+            "should show current dimensions, got: {cell_str}"
+        );
+        // Normal UI content should NOT appear
+        assert!(
+            !cell_str.contains("Conversation"),
+            "should NOT render tabs when terminal is too small"
+        );
+    }
+
+    #[test]
+    fn test_render_at_80x24_shows_normal_ui() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Conversation"),
+            "80x24 should render tabs: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("type a message"),
+            "80x24 should render input placeholder: {cell_str}"
+        );
+        assert!(
+            !cell_str.contains("Terminal too small"),
+            "80x24 should NOT show resize message"
+        );
+    }
+
+    #[test]
+    fn test_render_at_120x40_shows_normal_ui() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Conversation"),
+            "120x40 should render tabs: {cell_str}"
+        );
+        assert!(
+            !cell_str.contains("Terminal too small"),
+            "120x40 should NOT show resize message"
+        );
+    }
+
+    #[test]
+    fn test_render_at_200x60_shows_normal_ui() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(200, 60);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Conversation"),
+            "200x60 should render tabs: {cell_str}"
+        );
+        assert!(
+            !cell_str.contains("Terminal too small"),
+            "200x60 should NOT show resize message"
+        );
+    }
+
+    // ── COR-277: Responsive modal helper tests ───────────────────────────────
+
+    #[test]
+    fn test_centered_rect_fits_within_area() {
+        let area = Rect::new(0, 0, 100, 50);
+        let centered = centered_rect(area, 50, 50);
+
+        // Centered rect should be fully inside the parent area
+        assert!(
+            centered.x >= area.x,
+            "centered x={} should be >= area.x={}",
+            centered.x,
+            area.x
+        );
+        assert!(
+            centered.y >= area.y,
+            "centered y={} should be >= area.y={}",
+            centered.y,
+            area.y
+        );
+        assert!(
+            centered.right() <= area.right(),
+            "centered right={} should be <= area.right={}",
+            centered.right(),
+            area.right()
+        );
+        assert!(
+            centered.bottom() <= area.bottom(),
+            "centered bottom={} should be <= area.bottom={}",
+            centered.bottom(),
+            area.bottom()
+        );
+
+        // With 50% of 100 = 50
+        assert_eq!(centered.width, 50, "50% of 100 width should be 50");
+        assert_eq!(centered.height, 25, "50% of 50 height should be 25");
+        assert_eq!(centered.x, 25, "centered x should be 25");
+        assert_eq!(centered.y, 12, "centered y should be 12 (integer division)");
+    }
+
+    #[test]
+    fn test_centered_rect_100_percent_is_full_area() {
+        let area = Rect::new(0, 0, 80, 24);
+        let centered = centered_rect(area, 100, 100);
+        assert_eq!(centered, area, "100% centered rect should equal area");
+    }
+
+    #[test]
+    fn test_modal_rect_respects_preferred_size() {
+        // On a large terminal, the preferred size should be used
+        let area = Rect::new(0, 0, 200, 80);
+        let modal = modal_rect(area, 60, 15, 70, 70);
+        assert_eq!(
+            modal.width, 60,
+            "on large terminal, should use preferred width of 60"
+        );
+        assert_eq!(
+            modal.height, 15,
+            "on large terminal, should use preferred height of 15"
+        );
+        assert!(modal.x > 0, "modal should be centered (x={})", modal.x);
+        assert!(modal.y > 0, "modal should be centered (y={})", modal.y);
+    }
+
+    #[test]
+    fn test_modal_rect_scales_down_on_small_terminal() {
+        // On a small terminal where 70% is less than preferred, should use percentage
+        let area = Rect::new(0, 0, 50, 20);
+        let modal = modal_rect(area, 60, 15, 70, 70);
+        // 70% of 50 = 35, which is < 60
+        assert_eq!(
+            modal.width, 35,
+            "on narrow terminal, width should be 70% of area"
+        );
+        // 70% of 20 = 14, which is < 15
+        assert_eq!(
+            modal.height, 14,
+            "on short terminal, height should be 70% of area"
+        );
+    }
+
+    #[test]
+    fn test_modal_rect_never_exceeds_area() {
+        let area = Rect::new(0, 0, 10, 5);
+        let modal = modal_rect(area, 60, 15, 100, 100);
+        assert!(
+            modal.width <= area.width,
+            "width={} should not exceed area width={}",
+            modal.width,
+            area.width
+        );
+        assert!(
+            modal.height <= area.height,
+            "height={} should not exceed area height={}",
+            modal.height,
+            area.height
+        );
+    }
+
+    // ── COR-277: Permission modal with long field values tests ───────────────
+
+    #[test]
+    fn test_truncate_for_display_short_string() {
+        assert_eq!(truncate_for_display("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_for_display_exact_fit() {
+        assert_eq!(truncate_for_display("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_for_display_long_string() {
+        let result = truncate_for_display("a very long string that should be truncated", 10);
+        assert_eq!(
+            result.chars().count(),
+            10,
+            "truncated string should be 10 chars"
+        );
+        assert!(
+            result.ends_with('…'),
+            "truncated string should end with …: {result}"
+        );
+    }
+
+    #[test]
+    fn test_truncate_for_display_empty_string() {
+        assert_eq!(truncate_for_display("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_for_display_zero_max() {
+        let result = truncate_for_display("hello", 0);
+        assert_eq!(result, "…", "zero max should just return …");
+    }
+
+    #[test]
+    fn test_truncate_for_display_one_char_max() {
+        let result = truncate_for_display("hello", 1);
+        assert_eq!(result, "…", "1 char max should return …");
+    }
+
+    #[test]
+    fn test_render_permission_modal_truncates_long_values() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let very_long_details = "a".repeat(200);
+        let very_long_tool = "b".repeat(100);
+        let reason = hackpi_guardrails::GuardReason {
+            guard: hackpi_guardrails::GuardType::CommandGate,
+            tool: very_long_tool,
+            details: very_long_details,
+        };
+
+        let mut app = App::new();
+        app.pending_permission = Some(crate::app::PermissionPrompt {
+            id: 1,
+            reason,
+            response: Some(tx),
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Permission Required"),
+            "modal should show title"
+        );
+        assert!(
+            cell_str.contains("Allow once"),
+            "modal should show Allow once option"
+        );
+        // The long values should be truncated (there should be no 200 consecutive 'a's)
+        assert!(
+            !cell_str.contains(&"a".repeat(100)),
+            "long details should be truncated"
+        );
+        assert!(
+            !cell_str.contains(&"b".repeat(50)),
+            "long tool name should be truncated"
+        );
+    }
+
+    // ── COR-277: Autocomplete bounds at narrow widths tests ───────────────────
+
+    #[test]
+    fn test_render_autocomplete_at_narrow_width_does_not_panic() {
+        use ratatui::backend::TestBackend;
+        // Even at 80x24 minimum, autocomplete should not panic
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        // Should not panic
+        terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn test_render_autocomplete_at_very_narrow_width_does_not_panic() {
+        use ratatui::backend::TestBackend;
+        // 81x24 - just above minimum, autocomplete should not cause overflow panics
+        let backend = TestBackend::new(81, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        // Should not panic
+        terminal.draw(|f| render(f, &app)).unwrap();
+    }
+
+    // ── COR-277: split_root layout tests ─────────────────────────────────────
+
+    #[test]
+    fn test_split_root_returns_correct_regions() {
+        let area = Rect::new(0, 0, 80, 24);
+        let root = split_root(area);
+
+        // Header should be 1 row
+        assert_eq!(root.header.height, 1);
+        assert_eq!(root.header.x, 0);
+        assert_eq!(root.header.y, 0);
+
+        // Status should be last row
+        assert_eq!(root.status.height, 1);
+        assert_eq!(root.status.y, 23);
+
+        // Input should be 3 rows
+        assert_eq!(root.input.height, 3);
+
+        // Main should fill remaining (24 - 1 - 3 - 1 = 19)
+        assert_eq!(root.main.height, 19);
+
+        // All regions should have the full width
+        assert_eq!(root.header.width, 80);
+        assert_eq!(root.main.width, 80);
+        assert_eq!(root.input.width, 80);
+        assert_eq!(root.status.width, 80);
+    }
+
+    // ── COR-277: Status bar does not wrap tests ──────────────────────────────
+
+    #[test]
+    fn test_render_status_no_wrap_at_narrow_width() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let app = App::new();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        // Status bar is at row 23 (0-indexed, last row)
+        let buffer = terminal.backend().buffer();
+        let row_23_start = 23 * 80;
+        let status_row: String = buffer.content[row_23_start..row_23_start + 80]
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        // The status bar should contain binding hints
+        assert!(
+            status_row.contains("Interrupt generation"),
+            "status bar should show bindings, got: {status_row:?}"
+        );
+
+        // The status bar should NOT contain newlines (indicates wrapping)
+        assert!(
+            !status_row.contains('\n'),
+            "status bar should not have newlines"
+        );
+    }
+
+    // ── COR-277: Help overlay responsive sizing tests ────────────────────────
+
+    #[test]
+    fn test_render_help_overlay_uses_responsive_sizing() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.help_visible = true;
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+        assert!(
+            cell_str.contains("Help"),
+            "help overlay should show, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("Ctrl+C"),
+            "help overlay should show Ctrl+C"
+        );
+        assert!(
+            cell_str.contains("Ctrl+D"),
+            "help overlay should show Ctrl+D"
         );
     }
 }
