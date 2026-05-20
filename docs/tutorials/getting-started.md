@@ -32,14 +32,17 @@ export PATH="$PATH:/usr/local/bin"
 hackpi connects to a local LLM. Set the endpoint environment variable:
 
 ```bash
-export HACKPI_ENDPOINT=http://localhost:11434/api/chat
-export HACKPI_MODEL=llama3.2
+export HACKPI_ENDPOINT=http://localhost:8080/v1/messages
+export HACKPI_MODEL=deepseek-v4-flash
 export HACKPI_MAX_TOKENS=4096
 ```
 
 Add these lines to your shell profile (`~/.bashrc` or `~/.zshrc`) so they persist.
 
-If you are running ds4-server on a different host or port, adjust `HACKPI_ENDPOINT` accordingly.
+If you are using an Ollama server instead, you will need a proxy that translates
+the Ollama `/api/chat` format into the Anthropic `/v1/messages` format hackpi
+expects (e.g., [litellm](https://github.com/BerriAI/litellm) with
+`--model ollama/llama3.2 --port 8080`).
 
 ## Step 3 — Launch hackpi
 
