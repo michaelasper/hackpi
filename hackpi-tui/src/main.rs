@@ -218,20 +218,76 @@ async fn main() -> anyhow::Result<()> {
                 if let Event::Key(key) = key_event {
                     // If a permission prompt is active, intercept all keys
                     if app.pending_permission.is_some() {
-                        let decision = match key.code {
-                            KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
-                            KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
-                            KeyCode::Char('3') => Some(PermissionDecision::Deny),
-                            KeyCode::Char('4') => Some(PermissionDecision::AlwaysAllow),
-                            KeyCode::Char('5') => Some(PermissionDecision::AlwaysDeny),
-                            KeyCode::Esc => Some(PermissionDecision::Deny),
-                            _ => None,
-                        };
-
-                        if let Some(decision) = decision {
-                            if let Some(mut prompt) = app.pending_permission.take() {
-                                if let Some(sender) = prompt.response.take() {
-                                    sender.send(decision).ok();
+                        // Handle two-step confirmation for "Always allow"
+                        match key.code {
+                            KeyCode::Char('4') => {
+                                if app
+                                    .pending_permission
+                                    .as_ref()
+                                    .is_some_and(|p| p.confirming_always_allow)
+                                {
+                                    // Second press: confirm AlwaysAllow
+                                    if let Some(mut prompt) = app.pending_permission.take() {
+                                        if let Some(sender) = prompt.response.take() {
+                                            sender.send(PermissionDecision::AlwaysAllow).ok();
+                                        }
+                                    }
+                                } else {
+                                    // First press: show confirmation prompt
+                                    if let Some(ref mut prompt) = app.pending_permission {
+                                        prompt.confirming_always_allow = true;
+                                    }
+                                }
+                            }
+                            KeyCode::Char('1') => {
+                                if let Some(mut prompt) = app.pending_permission.take() {
+                                    if let Some(sender) = prompt.response.take() {
+                                        sender.send(PermissionDecision::AllowOnce).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('2') => {
+                                if let Some(mut prompt) = app.pending_permission.take() {
+                                    if let Some(sender) = prompt.response.take() {
+                                        sender.send(PermissionDecision::AllowSession).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('3') => {
+                                if let Some(mut prompt) = app.pending_permission.take() {
+                                    if let Some(sender) = prompt.response.take() {
+                                        sender.send(PermissionDecision::Deny).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('5') => {
+                                if let Some(mut prompt) = app.pending_permission.take() {
+                                    if let Some(sender) = prompt.response.take() {
+                                        sender.send(PermissionDecision::AlwaysDeny).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if let Some(ref mut prompt) = app.pending_permission {
+                                    if prompt.confirming_always_allow {
+                                        // Cancel confirmation mode, return to original prompt
+                                        prompt.confirming_always_allow = false;
+                                    } else {
+                                        // Normal Esc = deny
+                                        if let Some(mut prompt) = app.pending_permission.take() {
+                                            if let Some(sender) = prompt.response.take() {
+                                                sender.send(PermissionDecision::Deny).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Any other key cancels confirmation mode
+                                if let Some(ref mut prompt) = app.pending_permission {
+                                    if prompt.confirming_always_allow {
+                                        prompt.confirming_always_allow = false;
+                                    }
                                 }
                             }
                         }

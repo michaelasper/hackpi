@@ -1028,8 +1028,8 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App, theme: &The
         None => return,
     };
 
-    // Responsive modal sizing: 70% of terminal width/height, capped at 60x15
-    let modal_area = modal_rect(area, 60, 15, 70, 70);
+    // Responsive modal sizing: 85% of terminal width/height, capped at 60x20
+    let modal_area = modal_rect(area, 60, 20, 85, 85);
 
     // Clear the area behind the modal
     frame.render_widget(Clear, modal_area);
@@ -1072,32 +1072,68 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App, theme: &The
         Span::styled(" Pattern: ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(details_truncated),
     ]));
-    lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(" Tool: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" Tool:    ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(tool_truncated),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(" Guard: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" Guard:   ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(guard_truncated),
     ]));
     lines.push(Line::from(""));
 
-    // Options
+    // ── Group 1: This request (one-off decisions) ──────────────────
     lines.push(Line::from(Span::styled(
-        " [1] Allow once           [3] Deny",
+        " This request",
+        theme.fg_default.add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "   [1] Allow once",
         theme.status_warning,
     )));
     lines.push(Line::from(Span::styled(
-        " [2] Allow session        [4] Always allow",
-        theme.status_warning,
-    )));
-    lines.push(Line::from(Span::styled(
-        "                         [5] Always deny",
+        "   [3] Deny",
         theme.status_warning,
     )));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" [Esc] to cancel", theme.fg_muted)));
+
+    // ── Group 2: This session ──────────────────────────────────────
+    lines.push(Line::from(Span::styled(" This session", theme.fg_emphasis)));
+    lines.push(Line::from(Span::styled(
+        "   [2] Allow until exit",
+        theme.fg_emphasis,
+    )));
+    lines.push(Line::from(""));
+
+    // ── Group 3: Persistent rule ───────────────────────────────────
+    if prompt.confirming_always_allow {
+        // Two-step confirmation state: show confirmation prompt
+        lines.push(Line::from(Span::styled(
+            " Persistent rule (saved to guardrails config)",
+            theme.status_warning.add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "   [4] Press 4 again to confirm persistent allow",
+            theme.status_warning.add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " Persistent rule (saved to guardrails config)",
+            theme.status_warning.add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "   [4] Always allow this pattern",
+            theme.status_warning,
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "   [5] Always deny this pattern",
+        theme.status_warning,
+    )));
+    lines.push(Line::from(""));
+
+    // Esc hint
+    lines.push(Line::from(Span::styled(" [Esc] Cancel", theme.fg_muted)));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1494,6 +1530,7 @@ mod tests {
             id: 1,
             reason,
             response: Some(tx),
+            confirming_always_allow: false,
         });
 
         // render() should not panic even with a pending permission prompt
@@ -1516,8 +1553,8 @@ mod tests {
             "modal should show Allow once option"
         );
         assert!(
-            cell_str.contains("Allow session"),
-            "modal should show Allow session option"
+            cell_str.contains("Allow until exit"),
+            "modal should show Allow until exit option"
         );
         assert!(cell_str.contains("Deny"), "modal should show Deny option");
         assert!(
@@ -1531,6 +1568,220 @@ mod tests {
         assert!(
             cell_str.contains("Esc"),
             "modal should show Esc key binding"
+        );
+    }
+
+    #[test]
+    fn test_render_permission_modal_shows_this_request_group() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let reason = hackpi_guardrails::GuardReason {
+            guard: hackpi_guardrails::GuardType::CommandGate,
+            tool: "bash".into(),
+            details: "ls -la".into(),
+        };
+
+        let mut app = App::new();
+        app.pending_permission = Some(crate::app::PermissionPrompt {
+            id: 1,
+            reason,
+            response: Some(tx),
+            confirming_always_allow: false,
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // "This request" group contains Allow once and Deny
+        assert!(
+            cell_str.contains("This request"),
+            "modal should show 'This request' heading"
+        );
+        assert!(
+            cell_str.contains("[1] Allow once"),
+            "modal should show [1] Allow once"
+        );
+        assert!(cell_str.contains("[3] Deny"), "modal should show [3] Deny");
+        assert!(
+            cell_str.contains("[2] Allow until exit"),
+            "modal should show [2] Allow until exit"
+        );
+        assert!(
+            cell_str.contains("[4] Always allow"),
+            "modal should show [4] Always allow this pattern"
+        );
+        assert!(
+            cell_str.contains("[5] Always deny"),
+            "modal should show [5] Always deny this pattern"
+        );
+        assert!(
+            cell_str.contains("[Esc] Cancel"),
+            "modal should show [Esc] Cancel"
+        );
+    }
+
+    #[test]
+    fn test_render_permission_modal_shows_confirmation_when_confirming() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let reason = hackpi_guardrails::GuardReason {
+            guard: hackpi_guardrails::GuardType::CommandGate,
+            tool: "bash".into(),
+            details: "rm -rf /".into(),
+        };
+
+        let mut app = App::new();
+        app.pending_permission = Some(crate::app::PermissionPrompt {
+            id: 1,
+            reason,
+            response: Some(tx),
+            confirming_always_allow: true, // User pressed 4 once
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // Confirmation text should appear instead of normal "Always allow"
+        assert!(
+            cell_str.contains("Press 4 again"),
+            "modal should show confirmation prompt when confirming_always_allow is true"
+        );
+        assert!(
+            !cell_str.contains("Always allow this pattern"),
+            "modal should NOT show normal 'Always allow' text during confirmation"
+        );
+        // Other options should still be present
+        assert!(
+            cell_str.contains("[1] Allow once"),
+            "other options should still be visible during confirmation"
+        );
+        assert!(
+            cell_str.contains("[3] Deny"),
+            "Deny should still be visible during confirmation"
+        );
+        assert!(
+            cell_str.contains("[5] Always deny"),
+            "Always deny should still be visible during confirmation"
+        );
+    }
+
+    #[test]
+    fn test_render_permission_modal_shows_all_groups_at_80x24() {
+        use ratatui::backend::TestBackend;
+        // 80x24 is the minimum supported terminal size
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let reason = hackpi_guardrails::GuardReason {
+            guard: hackpi_guardrails::GuardType::FileProtection,
+            tool: "read".into(),
+            details: ".env".into(),
+        };
+
+        let mut app = App::new();
+        app.pending_permission = Some(crate::app::PermissionPrompt {
+            id: 1,
+            reason,
+            response: Some(tx),
+            confirming_always_allow: false,
+        });
+
+        // Must not panic at 80x24
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // All groups must be visible
+        assert!(
+            cell_str.contains("Permission Required"),
+            "modal title should be visible at 80x24"
+        );
+        assert!(
+            cell_str.contains("This request"),
+            "'This request' group should be visible at 80x24"
+        );
+        assert!(
+            cell_str.contains("This session"),
+            "'This session' group should be visible at 80x24"
+        );
+        assert!(
+            cell_str.contains("Persistent rule"),
+            "'Persistent rule' group should be visible at 80x24"
+        );
+        assert!(
+            cell_str.contains("Esc"),
+            "Esc hint should be visible at 80x24"
+        );
+    }
+
+    #[test]
+    fn test_render_permission_modal_long_values_truncated_at_80x24() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let long_details = "x".repeat(300);
+        let long_tool = "y".repeat(100);
+        let reason = hackpi_guardrails::GuardReason {
+            guard: hackpi_guardrails::GuardType::PathAccess,
+            tool: long_tool,
+            details: long_details,
+        };
+
+        let mut app = App::new();
+        app.pending_permission = Some(crate::app::PermissionPrompt {
+            id: 1,
+            reason,
+            response: Some(tx),
+            confirming_always_allow: false,
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // Very long values should not appear in full
+        assert!(
+            !cell_str.contains(&"x".repeat(100)),
+            "long details should be truncated"
+        );
+        assert!(
+            !cell_str.contains(&"y".repeat(50)),
+            "long tool name should be truncated"
         );
     }
 
@@ -3354,6 +3605,7 @@ mod tests {
             id: 1,
             reason,
             response: Some(tx),
+            confirming_always_allow: false,
         });
 
         terminal.draw(|f| render(f, &app)).unwrap();

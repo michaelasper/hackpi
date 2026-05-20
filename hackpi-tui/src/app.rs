@@ -11,6 +11,9 @@ pub struct PermissionPrompt {
     pub id: u64,
     pub reason: GuardReason,
     pub response: Option<tokio::sync::oneshot::Sender<PermissionDecision>>,
+    /// When `true`, the user has pressed [4] once and must press it again
+    /// to confirm `AlwaysAllow`. Set to `false` on any other key press.
+    pub confirming_always_allow: bool,
 }
 
 impl std::fmt::Debug for PermissionPrompt {
@@ -19,6 +22,7 @@ impl std::fmt::Debug for PermissionPrompt {
             .field("id", &self.id)
             .field("reason", &self.reason)
             .field("response", &self.response.as_ref().map(|_| "Sender<..>"))
+            .field("confirming_always_allow", &self.confirming_always_allow)
             .finish()
     }
 }
@@ -372,6 +376,7 @@ impl App {
                     id,
                     reason,
                     response: Some(response),
+                    confirming_always_allow: false,
                 });
             }
         }
@@ -1190,6 +1195,9 @@ fn recovery_hint_for_error(err: &str) -> Option<String> {
 
 /// Map a key character to a `PermissionDecision`, matching the key bindings
 /// used in the TUI event loop when a permission prompt is active.
+///
+/// Note: This does NOT handle the two-step confirmation for Always allow
+/// (key '4'), which is implemented in the event loop in main.rs.
 pub fn permission_decision_from_key(c: char) -> Option<PermissionDecision> {
     match c {
         '1' => Some(PermissionDecision::AllowOnce),
