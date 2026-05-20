@@ -551,6 +551,10 @@ pub const SLASH_COMMANDS: &[CommandInfo] = &[
         name: "/tasks",
         description: "Alias for /task list",
     },
+    CommandInfo {
+        name: "/export",
+        description: "Export conversation to text file",
+    },
 ];
 
 /// Return all slash commands whose name starts with the given filter text (case-insensitive).
@@ -649,7 +653,8 @@ Available commands:
    /task unblock <id> <blocked_by> - Remove blocking dependency
    /task label <id> <label> - Add a label to a task
    /task assign <id> <assignee> - Assign task to someone
-   /tasks - Alias for /task list";
+   /tasks - Alias for /task list
+   /export [path] - Export conversation to text file";
             tui_tx
                 .send(TuiEvent::StreamChunk(help_text.to_string()))
                 .ok();
@@ -848,6 +853,45 @@ Guardrails Onboarding Presets:
                 }
             }
         }
+        "/export" => {
+            let custom_path = parts.get(1).copied().unwrap_or("").trim();
+
+            let export_path = if custom_path.is_empty() {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                format!("./hackpi-export-{timestamp}.txt")
+            } else {
+                custom_path.to_string()
+            };
+
+            let formatted = format_conversation(&app.conversation);
+            match std::fs::write(&export_path, &formatted) {
+                Ok(_) => {
+                    let size = formatted.len();
+                    let abs_path = std::path::Path::new(&export_path)
+                        .canonicalize()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| export_path.clone());
+                    let msg = format!(
+                        "\
+Export complete:
+  Path: {abs_path}
+  Size: {size} bytes
+  Messages: {}",
+                        app.conversation.len()
+                    );
+                    tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
+                    tui_tx.send(TuiEvent::Done).ok();
+                }
+                Err(e) => {
+                    let err = format!("Failed to export conversation: {e}");
+                    tui_tx.send(TuiEvent::Error(err)).ok();
+                }
+            }
+            true
+        }
         _ => {
             let err = format!("Unknown command: {command}. Type /help for available commands.");
             tui_tx.send(TuiEvent::Error(err)).ok();
@@ -949,6 +993,60 @@ pub fn permission_decision_from_key(c: char) -> Option<PermissionDecision> {
         '5' => Some(PermissionDecision::AlwaysDeny),
         _ => None,
     }
+}
+
+/// Format the conversation history as a markdown text document suitable for
+/// LLM analysis. Includes a metadata header (date, message count) and each
+/// conversation entry with role labels, timestamps, text content, and tool
+/// call details (name, status, result).
+///
+/// The output is designed to be clean and parseable, with clear section
+/// separators and consistent formatting across all entry types.
+pub fn format_conversation(conversation: &VecDeque<ConversationEntry>) -> String {
+    let now = chrono::Local::now();
+    let date_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let mut output = String::new();
+    output.push_str("# HackPI Conversation Export\n\n");
+    output.push_str(&format!("Date: {date_str}\n"));
+    output.push_str(&format!("Messages: {}\n\n", conversation.len()));
+
+    for (i, entry) in conversation.iter().enumerate() {
+        let msg_num = i + 1;
+        output.push_str(&format!("## Message {msg_num}\n"));
+        output.push_str(&format!("**Role**: {}\n", entry.role));
+        output.push_str("---\n");
+
+        if !entry.text.is_empty() {
+            output.push_str(&entry.text);
+            output.push('\n');
+        }
+
+        if !entry.tool_calls.is_empty() {
+            output.push('\n');
+            for tc in &entry.tool_calls {
+                let status_str = match &tc.status {
+                    ToolCallStatus::Running => "Running".to_string(),
+                    ToolCallStatus::Done(result) => match result {
+                        ToolResult::Success { content } => {
+                            format!("Done (Success)\n\n```\n{content}\n```")
+                        }
+                        ToolResult::SystemError { message } => {
+                            format!("Done (Error: {message})")
+                        }
+                        ToolResult::Timeout => "Done (Timeout)".to_string(),
+                        ToolResult::Cancelled => "Done (Cancelled)".to_string(),
+                    },
+                };
+                output.push_str(&format!("### Tool Call: {}\n", tc.name));
+                output.push_str(&format!("**Status**: {status_str}\n\n"));
+            }
+        }
+
+        output.push('\n');
+    }
+
+    output
 }
 
 #[cfg(test)]
@@ -2654,5 +2752,343 @@ mod tests {
         let result = app.submit_create_task();
         assert!(result.is_none());
         assert!(app.status_message.contains("Failed"));
+    }
+
+    // ── Export slash command tests ────────────────────────────────────────
+
+    #[test]
+    fn test_export_is_registered_in_slash_commands() {
+        let found = SLASH_COMMANDS.iter().any(|cmd| cmd.name == "/export");
+        assert!(found, "/export should be registered in SLASH_COMMANDS");
+    }
+
+    #[test]
+    fn test_export_has_description() {
+        let cmd = SLASH_COMMANDS
+            .iter()
+            .find(|cmd| cmd.name == "/export")
+            .expect("/export should be registered");
+        assert!(
+            !cmd.description.is_empty(),
+            "/export should have a non-empty description"
+        );
+    }
+
+    #[test]
+    fn test_filter_export_commands() {
+        let results = filter_commands("/exp");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "/export");
+    }
+
+    #[test]
+    fn test_format_conversation_empty() {
+        let conversation = VecDeque::new();
+        let result = format_conversation(&conversation);
+        assert!(result.contains("HackPI Conversation Export"));
+        assert!(result.contains("Messages: 0"));
+        assert!(result.contains("Date:"));
+    }
+
+    #[test]
+    fn test_format_conversation_single_user_message() {
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            role: "user".into(),
+            text: "Hello, world!".into(),
+            tool_calls: Vec::new(),
+        });
+
+        let result = format_conversation(&conversation);
+        assert!(result.contains("Messages: 1"));
+        assert!(result.contains("## Message 1"));
+        assert!(result.contains("**Role**: user"));
+        assert!(result.contains("Hello, world!"));
+    }
+
+    #[test]
+    fn test_format_conversation_assistant_with_tool_calls() {
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            role: "user".into(),
+            text: "Read the file".into(),
+            tool_calls: Vec::new(),
+        });
+        conversation.push_back(ConversationEntry {
+            role: "assistant".into(),
+            text: "Let me check that file.".into(),
+            tool_calls: vec![
+                ToolCallDisplay {
+                    id: "tc1".into(),
+                    name: "read".into(),
+                    status: ToolCallStatus::Done(ToolResult::Success {
+                        content: "file contents here".into(),
+                    }),
+                },
+                ToolCallDisplay {
+                    id: "tc2".into(),
+                    name: "bash".into(),
+                    status: ToolCallStatus::Running,
+                },
+            ],
+        });
+
+        let result = format_conversation(&conversation);
+        assert!(result.contains("Messages: 2"));
+        assert!(result.contains("## Message 1"));
+        assert!(result.contains("## Message 2"));
+        assert!(result.contains("### Tool Call: read"));
+        assert!(result.contains("**Status**: Done (Success)"));
+        assert!(result.contains("file contents here"));
+        assert!(result.contains("### Tool Call: bash"));
+        assert!(result.contains("**Status**: Running"));
+    }
+
+    #[test]
+    fn test_format_conversation_tool_timeout() {
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            role: "assistant".into(),
+            text: "".into(),
+            tool_calls: vec![ToolCallDisplay {
+                id: "tc1".into(),
+                name: "fetch".into(),
+                status: ToolCallStatus::Done(ToolResult::Timeout),
+            }],
+        });
+
+        let result = format_conversation(&conversation);
+        assert!(result.contains("**Status**: Done (Timeout)"));
+    }
+
+    #[test]
+    fn test_format_conversation_tool_error() {
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            role: "assistant".into(),
+            text: "".into(),
+            tool_calls: vec![ToolCallDisplay {
+                id: "tc1".into(),
+                name: "bash".into(),
+                status: ToolCallStatus::Done(ToolResult::SystemError {
+                    message: "command not found".into(),
+                }),
+            }],
+        });
+
+        let result = format_conversation(&conversation);
+        assert!(result.contains("**Status**: Done (Error: command not found)"));
+    }
+
+    #[test]
+    fn test_format_conversation_tool_cancelled() {
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            role: "assistant".into(),
+            text: "Cancelling...".into(),
+            tool_calls: vec![ToolCallDisplay {
+                id: "tc1".into(),
+                name: "long_task".into(),
+                status: ToolCallStatus::Done(ToolResult::Cancelled),
+            }],
+        });
+
+        let result = format_conversation(&conversation);
+        assert!(result.contains("**Status**: Done (Cancelled)"));
+    }
+
+    #[test]
+    fn test_format_conversation_no_text_shows_empty_content_area() {
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            role: "user".into(),
+            text: "".into(),
+            tool_calls: Vec::new(),
+        });
+
+        let result = format_conversation(&conversation);
+        assert!(result.contains("**Role**: user"));
+        assert!(result.contains("---"));
+    }
+
+    #[test]
+    fn test_format_conversation_does_not_contain_panics() {
+        // Verify the formatting is safe for various edge cases
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            role: "user".into(),
+            text: "Hello".into(),
+            tool_calls: Vec::new(),
+        });
+        conversation.push_back(ConversationEntry {
+            role: "assistant".into(),
+            text: "Hi".into(),
+            tool_calls: vec![ToolCallDisplay {
+                id: "tc1".into(),
+                name: "tool".into(),
+                status: ToolCallStatus::Running,
+            }],
+        });
+
+        let result = format_conversation(&conversation);
+        // Should handle gracefully, not panic
+        assert!(result.contains("Messages: 2"));
+        assert!(result.contains("### Tool Call: tool"));
+    }
+
+    #[tokio::test]
+    async fn test_export_slash_command_handled() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        // Add a conversation entry
+        app.handle_event(TuiEvent::Submit("Hello".into()));
+        app.handle_event(TuiEvent::StreamChunk("Hi there!".into()));
+        app.handle_event(TuiEvent::Done);
+
+        let handled = handle_slash_command("/export", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled, "/export should be handled");
+
+        // Verify output events
+        let mut found_chunk = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_chunk = true;
+                assert!(msg.contains("Export complete"), "msg: {msg}");
+                assert!(msg.contains("Size:"), "msg should contain size");
+                assert!(
+                    msg.contains("Messages:"),
+                    "msg should contain message count"
+                );
+            }
+        }
+        assert!(found_chunk, "should emit StreamChunk with export info");
+    }
+
+    #[tokio::test]
+    async fn test_export_with_custom_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let custom_path = tmp.path().join("my-export.txt");
+        let custom_path_str = custom_path.to_string_lossy().to_string();
+
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        app.handle_event(TuiEvent::Submit("Hello".into()));
+        app.handle_event(TuiEvent::Done);
+
+        let handled = handle_slash_command(
+            &format!("/export {custom_path_str}"),
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+        assert!(handled);
+
+        // Verify file was written
+        assert!(
+            custom_path.exists(),
+            "export file should exist at custom path"
+        );
+
+        // Verify output mentions the custom path
+        let mut found_path = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_path = true;
+                assert!(msg.contains("Export complete"), "msg: {msg}");
+            }
+        }
+        assert!(found_path);
+
+        // Verify file content
+        let content = std::fs::read_to_string(&custom_path).expect("read export file");
+        assert!(content.contains("HackPI Conversation Export"));
+        assert!(content.contains("Hello"));
+    }
+
+    #[tokio::test]
+    async fn test_export_slash_command_shows_error_with_bad_path() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        app.handle_event(TuiEvent::Submit("Hello".into()));
+        app.handle_event(TuiEvent::Done);
+
+        // Try to write to a non-existent directory (should fail)
+        let handled = handle_slash_command(
+            "/export /nonexistent_dir/file.txt",
+            &mut app,
+            &tx,
+            &mut ge,
+            &registry,
+        )
+        .await;
+        assert!(handled);
+
+        let mut found_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::Error(msg) = event {
+                found_error = true;
+                assert!(msg.contains("Failed to export"));
+            }
+        }
+        assert!(found_error, "should emit error for bad path");
+    }
+
+    #[tokio::test]
+    async fn test_export_slash_command_empty_conversation() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+
+        let handled = handle_slash_command("/export", &mut app, &tx, &mut ge, &registry).await;
+        assert!(handled);
+
+        let mut found_chunk = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(msg) = event {
+                found_chunk = true;
+                assert!(msg.contains("Messages: 0"), "msg: {msg}");
+            }
+        }
+        assert!(found_chunk, "should handle empty conversation gracefully");
+    }
+
+    #[tokio::test]
+    async fn test_help_includes_export_command() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let registry = make_tool_registry();
+        let _handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
+
+        let mut found_chunk = false;
+        while let Ok(event) = rx.try_recv() {
+            if let TuiEvent::StreamChunk(text) = event {
+                found_chunk = true;
+                assert!(text.contains("/export"), "help should list /export");
+            }
+        }
+        assert!(found_chunk);
+    }
+
+    #[tokio::test]
+    async fn test_export_slash_command_prevents_agent_spawn() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let handled =
+            handle_slash_command("/export", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+        assert!(handled, "/export should prevent agent spawn");
     }
 }
