@@ -1,7 +1,8 @@
-use crate::app::{AppState, AppView, ToolCallStatus};
+use crate::app::{App, AppState, AppView, ToolCallDisplay, ToolCallStatus};
 use crate::interaction::{app_key_context, footer_bindings};
 use crate::theme::{
-    current_theme, task_state_style, tool_card_style, tool_status_label, tool_status_symbol, Theme,
+    current_theme, task_state_style, tool_card_style, tool_status_label, tool_status_style,
+    tool_status_symbol, Theme,
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -11,8 +12,6 @@ use ratatui::{
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
-
-use crate::app::App;
 
 // ── Minimum terminal size gate ──────────────────────────────────────────────
 
@@ -269,33 +268,7 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
         }
 
         for tc in &entry.tool_calls {
-            let card_style = tool_card_style(&tc.name, theme);
-            let status_symbol = tool_status_symbol(&tc.status);
-            let status_label = tool_status_label(&tc.status);
-
-            let title = format!(" {status_symbol} {name} [{status_label}] ", name = tc.name);
-
-            // Push title BEFORE result content so it appears right above, not at the top
-            lines.push(Line::from(Span::styled(
-                title,
-                card_style.add_modifier(Modifier::BOLD),
-            )));
-
-            if let ToolCallStatus::Done(result) = &tc.status {
-                let result_content = match result {
-                    hackpi_core::tools::ToolResult::Success { content } => content.clone(),
-                    hackpi_core::tools::ToolResult::SystemError { message } => {
-                        format!("Error: {message}")
-                    }
-                    hackpi_core::tools::ToolResult::Timeout => "Timed out.".into(),
-                    hackpi_core::tools::ToolResult::Cancelled => "Cancelled.".into(),
-                };
-                for line_content in result_content.lines() {
-                    lines.push(Line::from(Span::raw(line_content.to_string())));
-                }
-            } else {
-                lines.push(Line::from(Span::styled("Running...", theme.status_running)));
-            }
+            render_tool_card(&mut lines, tc, area.width as usize, theme);
         }
 
         lines.push(Line::from(""));
@@ -1159,6 +1132,80 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     frame.render_widget(paragraph, modal_area);
 }
 
+// ── Tool card component ────────────────────────────────────────────
+
+/// Render a tool call as a bordered action card with structured summary.
+///
+/// Card format:
+/// ```text
+/// ┌─ ✓ read  src/main.rs [Success] ──┐
+/// │ file content                      │
+/// └───────────────────────────────────┘
+/// ```
+///
+/// The card width adapts to the conversation area width. Status uses
+/// semantic colors (green=success, red=error, yellow=running/warning).
+fn render_tool_card(lines: &mut Vec<Line>, tc: &ToolCallDisplay, area_width: usize, theme: &Theme) {
+    let card_style = tool_card_style(&tc.name, theme);
+    let tool_status_s = tool_status_style(&tc.status, theme);
+    let status_symbol = tool_status_symbol(&tc.status);
+    let status_label = tool_status_label(&tc.status);
+
+    let title = tc.summary.title();
+
+    // Build the title portion for the top border
+    let title_content = format!(" {status_symbol} {title} [{status_label}] ");
+    let top_width = area_width.saturating_sub(4); // ┌─ and ─┐
+    let filler_needed = top_width.saturating_sub(title_content.len());
+    let top_border = if filler_needed > 0 {
+        format!("┌─{title_content}{}─┐", "─".repeat(filler_needed))
+    } else {
+        format!("┌─{title_content}─┐")
+    };
+
+    // Top border with title — use tool-type color
+    lines.push(Line::from(Span::styled(top_border, card_style)));
+
+    // Content lines (with │ prefix)
+    match &tc.status {
+        ToolCallStatus::Done(result) => match result {
+            hackpi_core::tools::ToolResult::Success { content } => {
+                for line_content in content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("│ {line_content}"),
+                        theme.fg_default,
+                    )));
+                }
+            }
+            hackpi_core::tools::ToolResult::SystemError { message } => {
+                for line_content in message.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("│ {line_content}"),
+                        tool_status_s,
+                    )));
+                }
+            }
+            hackpi_core::tools::ToolResult::Timeout => {
+                lines.push(Line::from(Span::styled("│ Timed out.", tool_status_s)));
+            }
+            hackpi_core::tools::ToolResult::Cancelled => {
+                lines.push(Line::from(Span::styled("│ Cancelled.", tool_status_s)));
+            }
+        },
+        ToolCallStatus::Running => {
+            lines.push(Line::from(Span::styled(
+                "│ Running...",
+                theme.status_running,
+            )));
+        }
+    }
+
+    // Bottom border
+    let bottom_width = area_width.saturating_sub(2);
+    let bottom_border = format!("└{}┘", "─".repeat(bottom_width));
+    lines.push(Line::from(Span::styled(bottom_border, card_style)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1584,6 +1631,7 @@ mod tests {
         app.handle_event(TuiEvent::ToolCall {
             id: "tc1".into(),
             name: "read".into(),
+            input: None,
         });
         app.handle_event(TuiEvent::ToolResult {
             id: "tc1".into(),
@@ -1636,6 +1684,7 @@ mod tests {
         app.handle_event(TuiEvent::ToolCall {
             id: "tc1".into(),
             name: "read".into(),
+            input: None,
         });
         app.handle_event(TuiEvent::ToolResult {
             id: "tc1".into(),
@@ -1646,6 +1695,7 @@ mod tests {
         app.handle_event(TuiEvent::ToolCall {
             id: "tc2".into(),
             name: "edit".into(),
+            input: None,
         });
         app.handle_event(TuiEvent::ToolResult {
             id: "tc2".into(),
@@ -2317,6 +2367,7 @@ mod tests {
         app.handle_event(TuiEvent::ToolCall {
             id: "tc1".into(),
             name: "read".into(),
+            input: None,
         });
         assert!(
             app.auto_scroll,

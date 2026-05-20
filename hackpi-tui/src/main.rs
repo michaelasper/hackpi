@@ -167,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
                         tui_tx.send(TuiEvent::StreamChunk(text)).ok();
                     }
                     AgentEvent::ToolCallStart { id, name } => {
-                        tui_tx.send(TuiEvent::ToolCall { id, name }).ok();
+                        tui_tx.send(TuiEvent::ToolCall { id, name, input: None }).ok();
                     }
                     AgentEvent::ToolCallEnd { id, result } => {
                         tui_tx.send(TuiEvent::ToolResult { id, result }).ok();
@@ -493,7 +493,13 @@ async fn main() -> anyhow::Result<()> {
                     tui_tx.send(TuiEvent::StreamChunk(text)).ok();
                 }
                 AgentEvent::ToolCallStart { id, name } => {
-                    tui_tx.send(TuiEvent::ToolCall { id, name }).ok();
+                    tui_tx
+                        .send(TuiEvent::ToolCall {
+                            id,
+                            name,
+                            input: None,
+                        })
+                        .ok();
                 }
                 AgentEvent::ToolCallEnd { id, result } => {
                     tui_tx.send(TuiEvent::ToolResult { id, result }).ok();
