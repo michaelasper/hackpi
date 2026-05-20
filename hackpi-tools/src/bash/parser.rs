@@ -31,18 +31,11 @@ pub fn parse(input: &str) -> Result<AstNode, String> {
 pub(crate) fn tokenize(input: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let mut in_single = false;
     let mut in_double = false;
     let mut chars = input.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            } else {
-                current.push(ch);
-            }
-        } else if in_double {
+        if in_double {
             if ch == '"' {
                 in_double = false;
             } else if ch == '\\' {
@@ -53,7 +46,15 @@ pub(crate) fn tokenize(input: &str) -> Result<Vec<String>, String> {
                 current.push(ch);
             }
         } else if ch == '\'' {
-            in_single = true;
+            // Single-quoted text: pass through literally (including quotes)
+            // so resolve_vars can skip variable expansion within them.
+            current.push(ch);
+            for next in chars.by_ref() {
+                current.push(next);
+                if next == '\'' {
+                    break;
+                }
+            }
         } else if ch == '"' {
             in_double = true;
         } else if ch == '#' && current.is_empty() {
