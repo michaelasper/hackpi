@@ -17,7 +17,7 @@ Creates new files atomically with workspace boundary enforcement. Existing files
   "input_schema": {
     "type": "object",
     "properties": {
-      "filePath": {
+      "path": {
         "type": "string",
         "description": "The absolute or relative path where the new file should be created (e.g., 'src/agent/orchestrator.rs'). Parent directories will be created automatically if they do not exist."
       },
@@ -26,7 +26,7 @@ Creates new files atomically with workspace boundary enforcement. Existing files
         "description": "The complete, raw text content to write to the new file. Do not wrap in markdown code blocks unless the file itself requires it."
       }
     },
-    "required": ["filePath", "content"],
+    "required": ["path", "content"],
     "additionalProperties": false
   }
 }
@@ -37,7 +37,7 @@ Creates new files atomically with workspace boundary enforcement. Existing files
 ### The Overwrite Trap
 
 ```rust
-let file_path = workspace_root.join(&args.file_path);
+let file_path = workspace_root.join(&args.path);
 
 if file_path.exists() {
     return Ok(ToolResponse::SystemError(
