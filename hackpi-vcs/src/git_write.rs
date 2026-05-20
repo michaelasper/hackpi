@@ -156,6 +156,10 @@ impl Tool for GitWriteTool {
                     "type": "string",
                     "enum": ["soft", "mixed", "hard"],
                     "description": "Reset mode for reset operation (default: mixed)"
+                },
+                "allow_empty": {
+                    "type": "boolean",
+                    "description": "Allow empty commits (same tree as parent) for commit operation"
                 }
             },
             "required": ["operation"],
@@ -208,6 +212,19 @@ fn cmd_add(repo: &git2::Repository, params: &Value) -> ToolResult {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect::<Vec<_>>()
     });
+
+    // Reject no-op add: must have `all: true` or non-empty `paths`
+    if !all {
+        let is_empty = match &paths {
+            None => true,
+            Some(p) => p.is_empty(),
+        };
+        if is_empty {
+            return ToolResult::SystemError {
+                message: "No files to stage: provide `all: true` or non-empty `paths`.".into(),
+            };
+        }
+    }
 
     let mut index = match repo.index() {
         Ok(i) => i,
@@ -262,6 +279,11 @@ fn cmd_commit(repo: &git2::Repository, params: &Value) -> ToolResult {
         }
     };
 
+    let allow_empty = params
+        .get("allow_empty")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let sig = match git2::Signature::now("hackpi", "hackpi@corruptbytes.io") {
         Ok(s) => s,
         Err(e) => {
@@ -302,6 +324,19 @@ fn cmd_commit(repo: &git2::Repository, params: &Value) -> ToolResult {
         Ok(head_ref) => head_ref.peel_to_commit().ok(),
         Err(_) => None,
     };
+
+    // Reject same-tree (empty) commits unless allow_empty is explicitly true
+    if !allow_empty {
+        if let Some(ref parent) = head_commit {
+            if let Ok(parent_tree) = parent.tree() {
+                if parent_tree.id() == tree_oid {
+                    return ToolResult::SystemError {
+                        message: "No changes to commit: the index matches HEAD. Use `allow_empty: true` to force an empty commit.".into(),
+                    };
+                }
+            }
+        }
+    }
 
     let parent_refs: Vec<&git2::Commit> = match head_commit {
         Some(ref c) => vec![c],
@@ -1434,26 +1469,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_no_params_stages_nothing() {
+    async fn test_add_no_params_rejected() {
         let (dir, repo) = init_repo_with_commit();
         std::fs::write(dir.path().join("untracked.txt"), b"data").unwrap();
         let tool = make_tool(repo.workdir().unwrap().to_path_buf());
         let result = execute(&tool, json!({ "operation": "add" })).await;
-        match &result {
-            ToolResult::Success { content } => {
-                assert!(
-                    content.contains("Added"),
-                    "Expected 'Added ...', got: {content}"
-                );
-            }
-            _ => panic!("Expected Success, got: {result:?}"),
-        }
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("No files to stage")),
+            "Expected SystemError about no files to stage, got: {result:?}"
+        );
         // Verify nothing was staged
         let statuses = repo.statuses(None).unwrap();
         let untracked = statuses.iter().any(|e| {
             e.status().contains(git2::Status::WT_NEW) && e.path() == Some("untracked.txt")
         });
         assert!(untracked, "untracked.txt should remain untracked");
+    }
+
+    #[tokio::test]
+    async fn test_add_empty_paths_rejected() {
+        let (_dir, repo) = init_repo_with_commit();
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(&tool, json!({ "operation": "add", "paths": [] })).await;
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("No files to stage")),
+            "Expected SystemError about no files to stage, got: {result:?}"
+        );
     }
 
     // ── Commit operation ──
@@ -2329,7 +2370,7 @@ mod tests {
     // ── Commit with no staged changes ──
 
     #[tokio::test]
-    async fn test_commit_with_nothing_staged_succeeds_with_zero_stats() {
+    async fn test_commit_with_nothing_staged_rejected() {
         let (_dir, repo) = init_repo_with_commit();
         let tool = make_tool(repo.workdir().unwrap().to_path_buf());
         let result = execute(
@@ -2337,15 +2378,31 @@ mod tests {
             json!({ "operation": "commit", "message": "Nothing staged" }),
         )
         .await;
-        // git2 allows committing with no changes (creates same-tree commit)
+        // Without allow_empty, same-tree commits are rejected
+        assert!(
+            matches!(&result, ToolResult::SystemError { message } if message.contains("No changes to commit")),
+            "Expected SystemError about no changes, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_with_nothing_staged_allow_empty() {
+        let (_dir, repo) = init_repo_with_commit();
+        let tool = make_tool(repo.workdir().unwrap().to_path_buf());
+        let result = execute(
+            &tool,
+            json!({ "operation": "commit", "message": "Empty commit", "allow_empty": true }),
+        )
+        .await;
+        // With allow_empty, same-tree commits are permitted
         match &result {
             ToolResult::Success { content } => {
                 assert!(
-                    content.contains("0 file(s) changed"),
-                    "Expected 0 files changed, got: {content}"
+                    content.contains("Committed"),
+                    "Expected 'Committed ...', got: {content}"
                 );
             }
-            _ => panic!("Expected Success (empty commit), got: {result:?}"),
+            _ => panic!("Expected Success (empty commit with allow_empty), got: {result:?}"),
         }
     }
 }
