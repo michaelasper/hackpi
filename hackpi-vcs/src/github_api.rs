@@ -360,16 +360,32 @@ impl GitHubClient {
         let git_repo = git2::Repository::open(checkout_dir)
             .map_err(|e| format!("Failed to open git repository: {e}"))?;
 
-        // Add the remote if it doesn't exist, or get existing one
+        // Add the remote if it doesn't exist, or verify existing origin matches
         let remote_name = "origin";
-        let mut remote = if let Ok(r) = git_repo.find_remote(remote_name) {
-            r
+        let expected_url = format!("https://github.com/{owner}/{repo}.git");
+
+        let needs_update = git_repo
+            .find_remote(remote_name)
+            .ok()
+            .is_some_and(|r| {
+                let expected_owner_repo = format!("{owner}/{repo}");
+                r.url().is_some_and(|url| {
+                    matches!(parse_github_owner_repo(url), Some((o, r)) if format!("{o}/{r}") != expected_owner_repo)
+                })
+            });
+
+        let mut remote = if git_repo.find_remote(remote_name).is_ok() {
+            if needs_update {
+                git_repo
+                    .remote_set_url(remote_name, &expected_url)
+                    .map_err(|e| format!("Failed to update remote URL: {e}"))?;
+            }
+            git_repo
+                .find_remote(remote_name)
+                .map_err(|e| format!("Failed to find remote: {e}"))?
         } else {
             git_repo
-                .remote(
-                    remote_name,
-                    &format!("https://github.com/{owner}/{repo}.git"),
-                )
+                .remote(remote_name, &expected_url)
                 .map_err(|e| format!("Failed to create remote: {e}"))?
         };
 
@@ -503,6 +519,41 @@ impl GitHubClient {
         let url = format!("{}/repos/{}/{}/releases", self.base_url, owner, repo);
         fetch_all_pages(&self.client, &url, &self.auth_header(), 100).await
     }
+}
+
+// ── Remote URL helpers ──
+
+/// Parse `(owner, repo)` from a GitHub remote URL.
+///
+/// Supports the following URL formats:
+/// - `https://github.com/owner/repo.git`
+/// - `https://github.com/owner/repo`
+/// - `git@github.com:owner/repo.git`
+/// - `git@github.com:owner/repo`
+/// - `ssh://git@github.com/owner/repo.git`
+///
+/// Returns `None` for non-GitHub URLs (e.g. local file paths).
+fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
+    let url = url.strip_suffix(".git").unwrap_or(url);
+
+    if let Some(path) = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+    {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 2 {
+            return Some((parts[0].to_string(), parts[1..].join("/")));
+        }
+    }
+
+    if let Some(path) = url.strip_prefix("git@github.com:") {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 2 {
+            return Some((parts[0].to_string(), parts[1..].join("/")));
+        }
+    }
+
+    None
 }
 
 // ── Error helpers ──
@@ -1421,6 +1472,71 @@ mod tests {
         assert!(releases.is_empty());
     }
 
+    // ── parse_github_owner_repo ──
+
+    #[test]
+    fn test_parse_github_owner_repo_https() {
+        let result = parse_github_owner_repo("https://github.com/owner/repo.git");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_https_no_dotgit() {
+        let result = parse_github_owner_repo("https://github.com/owner/repo");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_ssh() {
+        let result = parse_github_owner_repo("git@github.com:owner/repo.git");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_ssh_no_dotgit() {
+        let result = parse_github_owner_repo("git@github.com:owner/repo");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_ssh_url_scheme() {
+        let result = parse_github_owner_repo("ssh://git@github.com/owner/repo.git");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_nested_path() {
+        let result = parse_github_owner_repo("https://github.com/org/team/subproject.git");
+        assert_eq!(
+            result,
+            Some(("org".to_string(), "team/subproject".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_non_github() {
+        let result = parse_github_owner_repo("https://gitlab.com/owner/repo.git");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_local_path() {
+        let result = parse_github_owner_repo("/tmp/some-repo");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_file_url() {
+        let result = parse_github_owner_repo("file:///tmp/some-repo");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_github_owner_repo_empty() {
+        let result = parse_github_owner_repo("");
+        assert_eq!(result, None);
+    }
+
     // ── pr_checkout ──
 
     #[tokio::test]
@@ -1520,6 +1636,209 @@ mod tests {
         assert!(
             msg.contains("feature-x"),
             "Expected branch name in output, got: {msg}"
+        );
+
+        // Verify the branch was created
+        let branch = local_repo.find_branch("pr-42-feature-x", git2::BranchType::Local);
+        assert!(branch.is_ok(), "Expected branch pr-42-feature-x to exist");
+    }
+
+    #[tokio::test]
+    async fn test_pr_checkout_updates_wrong_origin() {
+        let server = MockServer::start().await;
+        // Mock the GET /pulls/{number} endpoint
+        let head_sha = "abc123def4567890123456789012345678901234";
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "Feature branch",
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "body": null,
+                "head": {
+                    "label": "owner:feature-x",
+                    "ref": "feature-x",
+                    "sha": head_sha
+                },
+                "base": {
+                    "label": "owner:main",
+                    "ref": "main",
+                    "sha": "789012345678"
+                },
+                "draft": false,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "user": { "login": "testuser" }
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        // Create a bare repo that has the PR ref (the "correct" remote)
+        let correct_remote_dir = tempfile::tempdir().unwrap();
+        let correct_bare = git2::Repository::init_bare(correct_remote_dir.path()).unwrap();
+
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = correct_bare.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            correct_bare.find_tree(oid).unwrap().id()
+        };
+        let initial_oid = correct_bare
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &correct_bare.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+
+        // Create the PR ref in the correct repo
+        correct_bare
+            .reference("refs/pull/42/head", initial_oid, true, "Create PR ref")
+            .unwrap();
+
+        // Create a local repo with origin pointing to a *different* GitHub repo
+        let tmp = tempfile::tempdir().unwrap();
+        let local_repo = git2::Repository::init(tmp.path()).unwrap();
+
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = local_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            local_repo.find_tree(oid).unwrap().id()
+        };
+        local_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &local_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+
+        // Set origin to point to a WRONG GitHub repo URL
+        local_repo
+            .remote("origin", "https://github.com/wrong/other-repo.git")
+            .unwrap();
+
+        // pr_checkout should detect the mismatch and update origin to owner/repo
+        let result = client.pr_checkout("owner", "repo", 42, tmp.path()).await;
+
+        // The fetch will fail because the updated URL points to github.com, not to
+        // our local bare repo. But this test proves the code detects the mismatch
+        // and attempts to use the correct URL — the error should reference the
+        // updated URL, not the wrong one.
+        assert!(result.is_err(), "Expected fetch to fail after URL update");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("owner/repo") || err.contains("Failed to fetch"),
+            "Expected error to reference the correct repo, got: {err}"
+        );
+
+        // Prove origin URL was updated from wrong/other-repo to owner/repo
+        let origin = local_repo.find_remote("origin").unwrap();
+        let origin_url = origin.url().unwrap();
+        assert!(
+            origin_url.contains("owner/repo"),
+            "Expected origin URL to be updated to owner/repo, got: {origin_url}"
+        );
+        assert!(
+            !origin_url.contains("wrong"),
+            "Expected origin URL to no longer point to wrong/other-repo, got: {origin_url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_checkout_preserves_matching_non_github_origin() {
+        // When origin points to a non-GitHub URL (e.g. local file path) that
+        // serves the correct repo data, pr_checkout should NOT update it.
+        let server = MockServer::start().await;
+        let head_sha = "abc123def4567890123456789012345678901234";
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "Feature branch",
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "body": null,
+                "head": {
+                    "label": "owner:feature-x",
+                    "ref": "feature-x",
+                    "sha": head_sha
+                },
+                "base": {
+                    "label": "owner:main",
+                    "ref": "main",
+                    "sha": "789012345678"
+                },
+                "draft": false,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "user": { "login": "testuser" }
+            })))
+            .mount(&server)
+            .await;
+        let client = make_client(&server);
+
+        // Create a bare repo to act as the remote
+        let remote_dir = tempfile::tempdir().unwrap();
+        let bare_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = bare_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            bare_repo.find_tree(oid).unwrap().id()
+        };
+        let initial_oid = bare_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &bare_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+        bare_repo
+            .reference("refs/pull/42/head", initial_oid, true, "Create PR ref")
+            .unwrap();
+
+        // Local repo with origin pointing to a local path (non-GitHub URL)
+        let tmp = tempfile::tempdir().unwrap();
+        let local_repo = git2::Repository::init(tmp.path()).unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_id = {
+            let mut index = local_repo.index().unwrap();
+            let oid = index.write_tree().unwrap();
+            local_repo.find_tree(oid).unwrap().id()
+        };
+        local_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "initial",
+                &local_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+        local_repo
+            .remote("origin", remote_dir.path().to_str().unwrap())
+            .unwrap();
+
+        // This should succeed — non-GitHub URLs are not treated as mismatches
+        let result = client.pr_checkout("owner", "repo", 42, tmp.path()).await;
+
+        assert!(
+            result.is_ok(),
+            "Expected Ok for non-GitHub origin, got: {result:?}"
         );
 
         // Verify the branch was created
