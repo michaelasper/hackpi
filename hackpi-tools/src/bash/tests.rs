@@ -1046,13 +1046,15 @@ fn test_tokenize_stdin_redirect() {
 #[test]
 fn test_tokenize_quoted_strings() {
     let tokens = tokenize("echo \"hello world\" 'foo bar'").unwrap();
-    assert_eq!(tokens, vec!["echo", "hello world", "foo bar"]);
+    // Single quotes are preserved in tokens so resolve_vars can detect them.
+    assert_eq!(tokens, vec!["echo", "hello world", "'foo bar'"]);
 }
 
 #[test]
 fn test_tokenize_single_quotes_preserve_backslash() {
     let tokens = tokenize("echo 'hello\\nworld'").unwrap();
-    assert_eq!(tokens, vec!["echo", "hello\\nworld"]);
+    // Single quotes are preserved in tokens so resolve_vars can detect them.
+    assert_eq!(tokens, vec!["echo", "'hello\\nworld'"]);
 }
 
 #[test]

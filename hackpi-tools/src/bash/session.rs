@@ -56,7 +56,16 @@ impl BashSession {
         let mut result = String::new();
         let mut chars = s.chars().peekable();
         while let Some(ch) = chars.next() {
-            if ch == '$' {
+            if ch == '\'' {
+                // Single-quoted: pass through literally, no variable expansion,
+                // and strip the surrounding quotes from the output.
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                    result.push(c);
+                }
+            } else if ch == '$' {
                 let mut name = String::new();
                 if chars.peek() == Some(&'{') {
                     chars.next();
