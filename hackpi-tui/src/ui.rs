@@ -10,6 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 
@@ -592,6 +593,129 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(paragraph, area);
 }
 
+// ── Unicode-aware text measurement helpers ────────────────────────────
+
+/// Calculate the terminal display width of the text before the given
+/// character cursor position. Uses `unicode-width` to correctly handle CJK,
+/// emoji, combining marks, and other wide or zero-width characters.
+pub fn display_width_prefix(s: &str, char_cursor: usize) -> usize {
+    let byte_pos = s
+        .char_indices()
+        .nth(char_cursor)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    UnicodeWidthStr::width(&s[..byte_pos])
+}
+
+/// Calculate the (row, col) position of the cursor within the input area,
+/// accounting for:
+///
+/// * The prompt prefix width (e.g. `"> "` is 2 columns)
+/// * Explicit newlines (`\n`) inserted via Shift+Enter
+/// * Terminal display widths of individual characters (CJK = 2, emoji = 2, etc.)
+/// * Word-wrapping within the input area when a logical line exceeds the width
+///
+/// Returns `(row_offset, col_offset)` **relative to the input area origin**.
+/// The caller adds `input_area.y` and `input_area.x` respectively.
+pub fn cursor_position_for_input(
+    input: &str,
+    char_cursor: usize,
+    input_area_width: u16,
+    prefix_width: u16,
+) -> (u16, u16) {
+    let area_w = input_area_width as usize;
+    if area_w == 0 {
+        return (0, prefix_width);
+    }
+
+    // Convert char-indexed cursor to byte offset
+    let byte_pos = input
+        .char_indices()
+        .nth(char_cursor)
+        .map(|(i, _)| i)
+        .unwrap_or(input.len());
+
+    let before_cursor = &input[..byte_pos];
+
+    // Cursor at very start — position right after the prefix
+    if before_cursor.is_empty() {
+        return (0, prefix_width);
+    }
+
+    // Split the pre-cursor text by explicit newlines to handle multiline input.
+    // Each segment is a "logical line". The first logical line has the prompt
+    // prefix prepended; subsequent lines do not.
+    let parts: Vec<&str> = before_cursor.split('\n').collect();
+    let line_count = parts.len();
+
+    let mut row: u16 = 0;
+    let mut col: u16 = prefix_width;
+
+    for (i, part) in parts.iter().enumerate() {
+        let part_width = UnicodeWidthStr::width(*part);
+
+        let effective_width = if i == 0 {
+            // First logical line includes the prompt prefix
+            prefix_width as usize + part_width
+        } else {
+            part_width
+        };
+
+        if i == line_count - 1 {
+            // Last segment — cursor is somewhere within this visual line.
+            // Integer division gives the wrapped row offset within this segment;
+            // remainder gives the column.
+            row += (effective_width / area_w) as u16;
+            col = (effective_width % area_w) as u16;
+        } else {
+            // Complete logical line before the cursor.
+            // Count how many visual rows it occupies (even empty lines = 1 row).
+            let visual_rows = if effective_width == 0 {
+                1
+            } else {
+                effective_width.div_ceil(area_w)
+            };
+            row += visual_rows as u16;
+        }
+    }
+
+    (row, col)
+}
+
+/// Truncate a string to fit within a maximum terminal display width.
+///
+/// Uses `unicode-width` to ensure CJK, emoji, and combining characters are
+/// measured by their rendered column width, not their byte or scalar count.
+/// Appends "…" when truncation occurs.
+pub fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let mut current_width: usize = 0;
+    let mut result = String::new();
+    let mut truncated = false;
+
+    for c in s.chars() {
+        let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if current_width + c_width > max_width {
+            truncated = true;
+            break;
+        }
+        result.push(c);
+        current_width += c_width;
+    }
+
+    if truncated {
+        // If we can fit the ellipsis character (width 1), append it
+        if current_width < max_width {
+            result.push('…');
+        }
+    }
+
+    result
+}
+
 fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let input_block = Block::default().borders(Borders::TOP).style(
         if matches!(app.state, AppState::Generating) {
@@ -621,9 +745,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         crate::interaction::FocusTarget::ConversationInput
     ) && !app.help_visible
     {
-        let prefix_len: u16 = prefix.len() as u16;
-        let cursor_col = input_area.x + prefix_len + app.input_cursor as u16;
-        let cursor_row = input_area.y;
+        let prefix_width: u16 = UnicodeWidthStr::width(prefix) as u16;
+        let (cursor_row_offset, cursor_col_offset) =
+            cursor_position_for_input(&app.input, app.input_cursor, input_area.width, prefix_width);
+        let cursor_col = input_area.x + cursor_col_offset;
+        let cursor_row = input_area.y + cursor_row_offset;
         // Clamp cursor to the input area bounds to avoid panics on narrow terminals.
         let clamped_col = cursor_col.min(input_area.right().saturating_sub(1));
         frame.set_cursor_position((clamped_col, cursor_row));
@@ -3197,5 +3323,238 @@ mod tests {
             cell_str.contains("Ctrl+D"),
             "help overlay should show Ctrl+D"
         );
+    }
+
+    // ── COR-278: Unicode-aware text measurement tests ──────────────────────────
+
+    #[test]
+    fn test_display_width_prefix_ascii() {
+        assert_eq!(display_width_prefix("hello", 0), 0);
+        assert_eq!(display_width_prefix("hello", 3), 3);
+        assert_eq!(display_width_prefix("hello", 5), 5);
+        assert_eq!(display_width_prefix("", 0), 0);
+    }
+
+    #[test]
+    fn test_display_width_prefix_cjk() {
+        // CJK characters are 2 columns wide
+        assert_eq!(display_width_prefix("世界", 0), 0);
+        assert_eq!(display_width_prefix("世界", 1), 2); // "世" = 2
+        assert_eq!(display_width_prefix("世界", 2), 4); // "世界" = 4
+    }
+
+    #[test]
+    fn test_display_width_prefix_emoji() {
+        // Many emoji are 2 columns wide
+        assert_eq!(display_width_prefix("a🔥b", 0), 0);
+        assert_eq!(display_width_prefix("a🔥b", 1), 1); // "a" = 1
+        assert_eq!(display_width_prefix("a🔥b", 2), 3); // "a🔥" = 1 + 2 = 3
+        assert_eq!(display_width_prefix("a🔥b", 3), 4); // "a🔥b" = 1 + 2 + 1 = 4
+    }
+
+    #[test]
+    fn test_display_width_prefix_mixed() {
+        // Mixed ASCII + CJK + ASCII
+        assert_eq!(display_width_prefix("ab中cd", 2), 2); // "ab" = 2
+        assert_eq!(display_width_prefix("ab中cd", 3), 4); // "ab中" = 2 + 2 = 4
+        assert_eq!(display_width_prefix("ab中cd", 4), 5); // "ab中c" = 2 + 2 + 1 = 5
+        assert_eq!(display_width_prefix("ab中cd", 5), 6); // "ab中cd" = 2 + 2 + 2 = 6
+    }
+
+    #[test]
+    fn test_display_width_prefix_past_end() {
+        // Cursor past the end should give the full width
+        assert_eq!(display_width_prefix("hi", 10), 2);
+        assert_eq!(display_width_prefix("世界", 10), 4);
+    }
+
+    // ── cursor_position_for_input tests ──────────────────────────────────
+
+    #[test]
+    fn test_cursor_position_single_line_ascii() {
+        let input_area_width = 80;
+        let prefix_width = 2;
+
+        // Empty input
+        let (row, col) = cursor_position_for_input("", 0, input_area_width, prefix_width);
+        assert_eq!(row, 0, "empty input row");
+        assert_eq!(col, 2, "empty input col (after prefix)");
+
+        // "hello", cursor at start
+        let (row, col) = cursor_position_for_input("hello", 0, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 2);
+
+        // "hello", cursor at end
+        let (row, col) = cursor_position_for_input("hello", 5, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 7); // prefix(2) + "hello"(5)
+    }
+
+    #[test]
+    fn test_cursor_position_single_line_cjk() {
+        let input_area_width = 80;
+        let prefix_width = 2;
+
+        // "世界", cursor at 0
+        let (row, col) = cursor_position_for_input("世界", 0, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 2, "cursor before first CJK char");
+
+        // "世界", cursor at 1 (after first CJK char)
+        let (row, col) = cursor_position_for_input("世界", 1, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 4, "cursor after '世' (width 2 + 2 = 4)");
+
+        // "世界", cursor at 2 (after both)
+        let (row, col) = cursor_position_for_input("世界", 2, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 6, "cursor after '世界' (width 2 + 4 = 6)");
+    }
+
+    #[test]
+    fn test_cursor_position_multiline_ascii() {
+        let input_area_width = 80;
+        let prefix_width = 2;
+
+        // "hello\nworld", cursor at start of second line
+        let (row, col) =
+            cursor_position_for_input("hello\nworld", 6, input_area_width, prefix_width);
+        assert_eq!(row, 1, "second line");
+        assert_eq!(col, 0, "start of second line");
+
+        // "hello\nworld", cursor at end
+        let (row, col) =
+            cursor_position_for_input("hello\nworld", 11, input_area_width, prefix_width);
+        assert_eq!(row, 1, "second line");
+        assert_eq!(col, 5, "end of second line");
+    }
+
+    #[test]
+    fn test_cursor_position_multiline_cjk() {
+        let input_area_width = 80;
+        let prefix_width = 2;
+
+        // "你好\n世界", cursor at start of second line (char index 2 = \n...)
+        // Wait: "你好\n世界" chars: 你(0), 好(1), \n(2), 世(3), 界(4)
+        let (row, col) = cursor_position_for_input("你好\n世界", 3, input_area_width, prefix_width);
+        assert_eq!(row, 1, "second line");
+        assert_eq!(col, 0, "start of second line after \\n");
+
+        // "你好\n世界", cursor at end
+        let (row, col) = cursor_position_for_input("你好\n世界", 5, input_area_width, prefix_width);
+        assert_eq!(row, 1, "second line");
+        assert_eq!(col, 4, "end of '世界' = 2+2");
+    }
+
+    #[test]
+    fn test_cursor_position_wrapping() {
+        let input_area_width = 10;
+        let prefix_width = 2;
+
+        // Text that's exactly one wrapped line
+        // "hello" has display width 5, with prefix 2 = 7. Fits in 10.
+        let (row, col) = cursor_position_for_input("hello", 5, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 7);
+
+        // A long string that wraps: "1234567890" + prefix = 12 width in 10-wide area
+        // Row 0: "> " + "12345678" (10 cols)
+        // Row 1: "90" (2 cols)
+        let long = "1234567890";
+        let (row, col) = cursor_position_for_input(long, 10, input_area_width, prefix_width);
+        assert_eq!(row, 1, "should wrap to second visual line");
+        assert_eq!(col, 2, "column after wrapping");
+
+        // Cursor partway through
+        // Row 0: "> " + "12345678" (10 cols)
+        // Cursor at position 5 (after "12345")
+        // Display width = 2 + 5 = 7, fits on first row
+        let (row, col) = cursor_position_for_input(long, 5, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 7, "prefix(2) + 5 chars = 7");
+    }
+
+    #[test]
+    fn test_cursor_position_wrapping_cjk() {
+        let input_area_width = 8;
+        let prefix_width = 2;
+
+        // Each CJK char is 2 wide
+        // "> 一二三四" has display width 2+8=10. With area width 8:
+        // Row 0: "> 一二三" = 2+2+2+2 = 8 (exactly fills row)
+        // Row 1: "四" = 2
+        let text = "一二三四";
+        let (row, col) = cursor_position_for_input(text, 4, input_area_width, prefix_width);
+        assert_eq!(row, 1, "should wrap to second visual line");
+        assert_eq!(col, 2, "第四  has display width 2");
+
+        // Cursor at position 2 (after 一二)
+        // Display width = 2 + 4 = 6, fits on row 0
+        let (row, col) = cursor_position_for_input(text, 2, input_area_width, prefix_width);
+        assert_eq!(row, 0);
+        assert_eq!(col, 6, "prefix(2) + 一二(4) = 6");
+    }
+
+    #[test]
+    fn test_cursor_position_zero_width_area() {
+        let (row, col) = cursor_position_for_input("hello", 3, 0, 2);
+        assert_eq!(row, 0, "zero width area, row should be 0");
+        assert_eq!(col, 2, "zero width area, col should be prefix_width");
+    }
+
+    #[test]
+    fn test_cursor_position_empty_lines_before_cursor() {
+        let input_area_width = 80;
+        let prefix_width = 2;
+
+        // Multiple empty lines: "a\n\n\nb", cursor at end
+        // chars: a(0), \n(1), \n(2), \n(3), b(4)
+        // Lines: "a", "", "", "b"
+        let (row, col) = cursor_position_for_input("a\n\n\nb", 5, input_area_width, prefix_width);
+        assert_eq!(row, 3, "3 newlines before cursor = 4th line");
+        assert_eq!(col, 1, "b has width 1");
+    }
+
+    // ── truncate_to_width tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_to_width_ascii() {
+        assert_eq!(truncate_to_width("hello", 10), "hello");
+        assert_eq!(truncate_to_width("hello", 5), "hello");
+        assert_eq!(truncate_to_width("hello world", 5), "hello");
+        assert_eq!(truncate_to_width("", 10), "");
+        assert_eq!(truncate_to_width("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_to_width_cjk() {
+        // Each CJK char is 2 wide
+        assert_eq!(truncate_to_width("世界", 4), "世界"); // fits exactly (2 + 2 = 4)
+        assert_eq!(truncate_to_width("世界", 3), "世…"); // "世" fits (2), "界" would exceed (4 > 3), "…" fits
+        assert_eq!(truncate_to_width("世界", 2), "世"); // exactly 1 CJK char fits
+        assert_eq!(truncate_to_width("世界", 1), "…"); // "世" (2) > 1, no char fits, but "…" fits
+                                                       // "世" width is 2, 0 + 2 = 2 > 1. truncated = true. current_width is 0.
+                                                       // 0 + 1 <= 1, so we push '…'.
+                                                       // Actually, hmm. This seems odd. If we can't even fit the first character, should we still show '…'?
+                                                       // With max_width=1, result would be "…".
+        assert_eq!(truncate_to_width("世界", 1), "…");
+    }
+
+    #[test]
+    fn test_truncate_to_width_mixed() {
+        // "a世b" has widths: 1 + 2 + 1 = 4
+        assert_eq!(truncate_to_width("a世b", 4), "a世b");
+        assert_eq!(truncate_to_width("a世b", 3), "a世"); // a(1)+世(2)=3 fits, then 'b'(1) makes 4>3
+        assert_eq!(truncate_to_width("a世b", 2), "a…");
+        assert_eq!(truncate_to_width("a世b", 1), "a");
+    }
+
+    #[test]
+    fn test_truncate_to_width_emoji() {
+        // fire emoji is 2 wide
+        assert_eq!(truncate_to_width("a🔥b", 4), "a🔥b"); // 1+2+1=4
+        assert_eq!(truncate_to_width("a🔥b", 3), "a🔥"); // 1+2=3, b would make 4
+        assert_eq!(truncate_to_width("a🔥b", 2), "a…");
     }
 }
