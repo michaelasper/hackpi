@@ -1,5 +1,8 @@
 use crate::app::{AppState, AppView, ToolCallStatus};
 use crate::interaction::{app_key_context, footer_bindings};
+use crate::theme::{
+    current_theme, task_state_style, tool_card_style, tool_status_label, tool_status_symbol, Theme,
+};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -30,6 +33,7 @@ pub fn is_too_small(area: Rect) -> bool {
 /// Displays the minimum required dimensions and the current terminal size so
 /// the user knows how much they need to resize.
 pub fn render_too_small(frame: &mut Frame, area: Rect) {
+    let theme = current_theme();
     let text = format!(
         "Terminal too small\n\
          Minimum: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\n\
@@ -37,7 +41,7 @@ pub fn render_too_small(frame: &mut Frame, area: Rect) {
         area.width, area.height
     );
     let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(Color::Red))
+        .style(theme.status_error)
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, area);
 }
@@ -146,47 +150,54 @@ pub fn render(frame: &mut Frame, app: &App) {
         return;
     }
 
+    let theme = current_theme();
     let root = split_root(area);
 
-    render_tab_header(frame, root.header, &app.active_view, app);
+    render_tab_header(frame, root.header, &app.active_view, app, &theme);
 
     match &app.active_view {
         AppView::Conversation => {
-            render_conversation(frame, root.main, app);
+            render_conversation(frame, root.main, app, &theme);
         }
         AppView::TaskDetail(_) => {
-            render_task_detail(frame, root.main, app);
+            render_task_detail(frame, root.main, app, &theme);
         }
         AppView::TaskBoard => {
-            render_task_board(frame, root.main, app);
+            render_task_board(frame, root.main, app, &theme);
         }
         AppView::TaskGraph => {
-            render_placeholder(frame, root.main, "Graph view coming soon...");
+            render_placeholder(frame, root.main, "Graph view coming soon...", &theme);
         }
     }
 
-    render_input(frame, root.input, app);
-    render_status(frame, root.status, app);
+    render_input(frame, root.input, app, &theme);
+    render_status(frame, root.status, app, &theme);
 
     if app.autocomplete_visible {
-        render_autocomplete_modal(frame, root.input, app);
+        render_autocomplete_modal(frame, root.input, app, &theme);
     }
 
     if app.pending_permission.is_some() {
-        render_permission_modal(frame, area, app);
+        render_permission_modal(frame, area, app, &theme);
     }
 
     if app.creating_task {
-        render_task_create_prompt(frame, root.input, app);
+        render_task_create_prompt(frame, root.input, app, &theme);
     }
 
     if app.help_visible {
-        render_help_overlay(frame, area, app);
+        render_help_overlay(frame, area, app, &theme);
     }
 }
 
 /// Render the tab header with active/inactive tab highlighting and version/usage info.
-fn render_tab_header(frame: &mut Frame, area: Rect, active_view: &AppView, app: &App) {
+fn render_tab_header(
+    frame: &mut Frame,
+    area: Rect,
+    active_view: &AppView,
+    app: &App,
+    theme: &Theme,
+) {
     let tabs = [
         ("Conversation", matches!(active_view, AppView::Conversation)),
         (
@@ -204,14 +215,9 @@ fn render_tab_header(frame: &mut Frame, area: Rect, active_view: &AppView, app: 
         spans.push(Span::styled(
             format!("[Tab] {label}"),
             if *is_active {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else if *label == "Graph" {
-                // Graph is a future placeholder — dimmed
-                Style::default().fg(Color::DarkGray)
+                theme.fg_emphasis.add_modifier(Modifier::UNDERLINED)
             } else {
-                Style::default().fg(Color::DarkGray)
+                theme.fg_muted
             },
         ));
     }
@@ -225,29 +231,11 @@ fn render_tab_header(frame: &mut Frame, area: Rect, active_view: &AppView, app: 
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
         format!("hackpi v{version} · {usage_text}"),
-        Style::default().fg(Color::DarkGray),
+        theme.fg_muted,
     ));
 
     let line = Line::from(spans);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Color::Black)),
-        area,
-    );
-}
-
-fn tool_card_color(name: &str) -> Color {
-    match name {
-        "read" => Color::Blue,
-        "edit" => Color::Magenta,
-        "bash" => Color::Yellow,
-        "search_grep" => Color::Cyan,
-        "write" => Color::Green,
-        "git_read" => Color::Rgb(100, 180, 100), // green — read-only, safe
-        "git_write" => Color::Rgb(255, 140, 0),  // orange — mutation, caution
-        "github" => Color::Rgb(255, 255, 255),   // white — external API
-        "task" => Color::Rgb(255, 200, 0),       // amber — task management
-        _ => Color::DarkGray,
-    }
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn user_prefix() -> &'static str {
@@ -258,7 +246,7 @@ fn assistant_prefix() -> &'static str {
     " ● assistant: "
 }
 
-fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
+fn render_conversation(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
 
     for entry in &app.conversation {
@@ -269,9 +257,9 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
         };
 
         let role_style = match entry.role.as_str() {
-            "user" => Style::default().fg(Color::Green),
-            "assistant" => Style::default().fg(Color::Cyan),
-            _ => Style::default(),
+            "user" => theme.role_user,
+            "assistant" => theme.role_assistant,
+            _ => theme.fg_default,
         };
 
         if !entry.text.is_empty() {
@@ -280,25 +268,16 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
         }
 
         for tc in &entry.tool_calls {
-            let border_color = tool_card_color(&tc.name);
-            let (status_symbol, _status_color) = match &tc.status {
-                ToolCallStatus::Running => ("⋯", Color::Yellow),
-                ToolCallStatus::Done(result) => match result {
-                    hackpi_core::tools::ToolResult::Success { .. } => ("✓", Color::Green),
-                    hackpi_core::tools::ToolResult::SystemError { .. } => ("✗", Color::Red),
-                    hackpi_core::tools::ToolResult::Timeout => ("⚠", Color::Yellow),
-                    hackpi_core::tools::ToolResult::Cancelled => ("⊘", Color::Gray),
-                },
-            };
+            let card_style = tool_card_style(&tc.name, theme);
+            let status_symbol = tool_status_symbol(&tc.status);
+            let status_label = tool_status_label(&tc.status);
 
-            let title = format!(" {status_symbol} {name} ", name = tc.name);
+            let title = format!(" {status_symbol} {name} [{status_label}] ", name = tc.name);
 
             // Push title BEFORE result content so it appears right above, not at the top
             lines.push(Line::from(Span::styled(
                 title,
-                Style::default()
-                    .fg(border_color)
-                    .add_modifier(Modifier::BOLD),
+                card_style.add_modifier(Modifier::BOLD),
             )));
 
             if let ToolCallStatus::Done(result) = &tc.status {
@@ -314,10 +293,7 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App) {
                     lines.push(Line::from(Span::raw(line_content.to_string())));
                 }
             } else {
-                lines.push(Line::from(Span::styled(
-                    "Running...",
-                    Style::default().fg(Color::Yellow),
-                )));
+                lines.push(Line::from(Span::styled("Running...", theme.status_running)));
             }
         }
 
@@ -373,32 +349,19 @@ fn count_visual_lines(text: &Text, area_width: usize) -> usize {
         .sum()
 }
 
-/// Color for a task state badge.
-fn task_state_color(state: &str) -> Color {
-    match state {
-        "todo" => Color::Gray,
-        "in_progress" => Color::Yellow,
-        "blocked" => Color::Red,
-        "in_review" => Color::Blue,
-        "done" => Color::Green,
-        "cancelled" => Color::DarkGray,
-        _ => Color::DarkGray,
-    }
-}
-
 /// Render the task board list view.
-fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
+fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut items: Vec<ListItem> = Vec::new();
 
     if app.task_list_cache.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
             "  No tasks. Press 'n' to create one.",
-            Style::default().fg(Color::DarkGray),
+            theme.fg_muted,
         ))));
     } else {
         for (i, task) in app.task_list_cache.iter().enumerate() {
             let is_selected = i == app.selected_task_idx;
-            let state_color = task_state_color(&task.state);
+            let state_style = task_state_style(&task.state, theme);
             let cursor = if is_selected { "▸ " } else { "  " };
 
             // Main task line: TSK-001 [in_progress] Implement auth module
@@ -408,33 +371,25 @@ fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
             line_spans.push(Span::styled(
                 cursor.to_string(),
                 if is_selected {
-                    Style::default().fg(Color::White)
+                    theme.fg_emphasis
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    theme.fg_muted
                 },
             ));
 
             // Task ID
-            line_spans.push(Span::styled(
-                format!("{} ", task.id),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            line_spans.push(Span::styled(format!("{} ", task.id), theme.fg_emphasis));
 
             // State badge
-            line_spans.push(Span::styled(
-                format!("[{}] ", task.state),
-                Style::default().fg(state_color),
-            ));
+            line_spans.push(Span::styled(format!("[{}] ", task.state), state_style));
 
             // Title
             line_spans.push(Span::styled(
                 task.title.clone(),
                 if is_selected {
-                    Style::default().fg(Color::White)
+                    theme.fg_emphasis
                 } else {
-                    Style::default().fg(Color::Reset)
+                    theme.fg_default
                 },
             ));
 
@@ -445,7 +400,7 @@ fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
                 for blocker_id in &task.blocked_by {
                     items.push(ListItem::new(Line::from(Span::styled(
                         format!("      ⬑ blocked by {}", blocker_id),
-                        Style::default().fg(Color::Red),
+                        theme.status_error,
                     ))));
                 }
             }
@@ -462,9 +417,9 @@ fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Render a placeholder view for unimplemented tabs.
-fn render_placeholder(frame: &mut Frame, area: Rect, message: &str) {
+fn render_placeholder(frame: &mut Frame, area: Rect, message: &str, theme: &Theme) {
     let text = Paragraph::new(message)
-        .style(Style::default().fg(Color::DarkGray))
+        .style(theme.fg_muted)
         .alignment(Alignment::Center);
     frame.render_widget(text, area);
 }
@@ -476,12 +431,12 @@ fn format_timestamp(dt: &chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// Render the task detail view showing full task information.
-fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
+fn render_task_detail(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let task = match &app.task_detail_cache {
         Some(t) => t,
         None => {
             let text = Paragraph::new("Task not found")
-                .style(Style::default().fg(Color::Red))
+                .style(theme.status_error)
                 .alignment(Alignment::Center);
             frame.render_widget(text, area);
             return;
@@ -501,64 +456,53 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
     // Title bar
     lines.push(Line::from(Span::styled(
         format!(" Task: {} ", id),
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
+        theme.fg_emphasis,
     )));
     lines.push(Line::from(""));
 
     // Title field
     lines.push(Line::from(vec![
-        Span::styled("  Title:       ", Style::default().fg(Color::DarkGray)),
-        Span::styled(task.title.clone(), Style::default().fg(Color::White)),
+        Span::styled("  Title:       ", theme.fg_muted),
+        Span::styled(task.title.clone(), theme.fg_emphasis),
     ]));
 
     // State field (colored)
-    let state_color = task_state_color(&task.state);
+    let state_style = task_state_style(&task.state, theme);
     lines.push(Line::from(vec![
-        Span::styled("  State:       ", Style::default().fg(Color::DarkGray)),
-        Span::styled(task.state.clone(), Style::default().fg(state_color)),
+        Span::styled("  State:       ", theme.fg_muted),
+        Span::styled(task.state.clone(), state_style),
     ]));
 
     // Priority field
     let priority_str = format!("{:?}", task.priority).to_lowercase();
     lines.push(Line::from(vec![
-        Span::styled("  Priority:    ", Style::default().fg(Color::DarkGray)),
-        Span::styled(priority_str, Style::default().fg(Color::White)),
+        Span::styled("  Priority:    ", theme.fg_muted),
+        Span::styled(priority_str, theme.fg_default),
     ]));
 
     // Workflow field
     lines.push(Line::from(vec![
-        Span::styled("  Workflow:    ", Style::default().fg(Color::DarkGray)),
-        Span::styled(task.workflow.clone(), Style::default().fg(Color::White)),
+        Span::styled("  Workflow:    ", theme.fg_muted),
+        Span::styled(task.workflow.clone(), theme.fg_default),
     ]));
 
     // Created field
     lines.push(Line::from(vec![
-        Span::styled("  Created:     ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format_timestamp(&task.created_at),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled("  Created:     ", theme.fg_muted),
+        Span::styled(format_timestamp(&task.created_at), theme.fg_default),
     ]));
 
     // Updated field
     lines.push(Line::from(vec![
-        Span::styled("  Updated:     ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format_timestamp(&task.updated_at),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled("  Updated:     ", theme.fg_muted),
+        Span::styled(format_timestamp(&task.updated_at), theme.fg_default),
     ]));
 
     // Assignee field
     let assignee_display = task.assignee.as_deref().unwrap_or(em_dash);
     lines.push(Line::from(vec![
-        Span::styled("  Assignee:    ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            assignee_display.to_string(),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled("  Assignee:    ", theme.fg_muted),
+        Span::styled(assignee_display.to_string(), theme.fg_default),
     ]));
 
     // Labels field
@@ -568,8 +512,8 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
         task.labels.join(", ")
     };
     lines.push(Line::from(vec![
-        Span::styled("  Labels:      ", Style::default().fg(Color::DarkGray)),
-        Span::styled(labels_display, Style::default().fg(Color::White)),
+        Span::styled("  Labels:      ", theme.fg_muted),
+        Span::styled(labels_display, theme.fg_default),
     ]));
 
     // Blocked by field
@@ -583,13 +527,13 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
             .join(", ")
     };
     lines.push(Line::from(vec![
-        Span::styled("  Blocked by:  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  Blocked by:  ", theme.fg_muted),
         Span::styled(
             blocked_by_display,
             if app.task_detail_blocked_by.is_empty() {
-                Style::default().fg(Color::DarkGray)
+                theme.fg_muted
             } else {
-                Style::default().fg(Color::Red)
+                theme.status_error
             },
         ),
     ]));
@@ -605,13 +549,13 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
             .join(", ")
     };
     lines.push(Line::from(vec![
-        Span::styled("  Blocking:    ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  Blocking:    ", theme.fg_muted),
         Span::styled(
             blocking_display,
             if app.task_detail_blocking.is_empty() {
-                Style::default().fg(Color::DarkGray)
+                theme.fg_muted
             } else {
-                Style::default().fg(Color::Yellow)
+                theme.status_warning
             },
         ),
     ]));
@@ -619,14 +563,11 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
 
     // Description section
-    lines.push(Line::from(Span::styled(
-        "  Description:",
-        Style::default().fg(Color::DarkGray),
-    )));
+    lines.push(Line::from(Span::styled("  Description:", theme.fg_muted)));
     if task.description.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("  {em_dash}"),
-            Style::default().fg(Color::DarkGray),
+            theme.fg_muted,
         )));
     } else {
         for desc_line in task.description.lines() {
@@ -637,7 +578,7 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         format!("  /task move {id} done  or  /task block <id> {id}"),
-        Style::default().fg(Color::DarkGray),
+        theme.fg_muted,
     )));
 
     let block = Block::default()
@@ -651,16 +592,14 @@ fn render_task_detail(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    let input_block = Block::default()
-        .borders(Borders::TOP)
-        .style(
-            Style::default().fg(if matches!(app.state, AppState::Generating) {
-                Color::DarkGray
-            } else {
-                Color::White
-            }),
-        );
+fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let input_block = Block::default().borders(Borders::TOP).style(
+        if matches!(app.state, AppState::Generating) {
+            theme.input_muted
+        } else {
+            theme.input_active
+        },
+    );
 
     let input_area = input_block.inner(area);
     frame.render_widget(input_block, area);
@@ -695,6 +634,9 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 /// Cycles through these while waiting for LLM response.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Connection indicator text — shows "connected" label instead of bare dot.
+const CONNECTION_INDICATOR: &str = "● connected";
+
 fn status_bar_text(app: &App) -> String {
     let context = app_key_context(app);
     let is_detail = matches!(app.active_view, AppView::TaskDetail(_));
@@ -702,7 +644,7 @@ fn status_bar_text(app: &App) -> String {
     // Task detail shows a bespoke status line with task ID
     if is_detail {
         if let Some(task) = &app.task_detail_cache {
-            return format!(" Task: {}  ●", task.id);
+            return format!(" Task: {}  {CONNECTION_INDICATOR}", task.id);
         }
     }
 
@@ -733,24 +675,24 @@ fn status_bar_text(app: &App) -> String {
 
     if !state_text.is_empty() {
         if !binding_text.is_empty() {
-            format!(" {status_prefix}{state_text}  ·  {binding_text}  ●")
+            format!(" {status_prefix}{state_text}  ·  {binding_text}  {CONNECTION_INDICATOR}")
         } else {
-            format!(" {status_prefix}{state_text}  ●")
+            format!(" {status_prefix}{state_text}  {CONNECTION_INDICATOR}")
         }
     } else if !binding_text.is_empty() {
-        format!(" {status_prefix}{binding_text}  ●")
+        format!(" {status_prefix}{binding_text}  {CONNECTION_INDICATOR}")
     } else {
-        format!(" {status_prefix}●")
+        format!(" {status_prefix}{CONNECTION_INDICATOR}")
     }
 }
 
-fn render_status(frame: &mut Frame, area: Rect, app: &App) {
+fn render_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let text = status_bar_text(app);
 
     let style = match app.state {
-        AppState::Resting => Style::default().fg(Color::DarkGray),
-        AppState::Generating => Style::default().fg(Color::Yellow),
-        AppState::Interrupted => Style::default().fg(Color::Red),
+        AppState::Resting => theme.fg_muted,
+        AppState::Generating => theme.status_running,
+        AppState::Interrupted => theme.status_error,
     };
 
     // Use Line::raw (no wrapping) so the status bar never wraps to the next
@@ -759,7 +701,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Render the slash command autocomplete popover above the input area.
-fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
+fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App, theme: &Theme) {
     let filtered = app.filtered_commands();
     if filtered.is_empty() {
         return;
@@ -816,9 +758,7 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
     // Title
     lines.push(Line::from(Span::styled(
         " Slash Commands ",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        theme.border_accent.add_modifier(Modifier::BOLD),
     )));
 
     // Command items — render the visible slice [scroll_offset..scroll_offset+display_count]
@@ -830,18 +770,15 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
         let cursor = if is_selected { "▸ " } else { "  " };
 
         let cmd_style = if is_selected {
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
+            theme.fg_emphasis.bg(Color::DarkGray)
         } else {
-            Style::default().fg(Color::White)
+            theme.fg_default
         };
 
         let desc_style = if is_selected {
-            Style::default().fg(Color::Gray).bg(Color::DarkGray)
+            theme.fg_muted.bg(Color::DarkGray)
         } else {
-            Style::default().fg(Color::Gray)
+            theme.fg_muted
         };
 
         // Truncate the name to the computed column width if it somehow exceeds it,
@@ -870,21 +807,18 @@ fn render_autocomplete_modal(frame: &mut Frame, input_area: Rect, app: &App) {
             (b, 0) => format!("  ↑ {b} above"),
             (b, r) => format!("  ↑ {b} above · ↓ {r} more"),
         };
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(Line::from(Span::styled(hint, theme.fg_muted)));
     }
 
     lines.push(Line::from(Span::styled(
         "  ↑/↓ navigate  Tab select  Enter submit  Esc close",
-        Style::default().fg(Color::DarkGray),
+        theme.fg_muted,
     )));
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .style(Style::default().bg(Color::Black));
+        .border_style(theme.border_accent)
+        .style(theme.surface_modal);
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(block)
@@ -904,7 +838,7 @@ fn truncate_for_display(s: &str, max_len: usize) -> String {
 }
 
 #[allow(clippy::vec_init_then_push)]
-fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
+fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let prompt = match &app.pending_permission {
         Some(p) => p,
         None => return,
@@ -945,7 +879,7 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
     // Title
     lines.push(Line::from(Span::styled(
         " ⚠ Permission Required ",
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        theme.status_error.add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
 
@@ -968,26 +902,23 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
     // Options
     lines.push(Line::from(Span::styled(
         " [1] Allow once           [3] Deny",
-        Style::default().fg(Color::Yellow),
+        theme.status_warning,
     )));
     lines.push(Line::from(Span::styled(
         " [2] Allow session        [4] Always allow",
-        Style::default().fg(Color::Yellow),
+        theme.status_warning,
     )));
     lines.push(Line::from(Span::styled(
         "                         [5] Always deny",
-        Style::default().fg(Color::Yellow),
+        theme.status_warning,
     )));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " [Esc] to cancel",
-        Style::default().fg(Color::DarkGray),
-    )));
+    lines.push(Line::from(Span::styled(" [Esc] to cancel", theme.fg_muted)));
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red))
-        .style(Style::default().bg(Color::Black));
+        .border_style(theme.border_danger)
+        .style(theme.surface_modal);
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(block)
@@ -997,7 +928,7 @@ fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Render the inline task creation prompt overlaid on the input area.
-fn render_task_create_prompt(frame: &mut Frame, area: Rect, app: &App) {
+fn render_task_create_prompt(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // Clear the input area
     frame.render_widget(Clear, area);
 
@@ -1014,22 +945,17 @@ fn render_task_create_prompt(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             " New Task:",
-            Style::default()
-                .fg(Color::Rgb(255, 200, 0))
-                .add_modifier(Modifier::BOLD),
+            theme.tool_task.add_modifier(Modifier::BOLD),
         )))
-        .style(Style::default().bg(Color::Black)),
+        .style(theme.surface_modal),
         input_area[0],
     );
 
     // Input field with cursor
     let input_text = format!(" {}█", app.task_create_input);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            input_text,
-            Style::default().fg(Color::White),
-        )))
-        .style(Style::default().bg(Color::Black)),
+        Paragraph::new(Line::from(Span::styled(input_text, theme.fg_default)))
+            .style(theme.surface_modal),
         input_area[1],
     );
 
@@ -1037,9 +963,9 @@ fn render_task_create_prompt(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             " Enter to create · Esc to cancel",
-            Style::default().fg(Color::DarkGray),
+            theme.fg_muted,
         )))
-        .style(Style::default().bg(Color::Black)),
+        .style(theme.surface_modal),
         input_area[2],
     );
 }
@@ -1049,7 +975,7 @@ fn render_task_create_prompt(frame: &mut Frame, area: Rect, app: &App) {
 /// Uses a centered modal similar to the permission prompt. Content is generated
 /// dynamically from the `KEY_BINDINGS` table, filtered by `app_key_context`.
 /// Footer bindings are listed first, followed by additional bindings.
-fn render_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
+fn render_help_overlay(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let context = app_key_context(app);
     let bindings = super::interaction::help_bindings(context);
 
@@ -1066,24 +992,20 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
     // Title
     lines.push(Line::from(Span::styled(
         format!(" ⌨ Help — {context_name} "),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        theme.border_accent.add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
 
     for binding in &bindings {
         let key_style = if binding.footer {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
+            theme.fg_emphasis
         } else {
-            Style::default().fg(Color::DarkGray)
+            theme.fg_muted
         };
         let action_style = if binding.footer {
-            Style::default().fg(Color::White)
+            theme.fg_emphasis
         } else {
-            Style::default().fg(Color::Gray)
+            theme.fg_muted
         };
 
         lines.push(Line::from(vec![
@@ -1096,13 +1018,13 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  Press Esc to close",
-        Style::default().fg(Color::DarkGray),
+        theme.fg_muted,
     )));
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .style(Style::default().bg(Color::Black));
+        .border_style(theme.border_accent)
+        .style(theme.surface_modal);
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(block)
@@ -1236,65 +1158,13 @@ mod tests {
         let app = App::new();
         let text = status_bar_text(&app);
         assert!(
-            text.contains("●")
-                || text.contains("○")
-                || text.contains("connected")
-                || text.contains("disconnected"),
-            "status bar should include a connection indicator, got: {text}"
+            text.contains("connected"),
+            "status bar should include 'connected' text, got: {text}"
         );
     }
 
-    #[test]
-    fn test_tool_card_color_for_read() {
-        assert_eq!(tool_card_color("read"), Color::Blue);
-    }
-
-    #[test]
-    fn test_tool_card_color_for_edit() {
-        assert_eq!(tool_card_color("edit"), Color::Magenta);
-    }
-
-    #[test]
-    fn test_tool_card_color_for_bash() {
-        assert_eq!(tool_card_color("bash"), Color::Yellow);
-    }
-
-    #[test]
-    fn test_tool_card_color_for_search_grep() {
-        assert_eq!(tool_card_color("search_grep"), Color::Cyan);
-    }
-
-    #[test]
-    fn test_tool_card_color_for_write() {
-        assert_eq!(tool_card_color("write"), Color::Green);
-    }
-
-    #[test]
-    fn test_tool_card_color_unknown() {
-        assert_eq!(tool_card_color("unknown"), Color::DarkGray);
-    }
-
-    // ── VCS tool card color tests ──────────────────────────────────────
-
-    #[test]
-    fn test_tool_card_color_for_git_read() {
-        assert_eq!(tool_card_color("git_read"), Color::Rgb(100, 180, 100));
-    }
-
-    #[test]
-    fn test_tool_card_color_for_git_write() {
-        assert_eq!(tool_card_color("git_write"), Color::Rgb(255, 140, 0));
-    }
-
-    #[test]
-    fn test_tool_card_color_for_github() {
-        assert_eq!(tool_card_color("github"), Color::Rgb(255, 255, 255));
-    }
-
-    #[test]
-    fn test_tool_card_color_for_task() {
-        assert_eq!(tool_card_color("task"), Color::Rgb(255, 200, 0));
-    }
+    // ── Tool card style tests (delegated to theme module) ──────────────
+    // See tests in theme.rs for tool_card_style(), task_state_style(), etc.
 
     #[test]
     fn test_render_permission_modal_does_not_panic_with_pending_prompt() {
@@ -1356,41 +1226,6 @@ mod tests {
     }
 
     // ── Task board view tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_task_state_color_todo() {
-        assert_eq!(task_state_color("todo"), Color::Gray);
-    }
-
-    #[test]
-    fn test_task_state_color_in_progress() {
-        assert_eq!(task_state_color("in_progress"), Color::Yellow);
-    }
-
-    #[test]
-    fn test_task_state_color_blocked() {
-        assert_eq!(task_state_color("blocked"), Color::Red);
-    }
-
-    #[test]
-    fn test_task_state_color_in_review() {
-        assert_eq!(task_state_color("in_review"), Color::Blue);
-    }
-
-    #[test]
-    fn test_task_state_color_done() {
-        assert_eq!(task_state_color("done"), Color::Green);
-    }
-
-    #[test]
-    fn test_task_state_color_cancelled() {
-        assert_eq!(task_state_color("cancelled"), Color::DarkGray);
-    }
-
-    #[test]
-    fn test_task_state_color_unknown() {
-        assert_eq!(task_state_color("unknown_state"), Color::DarkGray);
-    }
 
     #[test]
     fn test_render_tab_header_conversation_active() {
@@ -1560,8 +1395,8 @@ mod tests {
             "status bar should show task ID in detail view: {text}"
         );
         assert!(
-            text.contains("●"),
-            "status bar should include connection indicator: {text}"
+            text.contains("connected"),
+            "status bar should include connection indicator text: {text}"
         );
     }
 
