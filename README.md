@@ -27,6 +27,10 @@
 | 256 KB result cap + overflow to temp files | Prevents context blowup on long outputs |
 | Streaming TUI | Watch the agent think and act in real time |
 | Local-first API client | Works with DeepSeek V4 Flash on localhost |
+| **Task board** | Create, view, and transition tasks across workflow states |
+| **Guardrails** | Configurable allow/deny rules, permission prompts, session caching |
+| **Git & GitHub** | View git status, log, and list PRs directly from the TUI |
+| **Conversation export** | Export full conversation history to a text file |
 
 ## Quick Start
 
@@ -55,11 +59,60 @@ cp target/release/hackpi /usr/local/bin/
 
 hackpi is a TUI application — launch it and type natural-language requests.
 
+### Global keys (always available)
+
 | Key | Action |
 |-----|--------|
-| `Enter` | Send message |
-| `Ctrl+C` | Cancel in-flight request |
-| `Esc` | Dismiss autocomplete / Cancel task creation / Go back to previous view |
+| `Ctrl+C` | Interrupt current generation |
+| `Ctrl+L` | Clear conversation |
+| `Ctrl+D` | Exit hackpi |
+| `?` | Show contextual help overlay |
+| `Tab` | Cycle views (Conversation → Tasks → Graph → Conversation) |
+
+### Context-specific keys
+
+| Context | Key | Action |
+|---------|-----|--------|
+| **Composer** (input) | `Enter` | Submit message |
+| | `Shift+Enter` | Insert newline |
+| | `/` | Start slash command (opens autocomplete) |
+| **Conversation** (scrollback) | `Up` / `Down` | Scroll conversation |
+| | `PgUp` / `PgDn` | Scroll faster |
+| | `Home` | Scroll to top |
+| | `End` | Scroll to bottom |
+| **Task board** | `Up` / `Down` | Navigate tasks |
+| | `Enter` | View task detail |
+| | `n` | Create task |
+| | `Esc` | Go back to conversation |
+| **Task detail** | `Up` / `Down` | Navigate fields |
+| | `Esc` | Go back to task board |
+
+### Slash Commands
+
+Type `/` in the input to open the autocomplete popover, then type to filter:
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/clear` | Clear the conversation |
+| `/quit` | Exit the application |
+| `/guardrails:status` | Show guardrails status |
+| `/guardrails:clean` | Clear session cache |
+| `/guardrails:onboarding [preset]` | Write a preset guardrails config (strict, balanced, permissive) |
+| `/git:status` | Show git status |
+| `/git:log` | Show recent git log |
+| `/github:pr-list` | List open pull requests |
+| `/task create <title>` | Create a new task |
+| `/task list` | List all tasks |
+| `/task show <id>` | Show task details |
+| `/task move <id> <state>` | Move task to a new state |
+| `/task done <id>` | Mark task as done |
+| `/task block <id> <blocked_by>` | Add blocking dependency |
+| `/task unblock <id> <blocked_by>` | Remove blocking dependency |
+| `/task label <id> <label>` | Add a label to a task |
+| `/task assign <id> <assignee>` | Assign task to someone |
+| `/tasks` | Alias for `/task list` |
+| `/export [path]` | Export conversation to text file |
 
 ### Configuration
 
@@ -90,14 +143,16 @@ hackpi is a TUI application — launch it and type natural-language requests.
          └────────┘ └──────┘ └────────┘
 ```
 
-### Four crates
+### Crates
 
 | Crate | Purpose |
 |-------|---------|
 | `hackpi-core` | Agent loop, API client, tool registry, shared types |
 | `hackpi-tools` | `read`, `search_grep`, `edit`, `write`, `bash` |
 | `hackpi-tui` | ratatui terminal interface, event channels, input handling |
-| `hackpi-guardrails` | Path validation, file protection, command gating |
+| `hackpi-guardrails` | Path validation, file protection, command gating with permission prompt system |
+| `hackpi-tasks` | Task store, workflow state machine, slash-command task management |
+| `hackpi-vcs` | Git read operations and GitHub PR listing via slash commands |
 
 ### Tool system
 
@@ -108,6 +163,9 @@ hackpi is a TUI application — launch it and type natural-language requests.
 | `edit` | Replace/append/prepend lines anchored to hashes — rejects stale anchors |
 | `write` | Atomic file creation jailed to workspace root |
 | `bash` | Virtual filesystem with command registry — no network, no arbitrary exec |
+| `git_read` | Read git status and log |
+| `github` | List GitHub pull requests |
+| `task` | Create, list, show, move, and manage tasks |
 
 ### Design decisions
 
