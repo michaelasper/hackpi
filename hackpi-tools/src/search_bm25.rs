@@ -113,11 +113,19 @@ impl Bm25Index {
     /// Search results from chunked documents include `chunk_type` and `chunk_name`
     /// metadata so consumers can display them alongside match results.
     ///
-    /// This method does NOT track mtimes (the caller should manage cache
-    /// invalidation for the source file as a whole).
+    /// Also records the file's modification timestamp for cache invalidation.
+    /// If the file's mtime cannot be read (e.g. in tests with virtual paths),
+    /// the file is still indexed but mtime tracking is skipped for that path.
     ///
     /// Call `build()` after all documents (chunked or not) are added.
     pub fn add_chunked_document(&mut self, path: &Path, chunks: &[Chunk]) {
+        // Record file modification time for cache invalidation
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if let Ok(mtime) = metadata.modified() {
+                self.file_mtimes.insert(path.to_path_buf(), mtime);
+            }
+        }
+
         for chunk in chunks {
             let chunk_path = format!("{}:{}:{}", path.display(), chunk.chunk_type, chunk.name);
             let doc_id = self.doc_paths.len();
@@ -915,5 +923,81 @@ mod tests {
         let mut index = Bm25Index::new();
         index.add_chunked_document(Path::new("test.rs"), &[]);
         assert_eq!(index.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Mtime-based cache invalidation tests for chunked documents
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_stale_chunked_document_not_stale_after_index() {
+        let dir = temp_dir();
+        let file_path = create_file(&dir, "lib.rs", "fn hello() {}\nfn world() {}\n");
+
+        let chunks = vec![
+            Chunk {
+                path: file_path.clone(),
+                start_line: 1,
+                end_line: 1,
+                chunk_type: "fn".to_string(),
+                name: "hello".to_string(),
+                content: "fn hello() {}".to_string(),
+            },
+            Chunk {
+                path: file_path.clone(),
+                start_line: 2,
+                end_line: 2,
+                chunk_type: "fn".to_string(),
+                name: "world".to_string(),
+                content: "fn world() {}".to_string(),
+            },
+        ];
+
+        let mut index = Bm25Index::new();
+        index.add_chunked_document(&file_path, &chunks);
+        index.build();
+
+        assert!(!index.is_stale(), "Fresh chunked index should not be stale");
+    }
+
+    #[test]
+    fn test_is_stale_chunked_document_stale_after_modification() {
+        let dir = temp_dir();
+        let file_path = create_file(&dir, "lib.rs", "fn hello() {}\nfn world() {}\n");
+
+        let chunks = vec![
+            Chunk {
+                path: file_path.clone(),
+                start_line: 1,
+                end_line: 1,
+                chunk_type: "fn".to_string(),
+                name: "hello".to_string(),
+                content: "fn hello() {}".to_string(),
+            },
+            Chunk {
+                path: file_path.clone(),
+                start_line: 2,
+                end_line: 2,
+                chunk_type: "fn".to_string(),
+                name: "world".to_string(),
+                content: "fn world() {}".to_string(),
+            },
+        ];
+
+        let mut index = Bm25Index::new();
+        index.add_chunked_document(&file_path, &chunks);
+        index.build();
+
+        // Before modification: not stale
+        assert!(!index.is_stale(), "Should not be stale before modification");
+
+        // Modify the source file
+        std::fs::write(&file_path, "fn hello() { println!(\"updated\"); }\n").unwrap();
+
+        // After modification: should be stale
+        assert!(
+            index.is_stale(),
+            "Chunked index should be stale after source file modification"
+        );
     }
 }
