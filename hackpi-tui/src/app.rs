@@ -4,7 +4,7 @@ use hackpi_core::types::Usage;
 use hackpi_guardrails::{GuardEvaluator, GuardReason, PermissionDecision};
 use hackpi_tasks::TaskCommand;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Represents a pending permission prompt awaiting user decision.
 pub struct PermissionPrompt {
@@ -825,7 +825,7 @@ pub async fn handle_slash_command(
     cmd: &str,
     app: &mut App,
     tui_tx: &tokio::sync::mpsc::UnboundedSender<TuiEvent>,
-    guard_evaluator: &mut GuardEvaluator,
+    guard_evaluator: &Arc<RwLock<GuardEvaluator>>,
     tool_registry: &hackpi_core::tools::ToolRegistry,
 ) -> CommandOutcome {
     let parts: Vec<&str> = cmd.trim().splitn(2, char::is_whitespace).collect();
@@ -848,9 +848,11 @@ pub async fn handle_slash_command(
             CommandOutcome::ExitRequested
         }
         "/guardrails:status" => {
-            let rule_count = guard_evaluator.rule_count();
-            let god_mode = guard_evaluator.is_god_mode();
-            let cache_len = guard_evaluator.session_cache_len();
+            let ge = guard_evaluator.read().unwrap();
+            let rule_count = ge.rule_count();
+            let god_mode = ge.is_god_mode();
+            let cache_len = ge.session_cache_len();
+            drop(ge);
             let god_mode_str = if god_mode { "yes" } else { "no" };
 
             // Determine which guards are active by checking if rules exist
@@ -868,7 +870,7 @@ Guardrails Status:
             CommandOutcome::Handled
         }
         "/guardrails:clean" => {
-            guard_evaluator.clear_session();
+            guard_evaluator.write().unwrap().clear_session();
             let msg = "Session cache cleared.".to_string();
             tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
             tui_tx.send(TuiEvent::Done).ok();
@@ -901,19 +903,23 @@ Guardrails Onboarding Presets:
                 }
             };
 
-            let hackpi_dir = match guard_evaluator.settings_paths().hackpi.parent() {
-                Some(dir) => dir.to_path_buf(),
-                None => {
-                    tui_tx
-                        .send(TuiEvent::Error(
-                            "Cannot determine workspace root for guardrails config".into(),
-                        ))
-                        .ok();
-                    return CommandOutcome::Handled;
+            // Acquire read lock only for settings_paths() — drop before filesystem ops
+            let hackpi_dir = {
+                let ge = guard_evaluator.read().unwrap();
+                match ge.settings_paths().hackpi.parent() {
+                    Some(dir) => dir.to_path_buf(),
+                    None => {
+                        tui_tx
+                            .send(TuiEvent::Error(
+                                "Cannot determine workspace root for guardrails config".into(),
+                            ))
+                            .ok();
+                        return CommandOutcome::Handled;
+                    }
                 }
             };
 
-            // Create .hackpi directory if it doesn't exist
+            // Filesystem operations — outside the lock
             if let Err(e) = std::fs::create_dir_all(&hackpi_dir) {
                 let err = format!("Failed to create directory {e}");
                 tui_tx.send(TuiEvent::Error(err)).ok();
@@ -927,14 +933,17 @@ Guardrails Onboarding Presets:
                 return CommandOutcome::Handled;
             }
 
-            // Reload rules from the new config
-            if let Err(e) = guard_evaluator.load_rules() {
-                let err = format!("Failed to load rules after writing config: {e}");
-                tui_tx.send(TuiEvent::Error(err)).ok();
-                return CommandOutcome::Handled;
-            }
+            // Acquire write lock for load_rules() and rule_count()
+            let rule_count = {
+                let mut ge = guard_evaluator.write().unwrap();
+                if let Err(e) = ge.load_rules() {
+                    let err = format!("Failed to load rules after writing config: {e}");
+                    tui_tx.send(TuiEvent::Error(err)).ok();
+                    return CommandOutcome::Handled;
+                }
+                ge.rule_count()
+            };
 
-            let rule_count = guard_evaluator.rule_count();
             let msg = format!(
                 "Wrote {preset_name} guardrails config to {} ({rule_count} rules loaded).",
                 config_path.display()
@@ -1285,9 +1294,10 @@ mod tests {
     async fn test_slash_quit_returns_exit_requested() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let outcome =
-            handle_slash_command("/quit", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+            handle_slash_command("/quit", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(outcome, CommandOutcome::ExitRequested);
         assert!(app.quit_requested, "/quit should set quit_requested flag");
     }
@@ -1296,9 +1306,10 @@ mod tests {
     async fn test_slash_clear_returns_needs_render() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let outcome =
-            handle_slash_command("/clear", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+            handle_slash_command("/clear", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(outcome, CommandOutcome::NeedsRender);
     }
 
@@ -1306,9 +1317,10 @@ mod tests {
     async fn test_slash_help_returns_handled() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let outcome =
-            handle_slash_command("/help", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+            handle_slash_command("/help", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(outcome, CommandOutcome::Handled);
     }
 
@@ -1316,15 +1328,10 @@ mod tests {
     async fn test_slash_unknown_returns_handled() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
-        let outcome = handle_slash_command(
-            "/nonexistent",
-            &mut app,
-            &tx,
-            &mut ge,
-            &make_tool_registry(),
-        )
-        .await;
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
+        let outcome =
+            handle_slash_command("/nonexistent", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(outcome, CommandOutcome::Handled);
     }
 
@@ -1345,9 +1352,10 @@ mod tests {
     async fn test_slash_command_prevents_agent_spawn() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let outcome =
-            handle_slash_command("/help", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+            handle_slash_command("/help", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(outcome, CommandOutcome::Handled);
     }
 
@@ -1355,9 +1363,10 @@ mod tests {
     async fn test_slash_help_generates_help_text() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/help", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
         let mut found_chunk = false;
         let mut found_done = false;
@@ -1410,9 +1419,10 @@ mod tests {
         app.handle_event(TuiEvent::Submit("hello".into()));
         assert_eq!(app.conversation.len(), 1);
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let outcome =
-            handle_slash_command("/clear", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+            handle_slash_command("/clear", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(outcome, CommandOutcome::NeedsRender);
         assert!(app.conversation.is_empty());
         assert!(app.input.is_empty());
@@ -1422,9 +1432,10 @@ mod tests {
     async fn test_unknown_slash_command_shows_error() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let handled =
-            handle_slash_command("/unknown", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+            handle_slash_command("/unknown", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(handled, CommandOutcome::Handled);
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -1442,12 +1453,13 @@ mod tests {
     async fn test_guardrails_status_returns_info() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let handled = handle_slash_command(
             "/guardrails:status",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &make_tool_registry(),
         )
         .await;
@@ -1475,24 +1487,27 @@ mod tests {
     async fn test_guardrails_clean_clears_session() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
 
         // Record a session decision first
-        ge.record_decision("test-key".into(), PermissionDecision::AllowSession);
-        assert_eq!(ge.session_cache_len(), 1);
+        ge.write()
+            .unwrap()
+            .record_decision("test-key".into(), PermissionDecision::AllowSession);
+        assert_eq!(ge.read().unwrap().session_cache_len(), 1);
 
         let handled = handle_slash_command(
             "/guardrails:clean",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &make_tool_registry(),
         )
         .await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         // Verify session cache is cleared
-        assert_eq!(ge.session_cache_len(), 0);
+        assert_eq!(ge.read().unwrap().session_cache_len(), 0);
 
         // Verify output message
         let mut found_msg = false;
@@ -1509,16 +1524,17 @@ mod tests {
     async fn test_guardrails_onboarding_balanced_writes_config() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, dir) = make_guard_evaluator();
+        let (ge, dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
 
         // Initial state: no rules loaded
-        assert_eq!(ge.rule_count(), 0);
+        assert_eq!(ge.read().unwrap().rule_count(), 0);
 
         let handled = handle_slash_command(
             "/guardrails:onboarding balanced",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &make_tool_registry(),
         )
         .await;
@@ -1526,7 +1542,7 @@ mod tests {
 
         // Verify rules were loaded
         assert!(
-            ge.rule_count() > 0,
+            ge.read().unwrap().rule_count() > 0,
             "rules should be loaded after onboarding"
         );
 
@@ -1558,12 +1574,13 @@ mod tests {
     async fn test_guardrails_onboarding_no_args_shows_presets() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let handled = handle_slash_command(
             "/guardrails:onboarding",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &make_tool_registry(),
         )
         .await;
@@ -1584,17 +1601,18 @@ mod tests {
     async fn test_guardrails_onboarding_strict_writes_config() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, dir) = make_guard_evaluator();
+        let (ge, dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let handled = handle_slash_command(
             "/guardrails:onboarding strict",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &make_tool_registry(),
         )
         .await;
         assert_eq!(handled, CommandOutcome::Handled);
-        assert!(ge.rule_count() > 0);
+        assert!(ge.read().unwrap().rule_count() > 0);
 
         let config_path = dir.path().join(".hackpi/guardrails.json");
         assert!(config_path.exists());
@@ -1616,17 +1634,18 @@ mod tests {
     async fn test_guardrails_onboarding_permissive_writes_config() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, dir) = make_guard_evaluator();
+        let (ge, dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let handled = handle_slash_command(
             "/guardrails:onboarding permissive",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &make_tool_registry(),
         )
         .await;
         assert_eq!(handled, CommandOutcome::Handled);
-        assert!(ge.rule_count() > 0);
+        assert!(ge.read().unwrap().rule_count() > 0);
 
         let config_path = dir.path().join(".hackpi/guardrails.json");
         assert!(config_path.exists());
@@ -1647,12 +1666,13 @@ mod tests {
     async fn test_guardrails_unknown_subcommand_shows_error() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let handled = handle_slash_command(
             "/guardrails:unknown",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &make_tool_registry(),
         )
         .await;
@@ -1671,7 +1691,8 @@ mod tests {
     async fn test_guardrails_commands_prevent_agent_spawn() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
 
         let cmds = [
             "/guardrails:status",
@@ -1680,7 +1701,7 @@ mod tests {
         ];
         for cmd in &cmds {
             let handled =
-                handle_slash_command(cmd, &mut app, &tx, &mut ge, &make_tool_registry()).await;
+                handle_slash_command(cmd, &mut app, &tx, &ge, &make_tool_registry()).await;
             assert_eq!(
                 handled,
                 CommandOutcome::Handled,
@@ -1695,9 +1716,10 @@ mod tests {
     async fn test_git_status_slash_command_handled() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let handled = handle_slash_command("/git:status", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/git:status", &mut app, &tx, &ge, &registry).await;
         assert_eq!(
             handled,
             CommandOutcome::Handled,
@@ -1709,9 +1731,10 @@ mod tests {
     async fn test_git_log_slash_command_handled() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let handled = handle_slash_command("/git:log", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/git:log", &mut app, &tx, &ge, &registry).await;
         assert_eq!(
             handled,
             CommandOutcome::Handled,
@@ -1723,10 +1746,10 @@ mod tests {
     async fn test_github_pr_list_slash_command_handled() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let handled =
-            handle_slash_command("/github:pr-list", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/github:pr-list", &mut app, &tx, &ge, &registry).await;
         assert_eq!(
             handled,
             CommandOutcome::Handled,
@@ -1738,14 +1761,15 @@ mod tests {
     async fn test_git_status_emits_tool_call_event() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         // Register a real git_read tool with a temp workspace
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(hackpi_vcs::git_read::GitReadTool::new(
             tmp.path().to_path_buf(),
         )));
-        let _handled = handle_slash_command("/git:status", &mut app, &tx, &mut ge, &registry).await;
+        let _handled = handle_slash_command("/git:status", &mut app, &tx, &ge, &registry).await;
 
         let mut found_tool_call = false;
         while let Ok(event) = rx.try_recv() {
@@ -1764,13 +1788,14 @@ mod tests {
     async fn test_git_log_emits_tool_call_event() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(hackpi_vcs::git_read::GitReadTool::new(
             tmp.path().to_path_buf(),
         )));
-        let _handled = handle_slash_command("/git:log", &mut app, &tx, &mut ge, &registry).await;
+        let _handled = handle_slash_command("/git:log", &mut app, &tx, &ge, &registry).await;
 
         let mut found_tool_call = false;
         while let Ok(event) = rx.try_recv() {
@@ -1789,7 +1814,8 @@ mod tests {
     async fn test_github_pr_list_emits_tool_call_event() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut registry = ToolRegistry::new();
         let vcs_config = hackpi_vcs::VcsConfig::from_env(tmp.path());
@@ -1797,8 +1823,7 @@ mod tests {
             tmp.path().to_path_buf(),
             vcs_config,
         )));
-        let _handled =
-            handle_slash_command("/github:pr-list", &mut app, &tx, &mut ge, &registry).await;
+        let _handled = handle_slash_command("/github:pr-list", &mut app, &tx, &ge, &registry).await;
 
         let mut found_tool_call = false;
         while let Ok(event) = rx.try_recv() {
@@ -1817,9 +1842,10 @@ mod tests {
     async fn test_help_includes_vcs_commands() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let _handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
+        let _handled = handle_slash_command("/help", &mut app, &tx, &ge, &registry).await;
 
         let mut found_chunk = false;
         while let Ok(event) = rx.try_recv() {
@@ -2136,16 +2162,11 @@ mod tests {
     async fn test_task_create_via_slash() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let handled = handle_slash_command(
-            "/task create Add logging",
-            &mut app,
-            &tx,
-            &mut ge,
-            &registry,
-        )
-        .await;
+        let handled =
+            handle_slash_command("/task create Add logging", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
@@ -2163,16 +2184,17 @@ mod tests {
     async fn test_task_list_via_slash() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         // Create a task first
-        handle_slash_command("/task create My task", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create My task", &mut app, &tx, &ge, &registry).await;
         // Drain events
         while rx.try_recv().is_ok() {}
 
         // List tasks
-        let handled = handle_slash_command("/task list", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/task list", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
@@ -2190,15 +2212,16 @@ mod tests {
     async fn test_tasks_alias_lists() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         // Create a task first
-        handle_slash_command("/task create Test", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Test", &mut app, &tx, &ge, &registry).await;
         while rx.try_recv().is_ok() {}
 
         // Use /tasks alias
-        let handled = handle_slash_command("/tasks", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/tasks", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
@@ -2215,21 +2238,15 @@ mod tests {
     async fn test_task_show_via_slash() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        handle_slash_command(
-            "/task create Auth module",
-            &mut app,
-            &tx,
-            &mut ge,
-            &registry,
-        )
-        .await;
+        handle_slash_command("/task create Auth module", &mut app, &tx, &ge, &registry).await;
         while rx.try_recv().is_ok() {}
 
         let handled =
-            handle_slash_command("/task show TSK-001", &mut app, &tx, &mut ge, &registry).await;
+            handle_slash_command("/task show TSK-001", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
@@ -2247,17 +2264,18 @@ mod tests {
     async fn test_task_move_via_slash() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Task", &mut app, &tx, &ge, &registry).await;
         while rx.try_recv().is_ok() {}
 
         let handled = handle_slash_command(
             "/task move TSK-001 in_progress",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &registry,
         )
         .await;
@@ -2278,10 +2296,11 @@ mod tests {
     async fn test_task_done_via_slash() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Task", &mut app, &tx, &ge, &registry).await;
         while rx.try_recv().is_ok() {}
 
         // Move to in_progress first
@@ -2289,14 +2308,14 @@ mod tests {
             "/task move TSK-001 in_progress",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &registry,
         )
         .await;
         while rx.try_recv().is_ok() {}
 
         let handled =
-            handle_slash_command("/task done TSK-001", &mut app, &tx, &mut ge, &registry).await;
+            handle_slash_command("/task done TSK-001", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
@@ -2313,20 +2332,15 @@ mod tests {
     async fn test_task_assign_via_slash() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Task", &mut app, &tx, &ge, &registry).await;
         while rx.try_recv().is_ok() {}
 
-        let handled = handle_slash_command(
-            "/task assign TSK-001 alice",
-            &mut app,
-            &tx,
-            &mut ge,
-            &registry,
-        )
-        .await;
+        let handled =
+            handle_slash_command("/task assign TSK-001 alice", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
@@ -2344,10 +2358,11 @@ mod tests {
         let mut app = App::new();
         assert!(app.task_store.is_none());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        let handled = handle_slash_command("/task list", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/task list", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
@@ -2364,10 +2379,11 @@ mod tests {
     async fn test_tasks_without_store_shows_error() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        let handled = handle_slash_command("/tasks", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/tasks", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
@@ -2384,16 +2400,16 @@ mod tests {
     async fn test_task_invalid_transition_shows_error() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        handle_slash_command("/task create Task", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Task", &mut app, &tx, &ge, &registry).await;
         while rx.try_recv().is_ok() {}
 
         // Try todo → done (invalid in default workflow)
         let handled =
-            handle_slash_command("/task move TSK-001 done", &mut app, &tx, &mut ge, &registry)
-                .await;
+            handle_slash_command("/task move TSK-001 done", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
@@ -2410,10 +2426,11 @@ mod tests {
     async fn test_task_parse_error_shows_error() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        let handled = handle_slash_command("/task create", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/task create", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
@@ -2430,9 +2447,10 @@ mod tests {
     async fn test_help_includes_task_commands() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let _handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
+        let _handled = handle_slash_command("/help", &mut app, &tx, &ge, &registry).await;
 
         let mut found_chunk = false;
         while let Ok(event) = rx.try_recv() {
@@ -2542,7 +2560,8 @@ mod tests {
     async fn test_task_cursor_down_increments() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         // Create 3 tasks
@@ -2551,7 +2570,7 @@ mod tests {
                 &format!("/task create Task {i}"),
                 &mut app,
                 &tx,
-                &mut ge,
+                &ge,
                 &registry,
             )
             .await;
@@ -2576,17 +2595,11 @@ mod tests {
     async fn test_enter_task_detail_transitions_view() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        handle_slash_command(
-            "/task create Auth module",
-            &mut app,
-            &tx,
-            &mut ge,
-            &registry,
-        )
-        .await;
+        handle_slash_command("/task create Auth module", &mut app, &tx, &ge, &registry).await;
 
         app.refresh_task_cache();
         let id = app.enter_task_detail();
@@ -2605,11 +2618,12 @@ mod tests {
     async fn test_refresh_task_cache_populates_list() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        handle_slash_command("/task create Task A", &mut app, &tx, &mut ge, &registry).await;
-        handle_slash_command("/task create Task B", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Task A", &mut app, &tx, &ge, &registry).await;
+        handle_slash_command("/task create Task B", &mut app, &tx, &ge, &registry).await;
 
         assert!(app.task_list_cache.is_empty());
         let result = app.refresh_task_cache();
@@ -2631,19 +2645,14 @@ mod tests {
     async fn test_refresh_clamps_cursor_to_last_item() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         // Create 5 tasks
         for i in 0..5 {
-            handle_slash_command(
-                &format!("/task create T{i}"),
-                &mut app,
-                &tx,
-                &mut ge,
-                &registry,
-            )
-            .await;
+            handle_slash_command(&format!("/task create T{i}"), &mut app, &tx, &ge, &registry)
+                .await;
         }
 
         app.refresh_task_cache();
@@ -2675,22 +2684,16 @@ mod tests {
     async fn test_cache_shows_blocked_by_tasks() {
         let (mut app, _dir) = make_app_with_task_store().await;
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _ge_dir) = make_guard_evaluator();
+        let (ge, _ge_dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         // Create two tasks
-        handle_slash_command("/task create Blocker", &mut app, &tx, &mut ge, &registry).await;
-        handle_slash_command("/task create Blocked", &mut app, &tx, &mut ge, &registry).await;
+        handle_slash_command("/task create Blocker", &mut app, &tx, &ge, &registry).await;
+        handle_slash_command("/task create Blocked", &mut app, &tx, &ge, &registry).await;
 
         // Block second task by first
-        handle_slash_command(
-            "/task block TSK-002 TSK-001",
-            &mut app,
-            &tx,
-            &mut ge,
-            &registry,
-        )
-        .await;
+        handle_slash_command("/task block TSK-002 TSK-001", &mut app, &tx, &ge, &registry).await;
 
         app.refresh_task_cache();
         assert_eq!(app.task_list_cache.len(), 2);
@@ -3284,7 +3287,8 @@ mod tests {
     async fn test_export_slash_command_handled() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         // Add a conversation entry
@@ -3292,7 +3296,7 @@ mod tests {
         app.handle_event(TuiEvent::StreamChunk("Hi there!".into()));
         app.handle_event(TuiEvent::Done);
 
-        let handled = handle_slash_command("/export", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/export", &mut app, &tx, &ge, &registry).await;
         assert_eq!(
             handled,
             CommandOutcome::Handled,
@@ -3323,7 +3327,8 @@ mod tests {
 
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         app.handle_event(TuiEvent::Submit("Hello".into()));
@@ -3333,7 +3338,7 @@ mod tests {
             &format!("/export {custom_path_str}"),
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &registry,
         )
         .await;
@@ -3365,7 +3370,8 @@ mod tests {
     async fn test_export_slash_command_shows_error_with_bad_path() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
         app.handle_event(TuiEvent::Submit("Hello".into()));
@@ -3376,7 +3382,7 @@ mod tests {
             "/export /nonexistent_dir/file.txt",
             &mut app,
             &tx,
-            &mut ge,
+            &ge,
             &registry,
         )
         .await;
@@ -3396,10 +3402,11 @@ mod tests {
     async fn test_export_slash_command_empty_conversation() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
 
-        let handled = handle_slash_command("/export", &mut app, &tx, &mut ge, &registry).await;
+        let handled = handle_slash_command("/export", &mut app, &tx, &ge, &registry).await;
         assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_chunk = false;
@@ -3416,9 +3423,10 @@ mod tests {
     async fn test_help_includes_export_command() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let registry = make_tool_registry();
-        let _handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
+        let _handled = handle_slash_command("/help", &mut app, &tx, &ge, &registry).await;
 
         let mut found_chunk = false;
         while let Ok(event) = rx.try_recv() {
@@ -3434,9 +3442,10 @@ mod tests {
     async fn test_export_slash_command_prevents_agent_spawn() {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut ge, _dir) = make_guard_evaluator();
+        let (ge, _dir) = make_guard_evaluator();
+        let ge = Arc::new(RwLock::new(ge));
         let handled =
-            handle_slash_command("/export", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+            handle_slash_command("/export", &mut app, &tx, &ge, &make_tool_registry()).await;
         assert_eq!(
             handled,
             CommandOutcome::Handled,

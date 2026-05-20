@@ -33,7 +33,6 @@ fn build_system_prompt() -> String {
 }
 
 #[tokio::main]
-#[allow(clippy::await_holding_lock)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -466,20 +465,14 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(submitted) = input.last_submitted() {
                             // Check for slash commands first
                             if submitted.starts_with('/') {
-                                // Guard is held across await because handle_slash_command
-                                // is async and needs mutable access to the evaluator.
-                                // Dropping the guard after the call is safe since no
-                                // other task touches the evaluator concurrently here.
-                                let mut guard = guard_evaluator.write().unwrap();
                                 let outcome = handle_slash_command(
                                     &submitted,
                                     &mut app,
                                     &tui_tx,
-                                    &mut guard,
+                                    &guard_evaluator,
                                     &tools,
                                 )
                                 .await;
-                                drop(guard);
 
                                 // Handle exit-requested outcomes
                                 if matches!(outcome, CommandOutcome::ExitRequested)
