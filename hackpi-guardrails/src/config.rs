@@ -91,23 +91,21 @@ pub fn load_hackpi_config(path: &Path) -> Result<Vec<PermissionRule>, String> {
                 .collect::<Vec<_>>()
         });
 
-        if let Ok(perm_rules) = parse_permissions_block(allow.as_deref(), deny.as_deref()) {
-            rules.extend(perm_rules);
-        }
+        let perm_rules = parse_permissions_block(allow.as_deref(), deny.as_deref())
+            .map_err(|e| format!("permissions: {e}"))?;
+        rules.extend(perm_rules);
     }
 
     // Parse path_access block
     if let Some(pa) = config.get("path_access") {
-        if let Ok(pa_rules) = parse_path_access_block(pa) {
-            rules.extend(pa_rules);
-        }
+        let pa_rules = parse_path_access_block(pa).map_err(|e| format!("path_access: {e}"))?;
+        rules.extend(pa_rules);
     }
 
     // Parse command_gate block
     if let Some(cg) = config.get("command_gate") {
-        if let Ok(cg_rules) = parse_command_gate_block(cg) {
-            rules.extend(cg_rules);
-        }
+        let cg_rules = parse_command_gate_block(cg).map_err(|e| format!("command_gate: {e}"))?;
+        rules.extend(cg_rules);
 
         // Check allow_git_in_bash — inject bypass rules at the front
         let extras = parse_command_gate_extras(cg);
@@ -120,9 +118,9 @@ pub fn load_hackpi_config(path: &Path) -> Result<Vec<PermissionRule>, String> {
 
     // Parse file_protection block
     if let Some(fp) = config.get("file_protection") {
-        if let Ok(fp_rules) = parse_file_protection_block(fp) {
-            rules.extend(fp_rules);
-        }
+        let fp_rules =
+            parse_file_protection_block(fp).map_err(|e| format!("file_protection: {e}"))?;
+        rules.extend(fp_rules);
     }
 
     Ok(rules)
@@ -153,9 +151,9 @@ pub fn load_claude_settings(path: &Path) -> Result<Vec<PermissionRule>, String> 
                 .collect::<Vec<_>>()
         });
 
-        if let Ok(perm_rules) = parse_permissions_block(allow.as_deref(), deny.as_deref()) {
-            rules.extend(perm_rules);
-        }
+        let perm_rules = parse_permissions_block(allow.as_deref(), deny.as_deref())
+            .map_err(|e| format!("permissions: {e}"))?;
+        rules.extend(perm_rules);
     }
 
     Ok(rules)
@@ -164,7 +162,9 @@ pub fn load_claude_settings(path: &Path) -> Result<Vec<PermissionRule>, String> 
 /// Parse Claude Code-style permission strings.
 ///
 /// Each string has the format `ToolName(pattern)` (e.g. `Read(./.env)`).
-/// Malformed entries are silently skipped (logged as warnings).
+/// Malformed entries (unknown tools, empty strings, format errors) return
+/// an error with a description of which entry was problematic. This ensures
+/// that typos in deny/allow rules are never silently dropped.
 ///
 /// Returns rules ordered with deny first, then allow (so that within a
 /// single source, deny rules take precedence during first-match evaluation).
@@ -176,18 +176,24 @@ pub fn parse_permissions_block(
 
     // Deny rules first (deny beats allow within a source)
     if let Some(deny_strs) = deny {
-        for s in deny_strs {
-            if let Some(rule) = permission_string_to_rule(s, RuleAction::Deny) {
-                rules.push(rule);
+        for (i, s) in deny_strs.iter().enumerate() {
+            match permission_string_to_rule(s, RuleAction::Deny) {
+                Ok(rule) => rules.push(rule),
+                Err(e) => {
+                    return Err(format!("deny[{i}]: {e}"));
+                }
             }
         }
     }
 
     // Allow rules second
     if let Some(allow_strs) = allow {
-        for s in allow_strs {
-            if let Some(rule) = permission_string_to_rule(s, RuleAction::Allow) {
-                rules.push(rule);
+        for (i, s) in allow_strs.iter().enumerate() {
+            match permission_string_to_rule(s, RuleAction::Allow) {
+                Ok(rule) => rules.push(rule),
+                Err(e) => {
+                    return Err(format!("allow[{i}]: {e}"));
+                }
             }
         }
     }
@@ -197,9 +203,10 @@ pub fn parse_permissions_block(
 
 /// Convert a single permission string and action into a PermissionRule.
 ///
-/// Returns None if the string is malformed (invalid format, unknown tool, etc.).
-fn permission_string_to_rule(s: &str, action: RuleAction) -> Option<PermissionRule> {
-    let parsed = crate::pattern::parse_permission_string(s)?;
+/// Returns an error if the string is malformed (invalid format, unknown tool, etc.).
+fn permission_string_to_rule(s: &str, action: RuleAction) -> Result<PermissionRule, String> {
+    let parsed =
+        crate::pattern::parse_permission_string(s).ok_or_else(|| describe_permission_error(s))?;
 
     let (tool_pattern_str, pattern) = parsed;
 
@@ -219,7 +226,7 @@ fn permission_string_to_rule(s: &str, action: RuleAction) -> Option<PermissionRu
         })
         .unwrap_or(true);
 
-    Some(PermissionRule {
+    Ok(PermissionRule {
         tool_pattern,
         path_pattern: if is_path_tool {
             Some(pattern.clone())
@@ -230,6 +237,30 @@ fn permission_string_to_rule(s: &str, action: RuleAction) -> Option<PermissionRu
         operation: None,
         action,
     })
+}
+
+/// Build a human-readable description of why a permission string failed to parse.
+fn describe_permission_error(s: &str) -> String {
+    if s.is_empty() {
+        return "empty permission string".to_string();
+    }
+    if let Some(open_idx) = s.find('(') {
+        let tool_name = &s[..open_idx];
+        if tool_name.is_empty() {
+            return format!("empty tool name in '{s}'");
+        }
+        if !s.ends_with(')') {
+            return format!("missing closing parenthesis in '{s}'");
+        }
+        let inner = &s[open_idx + 1..s.len() - 1];
+        if inner.is_empty() {
+            return format!("empty pattern in '{s}'");
+        }
+        if !crate::pattern::is_known_tool(tool_name) {
+            return format!("unknown tool '{tool_name}' in '{s}'");
+        }
+    }
+    format!("malformed permission string '{s}'")
 }
 
 /// Parse the `path_access` config block.
@@ -342,13 +373,22 @@ pub fn parse_command_gate_block(config: &Value) -> Result<Vec<PermissionRule>, S
         for (pattern, action_val) in patterns {
             let action_str = match action_val.as_str() {
                 Some(s) => s,
-                None => continue,
+                None => {
+                    return Err(format!(
+                        "patterns['{pattern}']: expected a string action, got {:?}",
+                        action_val
+                    ));
+                }
             };
 
             let action = match action_str {
                 "ask" => RuleAction::Ask,
                 "deny" => RuleAction::Deny,
-                _ => continue, // unknown action, skip
+                _ => {
+                    return Err(format!(
+                        "patterns['{pattern}']: unknown action '{action_str}', expected 'ask' or 'deny'"
+                    ));
+                }
             };
 
             rules.push(PermissionRule {
@@ -463,20 +503,34 @@ pub fn parse_file_protection_block(config: &Value) -> Result<Vec<PermissionRule>
         for (pattern, ops) in patterns {
             let ops_obj = match ops.as_object() {
                 Some(o) => o,
-                None => continue,
+                None => {
+                    return Err(format!(
+                        "patterns['{pattern}']: expected an object with operation->action mappings, got {:?}",
+                        ops
+                    ));
+                }
             };
 
-            for (_op, action_val) in ops_obj {
+            for (op, action_val) in ops_obj {
                 let action_str = match action_val.as_str() {
                     Some(s) => s,
-                    None => continue,
+                    None => {
+                        return Err(format!(
+                            "patterns['{pattern}']['{op}']: expected a string action, got {:?}",
+                            action_val
+                        ));
+                    }
                 };
 
                 let action = match action_str {
                     "allow" => RuleAction::Allow,
                     "ask" => RuleAction::Ask,
                     "deny" => RuleAction::Deny,
-                    _ => continue,
+                    _ => {
+                        return Err(format!(
+                            "patterns['{pattern}']['{op}']: unknown action '{action_str}', expected 'allow', 'ask', or 'deny'"
+                        ));
+                    }
                 };
 
                 rules.push(PermissionRule {
@@ -851,22 +905,71 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_permissions_block_malformed_entries_skipped() {
-        let allow = vec![
-            "Read(./docs/**)".to_string(),
-            "".to_string(),                  // empty — skipped
-            "InvalidTool(foo)".to_string(),  // unknown tool — skipped
-            "./bare-pattern.rs".to_string(), // bare pattern — valid
-        ];
-        let deny = vec![
-            "()".to_string(), // no tool name — skipped
-        ];
+    fn test_parse_permissions_block_rejects_empty_entry() {
+        let allow = vec!["".to_string()];
+        let result = parse_permissions_block(Some(&allow), None);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("empty entry should be rejected"),
+        };
+        assert!(err.contains("empty"), "error should mention 'empty': {err}");
+    }
 
-        let rules = parse_permissions_block(Some(&allow), Some(&deny))
-            .expect("should skip malformed entries");
-        // deny is empty (only malformed), allow should give 2 valid rules
-        // bare pattern with no tool prefix → applies to all tools
-        assert_eq!(rules.len(), 2, "only valid entries create rules");
+    #[test]
+    fn test_parse_permissions_block_rejects_unknown_tool() {
+        let allow = vec!["InvalidTool(foo)".to_string()];
+        let result = parse_permissions_block(Some(&allow), None);
+        assert!(result.is_err(), "unknown tool should be rejected");
+        assert!(
+            result.unwrap_err().contains("unknown tool"),
+            "error should mention unknown tool"
+        );
+    }
+
+    #[test]
+    fn test_parse_permissions_block_rejects_empty_tool_name() {
+        let allow = vec!["()".to_string()];
+        let result = parse_permissions_block(Some(&allow), None);
+        assert!(result.is_err(), "empty tool name should be rejected");
+        assert!(
+            result.unwrap_err().contains("empty tool name"),
+            "error should mention empty tool name"
+        );
+    }
+
+    #[test]
+    fn test_parse_permissions_block_rejects_missing_closing_paren() {
+        let allow = vec!["Read(./docs/**".to_string()];
+        let result = parse_permissions_block(Some(&allow), None);
+        assert!(result.is_err(), "missing closing paren should be rejected");
+        assert!(
+            result.unwrap_err().contains("missing closing"),
+            "error should mention missing closing paren"
+        );
+    }
+
+    #[test]
+    fn test_parse_permissions_block_rejects_empty_pattern() {
+        let allow = vec!["Read()".to_string()];
+        let result = parse_permissions_block(Some(&allow), None);
+        assert!(result.is_err(), "empty pattern should be rejected");
+        assert!(
+            result.unwrap_err().contains("empty pattern"),
+            "error should mention empty pattern"
+        );
+    }
+
+    #[test]
+    fn test_parse_permissions_block_bare_pattern_is_valid() {
+        // Bare patterns (no parens) are valid — they apply to all tools
+        let allow = vec!["./bare-pattern.rs".to_string()];
+        let rules =
+            parse_permissions_block(Some(&allow), None).expect("bare patterns should be valid");
+        assert_eq!(rules.len(), 1, "bare pattern should produce a rule");
+        assert!(
+            rules[0].tool_pattern.is_none(),
+            "bare pattern → no tool filter"
+        );
     }
 
     #[test]
@@ -994,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_command_gate_block_unknown_action_skipped() {
+    fn test_parse_command_gate_block_unknown_action_rejected() {
         let config = json!({
             "patterns": {
                 "rm -rf": "ask",
@@ -1002,8 +1105,24 @@ mod tests {
             }
         });
 
-        let rules = parse_command_gate_block(&config).expect("should parse");
-        assert_eq!(rules.len(), 1, "unknown action entry skipped");
+        let result = parse_command_gate_block(&config);
+        assert!(result.is_err(), "unknown action should be rejected");
+        assert!(
+            result.unwrap_err().contains("unknown action"),
+            "error should mention unknown action"
+        );
+    }
+
+    #[test]
+    fn test_parse_command_gate_block_non_string_action_rejected() {
+        let config = json!({
+            "patterns": {
+                "rm -rf": 123 // number instead of string
+            }
+        });
+
+        let result = parse_command_gate_block(&config);
+        assert!(result.is_err(), "non-string action should be rejected");
     }
 
     // ── parse_command_gate_block with allow/deny/ask arrays ────────────────
@@ -1200,47 +1319,53 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_file_protection_block_unknown_action_skipped() {
+    fn test_parse_file_protection_block_unknown_action_rejected() {
         let config = json!({
             "patterns": {
                 ".env": { "read": "allow", "write": "maybe" }
             }
         });
-        let rules = parse_file_protection_block(&config).expect("should parse");
-        // "write" action "maybe" is unknown → skipped, only "read" rule remains
-        assert_eq!(rules.len(), 1, "unknown action entry should be skipped");
-        assert_eq!(rules[0].action, RuleAction::Allow);
-        assert_eq!(rules[0].path_pattern.as_deref(), Some(".env"));
+        let result = parse_file_protection_block(&config);
+        assert!(result.is_err(), "unknown action should be rejected");
+        assert!(
+            result.unwrap_err().contains("unknown action"),
+            "error should mention unknown action"
+        );
     }
 
     #[test]
-    fn test_parse_file_protection_block_invalid_operation_value_skipped() {
+    fn test_parse_file_protection_block_invalid_operation_value_rejected() {
         let config = json!({
             "patterns": {
                 ".env": { "read": "ask", "write": 123 }
             }
         });
-        let rules = parse_file_protection_block(&config).expect("should parse");
-        // "write" value is a number, not a string → skipped
-        assert_eq!(
-            rules.len(),
-            1,
-            "non-string operation action should be skipped"
+        let result = parse_file_protection_block(&config);
+        assert!(
+            result.is_err(),
+            "non-string action value should be rejected"
         );
-        assert_eq!(rules[0].path_pattern.as_deref(), Some(".env"));
+        assert!(
+            result.unwrap_err().contains("expected a string action"),
+            "error should mention expected string"
+        );
     }
 
     #[test]
-    fn test_parse_file_protection_block_string_instead_of_object_skipped() {
+    fn test_parse_file_protection_block_string_instead_of_object_rejected() {
         let config = json!({
             "patterns": {
                 ".env": "just a string, not an object"
             }
         });
-        let rules = parse_file_protection_block(&config).expect("should parse");
+        let result = parse_file_protection_block(&config);
         assert!(
-            rules.is_empty(),
-            "non-object pattern value should be skipped"
+            result.is_err(),
+            "non-object pattern value should be rejected"
+        );
+        assert!(
+            result.unwrap_err().contains("expected an object"),
+            "error should mention expected object"
         );
     }
 

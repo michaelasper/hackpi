@@ -305,9 +305,15 @@ impl GuardEvaluator {
     ///
     /// Calls `config::load_all()` to parse and merge rules from
     /// `.hackpi/guardrails.json`, `.claude/settings.json`, and
-    /// `.claude/settings.local.json`.
+    /// `.claude/settings.local.json`, then runs validation to ensure
+    /// all parsed rules are structurally sound (valid globs, known tool
+    /// names, non-empty command patterns).
+    ///
+    /// Validation is the same check used by hot reload, so initial load
+    /// and hot reload have consistent safety guarantees.
     pub fn load_rules(&mut self) -> Result<(), String> {
         let rules = config::load_all(&self.settings_paths)?;
+        hot_reload::validate(&rules)?;
         self.config_rules = rules;
         Ok(())
     }
