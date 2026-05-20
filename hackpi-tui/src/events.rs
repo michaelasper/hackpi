@@ -344,6 +344,73 @@ pub enum TuiEvent {
     },
 }
 
+impl TuiEvent {
+    /// Serialize this event as a JSON line for structured/machine-readable output.
+    ///
+    /// Returns `None` for events that cannot be serialized (e.g. `PermissionRequest`
+    /// which contains a non-serializable oneshot sender).
+    ///
+    /// Each returned JSON object includes a `type` field identifying the event kind
+    /// and a `timestamp` field in ISO 8601 format.
+    pub fn to_json_line(&self) -> Option<String> {
+        fn timestamp() -> String {
+            use chrono::Utc;
+            Utc::now().to_rfc3339()
+        }
+
+        let ts = timestamp();
+        match self {
+            TuiEvent::Submit(text) => Some(serde_json::json!({
+                "type": "submit",
+                "text": text,
+                "timestamp": ts,
+            })),
+            TuiEvent::StreamChunk(text) => Some(serde_json::json!({
+                "type": "stream_chunk",
+                "text": text,
+                "timestamp": ts,
+            })),
+            TuiEvent::ToolCall { id, name, .. } => Some(serde_json::json!({
+                "type": "tool_call",
+                "id": id,
+                "name": name,
+                "timestamp": ts,
+            })),
+            TuiEvent::ToolResult { id, result } => {
+                let status = match result {
+                    ToolResult::Success { .. } => "success",
+                    ToolResult::SystemError { .. } => "error",
+                    ToolResult::Timeout => "timeout",
+                    ToolResult::Cancelled => "cancelled",
+                };
+                Some(serde_json::json!({
+                    "type": "tool_result",
+                    "id": id,
+                    "status": status,
+                    "timestamp": ts,
+                }))
+            }
+            TuiEvent::Error(msg) => Some(serde_json::json!({
+                "type": "error",
+                "message": msg,
+                "timestamp": ts,
+            })),
+            TuiEvent::Usage(u) => Some(serde_json::json!({
+                "type": "usage",
+                "input_tokens": u.input_tokens,
+                "output_tokens": u.output_tokens,
+                "timestamp": ts,
+            })),
+            TuiEvent::Done => Some(serde_json::json!({
+                "type": "done",
+                "timestamp": ts,
+            })),
+            TuiEvent::PermissionRequest { .. } => None,
+        }
+        .map(|v| v.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,5 +679,136 @@ mod tests {
         } else {
             panic!("expected Read variant");
         }
+    }
+
+    // ── TuiEvent::to_json_line tests ───────────────────────────────────
+
+    #[test]
+    fn test_to_json_line_submit() {
+        let event = TuiEvent::Submit("hello".into());
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"submit\""));
+        assert!(json.contains("\"text\":\"hello\""));
+        assert!(json.contains("\"timestamp\":"));
+    }
+
+    #[test]
+    fn test_to_json_line_stream_chunk() {
+        let event = TuiEvent::StreamChunk("some text".into());
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"stream_chunk\""));
+        assert!(json.contains("\"text\":\"some text\""));
+    }
+
+    #[test]
+    fn test_to_json_line_tool_call() {
+        let event = TuiEvent::ToolCall {
+            id: "tc-1".into(),
+            name: "bash".into(),
+            input: None,
+        };
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"tool_call\""));
+        assert!(json.contains("\"id\":\"tc-1\""));
+        assert!(json.contains("\"name\":\"bash\""));
+    }
+
+    #[test]
+    fn test_to_json_line_tool_result_success() {
+        let event = TuiEvent::ToolResult {
+            id: "tc-1".into(),
+            result: ToolResult::Success {
+                content: "ok".into(),
+            },
+        };
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"tool_result\""));
+        assert!(json.contains("\"id\":\"tc-1\""));
+        assert!(json.contains("\"status\":\"success\""));
+    }
+
+    #[test]
+    fn test_to_json_line_tool_result_error() {
+        let event = TuiEvent::ToolResult {
+            id: "tc-2".into(),
+            result: ToolResult::SystemError {
+                message: "boom".into(),
+            },
+        };
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"tool_result\""));
+        assert!(json.contains("\"status\":\"error\""));
+    }
+
+    #[test]
+    fn test_to_json_line_tool_result_timeout() {
+        let event = TuiEvent::ToolResult {
+            id: "tc-3".into(),
+            result: ToolResult::Timeout,
+        };
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"status\":\"timeout\""));
+    }
+
+    #[test]
+    fn test_to_json_line_tool_result_cancelled() {
+        let event = TuiEvent::ToolResult {
+            id: "tc-4".into(),
+            result: ToolResult::Cancelled,
+        };
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"status\":\"cancelled\""));
+    }
+
+    #[test]
+    fn test_to_json_line_error() {
+        let event = TuiEvent::Error("something went wrong".into());
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"error\""));
+        assert!(json.contains("\"message\":\"something went wrong\""));
+    }
+
+    #[test]
+    fn test_to_json_line_usage() {
+        let event = TuiEvent::Usage(Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+        });
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"usage\""));
+        assert!(json.contains("\"input_tokens\":100"));
+        assert!(json.contains("\"output_tokens\":50"));
+    }
+
+    #[test]
+    fn test_to_json_line_done() {
+        let event = TuiEvent::Done;
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"type\":\"done\""));
+    }
+
+    #[test]
+    fn test_to_json_line_permission_request_returns_none() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let event = TuiEvent::PermissionRequest {
+            id: 1,
+            reason: hackpi_guardrails::GuardReason {
+                guard: hackpi_guardrails::GuardType::CommandGate,
+                tool: "bash".into(),
+                details: "test".into(),
+            },
+            response: tx,
+        };
+        assert!(event.to_json_line().is_none());
+    }
+
+    #[test]
+    fn test_to_json_line_output_is_valid_json() {
+        let event = TuiEvent::Submit("test".into());
+        let json = event.to_json_line().expect("should produce JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should be valid JSON");
+        assert_eq!(parsed["type"], "submit");
+        assert_eq!(parsed["text"], "test");
+        assert!(parsed["timestamp"].is_string());
     }
 }

@@ -45,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
         return hackpi_tui::script::run_scenario(std::path::Path::new(&script_path)).await;
     }
 
+    // Check for --structured-events mode before any terminal/TUI setup.
+    let structured_mode = args.iter().any(|arg| arg == "--structured-events");
+
     // Create GuardEvaluator with settings paths from current directory
     let workspace_root = std::env::current_dir()?;
     let settings_paths = SettingsPaths::new(&workspace_root);
@@ -59,6 +62,48 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("Failed to load guardrail rules: {e}");
         }
     }
+
+    // Create the permission channel used by the TUI for user prompts.
+    // In structured mode this will not be consumed (the mode will return early).
+    let (permission_tx, mut permission_rx) = mpsc::unbounded_channel::<PermissionRequest>();
+
+    // Register tools (needed for both structured-events mode and TUI mode).
+    let mut tool_registry = ToolRegistry::new();
+    tool_registry.set_guard_evaluator(Arc::clone(&guard_evaluator));
+    tool_registry.set_permission_tx(permission_tx.clone());
+    register_all_tools(&mut tool_registry, &workspace_root);
+    let vcs_config = VcsConfig::from_env(&workspace_root);
+    register_vcs_tools(&mut tool_registry, &workspace_root, &vcs_config);
+
+    // If --structured-events was requested, run in structured-output mode and exit.
+    if structured_mode {
+        // Drop the receiver since structured mode doesn't prompt users
+        drop(permission_rx);
+        let tools = Arc::new(tool_registry);
+        return hackpi_tui::structured::run_structured_events(tools, guard_evaluator).await;
+    }
+
+    // TUI mode: initialize task store and register task tool.
+    let mut app = App::new();
+    let tasks_dir = workspace_root.join(".hackpi").join("tasks");
+    match hackpi_tasks::JsonTaskStore::new(tasks_dir).await {
+        Ok(store) => {
+            let store_arc = Arc::new(store);
+            // Register task tool in the registry
+            let task_store_dyn: Arc<dyn hackpi_tasks::TaskStore> =
+                Arc::clone(&store_arc) as Arc<dyn hackpi_tasks::TaskStore>;
+            let task_tool = hackpi_tasks::TaskTool::new(task_store_dyn);
+            task_tool.register(&mut tool_registry);
+            // Also keep for slash command access
+            app.task_store = Some(store_arc);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to initialize task store: {e}. Task commands will be unavailable."
+            );
+        }
+    }
+    let tools = Arc::new(tool_registry);
 
     // TODO: Spawn hot reload thread in a future phase.
     // The HotReloader needs access to the GuardEvaluator's internal rule list
@@ -76,46 +121,13 @@ async fn main() -> anyhow::Result<()> {
 
     let (tui_tx, mut tui_rx) = mpsc::unbounded_channel::<TuiEvent>();
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let (permission_tx, mut permission_rx) = mpsc::unbounded_channel::<PermissionRequest>();
     let (mut signal_tx, _signal_rx) = tokio::sync::watch::channel(false);
     let cancelled = Arc::new(AtomicBool::new(false));
-
-    let mut app = App::new();
-
-    // Initialize task store
-    let tasks_dir = workspace_root.join(".hackpi").join("tasks");
-    match hackpi_tasks::JsonTaskStore::new(tasks_dir).await {
-        Ok(store) => {
-            app.task_store = Some(Arc::new(store));
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to initialize task store: {e}. Task commands will be unavailable."
-            );
-        }
-    }
 
     let mut input = InputHandler::new();
     let conversation_mut = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     let api_config = ApiConfig::from_env();
-
-    let mut tool_registry = ToolRegistry::new();
-    tool_registry.set_guard_evaluator(Arc::clone(&guard_evaluator));
-    tool_registry.set_permission_tx(permission_tx);
-    register_all_tools(&mut tool_registry, &workspace_root);
-    let vcs_config = VcsConfig::from_env(&workspace_root);
-    register_vcs_tools(&mut tool_registry, &workspace_root, &vcs_config);
-
-    // Register task tool using the same store as slash commands
-    if let Some(ref task_store) = app.task_store {
-        let task_store_dyn: Arc<dyn hackpi_tasks::TaskStore> =
-            Arc::clone(task_store) as Arc<dyn hackpi_tasks::TaskStore>;
-        let task_tool = hackpi_tasks::TaskTool::new(task_store_dyn);
-        task_tool.register(&mut tool_registry);
-    }
-
-    let tools = Arc::new(tool_registry);
 
     terminal.clear()?;
 
