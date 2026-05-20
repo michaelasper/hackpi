@@ -8,6 +8,7 @@ use hackpi_guardrails::{GuardEvaluator, SettingsPaths};
 use ratatui::backend::TestBackend;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 /// A complete test scenario loaded from a JSON file.
 #[derive(Debug, Deserialize)]
@@ -89,9 +90,12 @@ pub async fn run_scenario(path: &Path) -> anyhow::Result<()> {
     // Set up minimal context for slash commands.
     let workspace_root = std::env::current_dir()?;
     let settings_paths = SettingsPaths::new(&workspace_root);
-    let mut guard_evaluator = GuardEvaluator::new(true, settings_paths.clone());
+    let guard_evaluator = Arc::new(RwLock::new(GuardEvaluator::new(
+        true,
+        settings_paths.clone(),
+    )));
     // Load rules silently (may fail — that's fine for script mode).
-    let _ = guard_evaluator.load_rules();
+    let _ = guard_evaluator.write().unwrap().load_rules();
 
     let tool_registry = ToolRegistry::new();
 
@@ -113,7 +117,7 @@ pub async fn run_scenario(path: &Path) -> anyhow::Result<()> {
                             &submitted,
                             &mut app,
                             &tui_tx,
-                            &mut guard_evaluator,
+                            &guard_evaluator,
                             &tool_registry,
                         )
                         .await;
