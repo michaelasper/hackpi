@@ -221,8 +221,65 @@ pub fn task_state_style(state: &str, theme: &Theme) -> Style {
         "blocked" => theme.task_blocked,
         "in_review" => theme.task_in_review,
         "done" => theme.task_done,
-        "cancelled" => theme.task_cancelled,
+        "cancelled" | "canceled" => theme.task_cancelled,
         _ => theme.task_cancelled,
+    }
+}
+
+/// Convert a raw task state string (e.g. `"in_progress"`) into a
+/// human-readable display label (e.g. `"In Progress"`).
+///
+/// Falls back to capitalising the first character of the input.
+pub fn format_task_state(state: &str) -> String {
+    match state {
+        "backlog" => "Backlog".into(),
+        "todo" => "To Do".into(),
+        "in_progress" => "In Progress".into(),
+        "in_review" => "In Review".into(),
+        "staged" | "ready" => "Ready".into(),
+        "done" => "Done".into(),
+        "cancelled" | "canceled" => "Cancelled".into(),
+        "blocked" => "Blocked".into(),
+        _ => {
+            if state.is_empty() {
+                "Unknown".into()
+            } else {
+                let mut chars = state.chars();
+                let mut s = String::with_capacity(state.len());
+                match chars.next() {
+                    Some(c) => {
+                        s.push(c.to_ascii_uppercase());
+                        s.push_str(chars.as_str());
+                    }
+                    None => s.push_str("Unknown"),
+                }
+                s
+            }
+        }
+    }
+}
+
+/// Return a semantic style for a task priority level.
+pub fn priority_style(priority: &hackpi_tasks::TaskPriority, theme: &Theme) -> Style {
+    use hackpi_tasks::TaskPriority;
+    match priority {
+        TaskPriority::None => theme.fg_muted,
+        TaskPriority::Low => theme.fg_default,
+        TaskPriority::Medium => theme.fg_emphasis,
+        TaskPriority::High => theme.status_warning,
+        TaskPriority::Urgent => theme.status_error,
+    }
+}
+
+/// Return a human-readable label for a task priority level.
+pub fn priority_label(priority: &hackpi_tasks::TaskPriority) -> &'static str {
+    use hackpi_tasks::TaskPriority;
+    match priority {
+        TaskPriority::None => "None",
+        TaskPriority::Low => "Low",
+        TaskPriority::Medium => "Medium",
+        TaskPriority::High => "High",
+        TaskPriority::Urgent => "Urgent",
     }
 }
 
@@ -492,5 +549,124 @@ mod tests {
     fn test_tool_status_label_cancelled() {
         let status = crate::app::ToolCallStatus::Done(hackpi_core::tools::ToolResult::Cancelled);
         assert_eq!(tool_status_label(&status), "Cancelled");
+    }
+
+    // ── format_task_state tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_format_task_state_backlog() {
+        assert_eq!(format_task_state("backlog"), "Backlog");
+    }
+
+    #[test]
+    fn test_format_task_state_todo() {
+        assert_eq!(format_task_state("todo"), "To Do");
+    }
+
+    #[test]
+    fn test_format_task_state_in_progress() {
+        assert_eq!(format_task_state("in_progress"), "In Progress");
+    }
+
+    #[test]
+    fn test_format_task_state_in_review() {
+        assert_eq!(format_task_state("in_review"), "In Review");
+    }
+
+    #[test]
+    fn test_format_task_state_staged() {
+        assert_eq!(format_task_state("staged"), "Ready");
+    }
+
+    #[test]
+    fn test_format_task_state_ready() {
+        assert_eq!(format_task_state("ready"), "Ready");
+    }
+
+    #[test]
+    fn test_format_task_state_done() {
+        assert_eq!(format_task_state("done"), "Done");
+    }
+
+    #[test]
+    fn test_format_task_state_cancelled() {
+        assert_eq!(format_task_state("cancelled"), "Cancelled");
+    }
+
+    #[test]
+    fn test_format_task_state_canceled() {
+        assert_eq!(format_task_state("canceled"), "Cancelled");
+    }
+
+    #[test]
+    fn test_format_task_state_blocked() {
+        assert_eq!(format_task_state("blocked"), "Blocked");
+    }
+
+    #[test]
+    fn test_format_task_state_unknown() {
+        let label = format_task_state("custom_state");
+        assert_eq!(label, "Custom_state");
+    }
+
+    #[test]
+    fn test_format_task_state_empty() {
+        assert_eq!(format_task_state(""), "Unknown");
+    }
+
+    // ── priority_label tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_priority_label_none() {
+        assert_eq!(priority_label(&hackpi_tasks::TaskPriority::None), "None");
+    }
+
+    #[test]
+    fn test_priority_label_low() {
+        assert_eq!(priority_label(&hackpi_tasks::TaskPriority::Low), "Low");
+    }
+
+    #[test]
+    fn test_priority_label_medium() {
+        assert_eq!(
+            priority_label(&hackpi_tasks::TaskPriority::Medium),
+            "Medium"
+        );
+    }
+
+    #[test]
+    fn test_priority_label_high() {
+        assert_eq!(priority_label(&hackpi_tasks::TaskPriority::High), "High");
+    }
+
+    #[test]
+    fn test_priority_label_urgent() {
+        assert_eq!(
+            priority_label(&hackpi_tasks::TaskPriority::Urgent),
+            "Urgent"
+        );
+    }
+
+    // ── priority_style tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_priority_style_none() {
+        let theme = color_theme();
+        let style = priority_style(&hackpi_tasks::TaskPriority::None, &theme);
+        assert_eq!(style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_priority_style_high() {
+        let theme = color_theme();
+        let style = priority_style(&hackpi_tasks::TaskPriority::High, &theme);
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_priority_style_urgent() {
+        let theme = color_theme();
+        let style = priority_style(&hackpi_tasks::TaskPriority::Urgent, &theme);
+        assert_eq!(style.fg, Some(Color::Red));
     }
 }
