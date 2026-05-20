@@ -1,4 +1,4 @@
-use crate::events::TuiEvent;
+use crate::events::{ToolSummary, TuiEvent};
 use hackpi_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use hackpi_core::types::Usage;
 use hackpi_guardrails::{GuardEvaluator, GuardReason, PermissionDecision};
@@ -48,6 +48,7 @@ pub struct ConversationEntry {
 pub struct ToolCallDisplay {
     pub id: String,
     pub name: String,
+    pub summary: ToolSummary,
     pub status: ToolCallStatus,
 }
 
@@ -163,7 +164,7 @@ impl App {
                     entry.text.push_str(&chunk);
                 }
             }
-            TuiEvent::ToolCall { id, name } => {
+            TuiEvent::ToolCall { id, name, input } => {
                 self.auto_scroll = true;
                 let needs_new = match self.conversation.back() {
                     Some(e) => e.role != "assistant",
@@ -177,9 +178,11 @@ impl App {
                     });
                 }
                 if let Some(entry) = self.conversation.back_mut() {
+                    let summary = ToolSummary::from_params(&name, input.as_ref());
                     entry.tool_calls.push(ToolCallDisplay {
                         id,
                         name,
+                        summary,
                         status: ToolCallStatus::Running,
                     });
                 }
@@ -625,6 +628,7 @@ async fn invoke_tool_and_render(
         .send(TuiEvent::ToolCall {
             id: tool_id.clone(),
             name: tool_name.to_string(),
+            input: Some(params.clone()),
         })
         .ok();
 
@@ -1050,6 +1054,7 @@ pub fn format_conversation(conversation: &VecDeque<ConversationEntry>) -> String
         if !entry.tool_calls.is_empty() {
             output.push('\n');
             for tc in &entry.tool_calls {
+                let title = tc.summary.title();
                 let status_str = match &tc.status {
                     ToolCallStatus::Running => "Running".to_string(),
                     ToolCallStatus::Done(result) => match result {
@@ -1063,7 +1068,8 @@ pub fn format_conversation(conversation: &VecDeque<ConversationEntry>) -> String
                         ToolResult::Cancelled => "Done (Cancelled)".to_string(),
                     },
                 };
-                output.push_str(&format!("### Tool Call: {}\n", tc.name));
+                output.push_str(&format!("### Tool: {title}\n"));
+                output.push_str(&format!("**Tool**: {}\n", tc.name));
                 output.push_str(&format!("**Status**: {status_str}\n\n"));
             }
         }
@@ -1661,11 +1667,13 @@ mod tests {
         app.handle_event(TuiEvent::ToolCall {
             id: "tc1".into(),
             name: "read".into(),
+            input: None,
         });
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].role, "assistant");
         assert_eq!(app.conversation[0].tool_calls.len(), 1);
         assert_eq!(app.conversation[0].tool_calls[0].name, "read");
+        assert_eq!(app.conversation[0].tool_calls[0].summary.title(), "read");
         assert!(matches!(
             app.conversation[0].tool_calls[0].status,
             ToolCallStatus::Running
@@ -1678,6 +1686,7 @@ mod tests {
         app.handle_event(TuiEvent::ToolCall {
             id: "tc1".into(),
             name: "read".into(),
+            input: Some(serde_json::json!({"path": "Cargo.toml"})),
         });
         app.handle_event(TuiEvent::ToolResult {
             id: "tc1".into(),
@@ -2911,6 +2920,10 @@ mod tests {
                 ToolCallDisplay {
                     id: "tc1".into(),
                     name: "read".into(),
+                    summary: ToolSummary::from_params(
+                        "read",
+                        Some(&serde_json::json!({"path": "file.txt"})),
+                    ),
                     status: ToolCallStatus::Done(ToolResult::Success {
                         content: "file contents here".into(),
                     }),
@@ -2918,6 +2931,7 @@ mod tests {
                 ToolCallDisplay {
                     id: "tc2".into(),
                     name: "bash".into(),
+                    summary: ToolSummary::Unknown,
                     status: ToolCallStatus::Running,
                 },
             ],
@@ -2927,10 +2941,12 @@ mod tests {
         assert!(result.contains("Messages: 2"));
         assert!(result.contains("## Message 1"));
         assert!(result.contains("## Message 2"));
-        assert!(result.contains("### Tool Call: read"));
+        assert!(result.contains("### Tool: read  file.txt"));
+        assert!(result.contains("**Tool**: read"));
         assert!(result.contains("**Status**: Done (Success)"));
         assert!(result.contains("file contents here"));
-        assert!(result.contains("### Tool Call: bash"));
+        assert!(result.contains("### Tool: tool"));
+        assert!(result.contains("**Tool**: bash"));
         assert!(result.contains("**Status**: Running"));
     }
 
@@ -2943,6 +2959,7 @@ mod tests {
             tool_calls: vec![ToolCallDisplay {
                 id: "tc1".into(),
                 name: "fetch".into(),
+                summary: ToolSummary::Unknown,
                 status: ToolCallStatus::Done(ToolResult::Timeout),
             }],
         });
@@ -2960,6 +2977,7 @@ mod tests {
             tool_calls: vec![ToolCallDisplay {
                 id: "tc1".into(),
                 name: "bash".into(),
+                summary: ToolSummary::Unknown,
                 status: ToolCallStatus::Done(ToolResult::SystemError {
                     message: "command not found".into(),
                 }),
@@ -2979,6 +2997,7 @@ mod tests {
             tool_calls: vec![ToolCallDisplay {
                 id: "tc1".into(),
                 name: "long_task".into(),
+                summary: ToolSummary::Unknown,
                 status: ToolCallStatus::Done(ToolResult::Cancelled),
             }],
         });
@@ -3016,6 +3035,7 @@ mod tests {
             tool_calls: vec![ToolCallDisplay {
                 id: "tc1".into(),
                 name: "tool".into(),
+                summary: ToolSummary::Unknown,
                 status: ToolCallStatus::Running,
             }],
         });
@@ -3023,7 +3043,7 @@ mod tests {
         let result = format_conversation(&conversation);
         // Should handle gracefully, not panic
         assert!(result.contains("Messages: 2"));
-        assert!(result.contains("### Tool Call: tool"));
+        assert!(result.contains("### Tool: tool"));
     }
 
     #[tokio::test]
