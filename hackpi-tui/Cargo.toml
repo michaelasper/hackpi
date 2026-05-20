@@ -18,6 +18,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 futures.workspace = true
 chrono.workspace = true
+unicode-width.workspace = true
 hackpi-core = { path = "../hackpi-core" }
 hackpi-tools = { path = "../hackpi-tools" }
 hackpi-guardrails = { path = "../hackpi-guardrails" }
