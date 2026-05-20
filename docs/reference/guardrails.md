@@ -4,15 +4,15 @@ Full documentation of hackpi's permission and guardrail system.
 
 ## Config file locations
 
-hackpi loads rules from three files, in order:
+hackpi loads rules from three files, in priority order (highest first):
 
 | File | Scope |
 |------|-------|
-| `.hackpi/guardrails.json` | Project-wide rules |
+| `.hackpi/guardrails.json` | Project-wide rules — highest priority |
 | `.claude/settings.json` | Project-wide rules (shared with Claude) |
 | `.claude/settings.local.json` | Local-only rules (not committed) |
 
-Later files override earlier ones. All files use the same JSON format.
+Earlier files take priority — the first matching rule wins. All files use the same JSON format.
 
 ## Rule schema
 
