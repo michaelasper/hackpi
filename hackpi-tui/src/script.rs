@@ -69,12 +69,7 @@ pub struct Assertions {
 /// - The file cannot be read or parsed.
 /// - A step's assertions fail.
 /// - A file expected by `files_exist` does not exist.
-pub fn run_scenario(path: &Path) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run_scenario_async(path))
-}
-
-async fn run_scenario_async(path: &Path) -> anyhow::Result<()> {
+pub async fn run_scenario(path: &Path) -> anyhow::Result<()> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read scenario file '{}': {e}", path.display()))?;
@@ -921,10 +916,10 @@ mod tests {
 
     // ── Scenario runner integration test ─────────────────────────────────
 
-    #[test]
-    fn test_run_help_and_clear_scenario() {
+    #[tokio::test]
+    async fn test_run_help_and_clear_scenario() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let scenario_path = dir.path().join("test-scenario.json");
+        let scenario_path = dir.path().join("test-help-and-clear.json");
         let scenario_json = r#"{
             "name": "Help and Clear",
             "steps": [
@@ -948,12 +943,12 @@ mod tests {
         }"#;
         std::fs::write(&scenario_path, scenario_json).expect("write scenario");
 
-        let result = run_scenario(&scenario_path);
+        let result = run_scenario(&scenario_path).await;
         assert!(result.is_ok(), "scenario should pass: {:?}", result.err());
     }
 
-    #[test]
-    fn test_run_submit_and_check_scenario() {
+    #[tokio::test]
+    async fn test_run_submit_and_check_scenario() {
         let dir = tempfile::tempdir().expect("tempdir");
         let scenario_path = dir.path().join("test-submit.json");
         let scenario_json = r#"{
@@ -972,33 +967,33 @@ mod tests {
         }"#;
         std::fs::write(&scenario_path, scenario_json).expect("write scenario");
 
-        let result = run_scenario(&scenario_path);
+        let result = run_scenario(&scenario_path).await;
         assert!(result.is_ok(), "scenario should pass: {:?}", result.err());
     }
 
-    #[test]
-    fn test_run_scenario_fails_on_missing_file() {
-        let result = run_scenario(Path::new("/nonexistent/scenario.json"));
+    #[tokio::test]
+    async fn test_run_scenario_fails_on_missing_file() {
+        let result = run_scenario(Path::new("/nonexistent/scenario.json")).await;
         assert!(result.is_err(), "should fail on missing file");
         let err = result.err().unwrap();
         let msg = format!("{err}");
         assert!(msg.contains("Failed to read scenario"), "error: {msg}");
     }
 
-    #[test]
-    fn test_run_scenario_fails_on_bad_json() {
+    #[tokio::test]
+    async fn test_run_scenario_fails_on_bad_json() {
         let dir = tempfile::tempdir().expect("tempdir");
         let bad_path = dir.path().join("bad.json");
         std::fs::write(&bad_path, "not valid json}{").expect("write bad json");
-        let result = run_scenario(&bad_path);
+        let result = run_scenario(&bad_path).await;
         assert!(result.is_err(), "should fail on bad JSON");
         let err = result.err().unwrap();
         let msg = format!("{err}");
         assert!(msg.contains("Failed to parse scenario"), "error: {msg}");
     }
 
-    #[test]
-    fn test_run_scenario_assertion_failure_reported() {
+    #[tokio::test]
+    async fn test_run_scenario_assertion_failure_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
         let scenario_path = dir.path().join("fail-scenario.json");
         let scenario_json = r#"{
@@ -1016,7 +1011,7 @@ mod tests {
         }"#;
         std::fs::write(&scenario_path, scenario_json).expect("write scenario");
 
-        let result = run_scenario(&scenario_path);
+        let result = run_scenario(&scenario_path).await;
         assert!(result.is_err(), "should fail on bad assertion");
         let err = result.err().unwrap();
         let msg = format!("{err}");
@@ -1026,8 +1021,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_run_scenario_with_key_actions() {
+    #[tokio::test]
+    async fn test_run_scenario_with_key_actions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let scenario_path = dir.path().join("key-scenario.json");
         let scenario_json = r#"{
@@ -1061,7 +1056,7 @@ mod tests {
         }"#;
         std::fs::write(&scenario_path, scenario_json).expect("write scenario");
 
-        let result = run_scenario(&scenario_path);
+        let result = run_scenario(&scenario_path).await;
         assert!(result.is_ok(), "scenario should pass: {:?}", result.err());
     }
 }

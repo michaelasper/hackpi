@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Check for --script <path> mode. If present, run the scenario and exit.
     if let Some(script_path) = hackpi_tui::script::parse_script_args(&mut args) {
-        return hackpi_tui::script::run_scenario(std::path::Path::new(&script_path));
+        return hackpi_tui::script::run_scenario(std::path::Path::new(&script_path)).await;
     }
 
     // Create GuardEvaluator with settings paths from current directory
