@@ -804,12 +804,8 @@ fn ui_status_label(status: &UiStatus, loading_frame: usize) -> String {
                 Severity::Warning => "WARN",
                 Severity::Error => "ERR",
             };
-            // Truncate long error messages for the status bar
-            let display = if message.len() > 50 {
-                format!("{}…", &message[..47])
-            } else {
-                message.clone()
-            };
+            // Truncate long error messages for the status bar (char-safe)
+            let display = truncate_for_display(message, 50);
             format!("[{tag}] {display}")
         }
     }

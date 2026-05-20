@@ -333,8 +333,11 @@ impl App {
                         }
                     }
                 }
-                // After a tool completes, revert to generating if still in a tool
-                // running state (the next chunk or tool call will update it).
+                // After a tool completes, revert to generating if the LLM is still
+                // streaming (the next tool call or Done event will update it).
+                if matches!(self.ui_status, UiStatus::RunningTool { .. }) {
+                    self.ui_status = UiStatus::Generating;
+                }
             }
             TuiEvent::Usage(usage) => {
                 self.usage = Some(usage);
