@@ -75,7 +75,7 @@ Choices `4` and `5` persist to `.claude/settings.local.json` so they survive res
 
 ## Hot-reload config changes
 
-hackpi watches your config files. When you edit `.hackpi/guardrails.json` or `.claude/settings.json`, the rules are reloaded automatically — no restart required.
+hackpi watches your config files. When you edit `.hackpi/guardrails.json`, `.claude/settings.json`, or `.claude/settings.local.json`, the rules are reloaded automatically — no restart required.
 
 If the new config has a syntax error, hackpi keeps the old rules and logs a warning.
 
