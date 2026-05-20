@@ -11,7 +11,9 @@ use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
 use hackpi_guardrails::{GuardEvaluator, PermissionDecision, SettingsPaths};
 use hackpi_tools::register_all_tools;
-use hackpi_tui::app::{handle_slash_command, App, AppState, AppView, CommandOutcome};
+#[cfg(test)]
+use hackpi_tui::app::UiStatus;
+use hackpi_tui::app::{handle_slash_command, App, AppView, CommandOutcome};
 use hackpi_tui::events::TuiEvent;
 use hackpi_tui::input::InputHandler;
 use hackpi_tui::ui;
@@ -156,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::select! {
             _ = spinner_tick.tick() => {
-                if matches!(app.state, AppState::Generating) {
+                if app.ui_status.is_generating()  {
                     app.loading_frame = app.loading_frame.wrapping_add(1);
                     should_render = true;
                 }
@@ -240,7 +242,7 @@ async fn main() -> anyhow::Result<()> {
                             GlobalKeyAction::Interrupt => {
                                 signal_tx.send(true).ok();
                                 cancelled.store(true, Ordering::Relaxed);
-                                app.state = AppState::Interrupted;
+                                app.set_interrupted();
                             }
                             GlobalKeyAction::Clear => {
                                 app.clear();
@@ -340,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
                                                 && !has_input
                                             {
                                                 app.enter_task_detail();
-                                            } else if !matches!(app.state, AppState::Generating) {
+                                            } else if !app.ui_status.is_active() {
                                                 input.handle_key(key);
                                             }
                                         }
@@ -387,7 +389,7 @@ async fn main() -> anyhow::Result<()> {
                                             }
                                         }
                                         _ => {
-                                            if !matches!(app.state, AppState::Generating) {
+                                            if !app.ui_status.is_active() {
                                                 input.handle_key(key);
                                             }
                                         }
@@ -404,7 +406,7 @@ async fn main() -> anyhow::Result<()> {
                     app.update_autocomplete_state();
 
                     // Process any submitted text (from Enter or catch-all key handling)
-                    if !matches!(app.state, AppState::Generating) {
+                    if !app.ui_status.is_active() {
                         if let Some(submitted) = input.last_submitted() {
                             // Check for slash commands first
                             if submitted.starts_with('/') {
@@ -587,7 +589,7 @@ fn classify_global_key(key: &Event, app: &App) -> GlobalKeyAction {
     match key {
         Event::Key(key_event) => match (key_event.modifiers, key_event.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                if matches!(app.state, AppState::Generating) {
+                if app.ui_status.is_generating() {
                     GlobalKeyAction::Interrupt
                 } else {
                     GlobalKeyAction::None
@@ -608,10 +610,10 @@ mod tests {
     use crate::Event;
     use crossterm::event::KeyEvent;
 
-    /// Build a minimal App with a given state for test use.
-    fn app_with_state(state: AppState) -> App {
+    /// Build a minimal App with a given UiStatus for test use.
+    fn app_with_status(status: UiStatus) -> App {
         let mut app = App::new();
-        app.state = state;
+        app.ui_status = status;
         app
     }
 
@@ -624,21 +626,22 @@ mod tests {
 
     #[test]
     fn test_ctrl_c_interrupts_when_generating() {
-        let app = app_with_state(AppState::Generating);
+        let app = app_with_status(UiStatus::Generating);
         let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Interrupt);
     }
 
     #[test]
     fn test_ctrl_c_does_nothing_when_resting() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
     #[test]
-    fn test_ctrl_c_does_nothing_when_interrupted() {
-        let app = app_with_state(AppState::Interrupted);
+    fn test_ctrl_c_does_nothing_when_idle_with_info_message() {
+        let mut app = App::new();
+        app.set_interrupted(); // sets Idle + info_message
         let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
@@ -647,14 +650,14 @@ mod tests {
 
     #[test]
     fn test_ctrl_l_always_clears() {
-        let app = app_with_state(AppState::Generating);
+        let app = app_with_status(UiStatus::Generating);
         let action = classify_global_key(&key(KeyCode::Char('l'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Clear);
     }
 
     #[test]
     fn test_ctrl_l_clears_during_resting() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Char('l'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Clear);
     }
@@ -663,14 +666,14 @@ mod tests {
 
     #[test]
     fn test_ctrl_d_always_exits() {
-        let app = app_with_state(AppState::Generating);
+        let app = app_with_status(UiStatus::Generating);
         let action = classify_global_key(&key(KeyCode::Char('d'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Exit);
     }
 
     #[test]
     fn test_ctrl_d_exits_during_resting() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Char('d'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Exit);
     }
@@ -679,28 +682,28 @@ mod tests {
 
     #[test]
     fn test_plain_c_is_not_global() {
-        let app = app_with_state(AppState::Generating);
+        let app = app_with_status(UiStatus::Generating);
         let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
     #[test]
     fn test_ctrl_x_is_not_global() {
-        let app = app_with_state(AppState::Generating);
+        let app = app_with_status(UiStatus::Generating);
         let action = classify_global_key(&key(KeyCode::Char('x'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
     #[test]
     fn test_escape_is_not_global() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Esc, KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
     #[test]
     fn test_enter_is_not_global() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Enter, KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
@@ -709,21 +712,21 @@ mod tests {
 
     #[test]
     fn test_question_mark_always_shows_help() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Char('?'), KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::Help);
     }
 
     #[test]
     fn test_question_mark_shows_help_during_generating() {
-        let app = app_with_state(AppState::Generating);
+        let app = app_with_status(UiStatus::Generating);
         let action = classify_global_key(&key(KeyCode::Char('?'), KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::Help);
     }
 
     #[test]
     fn test_ctrl_question_is_not_help() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Char('?'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
@@ -732,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_c_interrupts_even_when_autocomplete_visible() {
-        let mut app = app_with_state(AppState::Generating);
+        let mut app = app_with_status(UiStatus::Generating);
         app.autocomplete_visible = true;
         let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Interrupt);
@@ -740,7 +743,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_l_clears_even_when_autocomplete_visible() {
-        let mut app = app_with_state(AppState::Resting);
+        let mut app = app_with_status(UiStatus::Idle);
         app.autocomplete_visible = true;
         let action = classify_global_key(&key(KeyCode::Char('l'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Clear);
@@ -748,7 +751,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_d_exits_even_when_autocomplete_visible() {
-        let mut app = app_with_state(AppState::Generating);
+        let mut app = app_with_status(UiStatus::Generating);
         app.autocomplete_visible = true;
         let action = classify_global_key(&key(KeyCode::Char('d'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::Exit);
@@ -758,28 +761,28 @@ mod tests {
 
     #[test]
     fn test_autocomplete_up_is_not_global() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Up, KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
     #[test]
     fn test_autocomplete_down_is_not_global() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Down, KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
     #[test]
     fn test_autocomplete_tab_is_not_global() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Tab, KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
     #[test]
     fn test_autocomplete_esc_is_not_global() {
-        let app = app_with_state(AppState::Resting);
+        let app = app_with_status(UiStatus::Idle);
         let action = classify_global_key(&key(KeyCode::Esc, KeyModifiers::NONE), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }

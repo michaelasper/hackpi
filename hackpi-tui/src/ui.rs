@@ -1,4 +1,6 @@
-use crate::app::{App, AppState, AppView, ToolCallDisplay, ToolCallStatus};
+use crate::app::{
+    App, AppView, ConversationEntryKind, Severity, ToolCallDisplay, ToolCallStatus, UiStatus,
+};
 use crate::interaction::{app_key_context, footer_bindings};
 use crate::theme::{
     current_theme, task_state_style, tool_card_style, tool_status_label, tool_status_style,
@@ -250,6 +252,52 @@ fn render_conversation(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     let mut lines: Vec<Line> = Vec::new();
 
     for entry in &app.conversation {
+        match &entry.kind {
+            ConversationEntryKind::SystemError {
+                severity,
+                recovery_hint,
+            } => {
+                let (label, style) = match severity {
+                    Severity::Error => (" ERROR ", theme.status_error),
+                    Severity::Warning => (" WARNING ", theme.status_warning),
+                    Severity::Info => (" INFO ", theme.status_info),
+                };
+                let error_text = &entry.text;
+                let content_width = area.width.saturating_sub(6) as usize;
+
+                // Build a bordered error card
+                let top = format!(
+                    "┌─{label}─{:─>width$}┐",
+                    "",
+                    width = content_width
+                        .saturating_sub(label.len() + 4)
+                        .saturating_sub(3)
+                );
+                lines.push(Line::from(Span::styled(top, style)));
+
+                for line_content in error_text.lines() {
+                    let truncated = truncate_for_display(line_content, content_width);
+                    lines.push(Line::from(Span::styled(format!("│ {truncated}"), style)));
+                }
+
+                if let Some(hint) = recovery_hint {
+                    let hint_truncated = truncate_for_display(hint, content_width);
+                    lines.push(Line::from(Span::styled(
+                        format!("│ ⤷ {hint_truncated}"),
+                        theme.status_info,
+                    )));
+                }
+
+                let bottom_width = area.width.saturating_sub(2);
+                let bottom = format!("└{}┘", "─".repeat(bottom_width as usize));
+                lines.push(Line::from(Span::styled(bottom, style)));
+
+                lines.push(Line::from(""));
+                continue;
+            }
+            ConversationEntryKind::Message => {}
+        }
+
         let prefix = match entry.role.as_str() {
             "user" => user_prefix(),
             "assistant" => assistant_prefix(),
@@ -690,19 +738,19 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let input_block = Block::default().borders(Borders::TOP).style(
-        if matches!(app.state, AppState::Generating) {
+    let input_block = Block::default()
+        .borders(Borders::TOP)
+        .style(if app.ui_status.is_active() {
             theme.input_muted
         } else {
             theme.input_active
-        },
-    );
+        });
 
     let input_area = input_block.inner(area);
     frame.render_widget(input_block, area);
 
     let prefix = "> ";
-    let display = if app.input.is_empty() && matches!(app.state, AppState::Resting) {
+    let display = if app.input.is_empty() && !app.ui_status.is_active() {
         format!("{prefix}type a message...")
     } else {
         format!("{prefix}{}", app.input)
@@ -733,8 +781,35 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// Cycles through these while waiting for LLM response.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// Connection indicator text — shows "connected" label instead of bare dot.
-const CONNECTION_INDICATOR: &str = "● connected";
+/// Build the status text for the UiStatus indicator portion of the status bar.
+fn ui_status_label(status: &UiStatus, loading_frame: usize) -> String {
+    match status {
+        UiStatus::Idle => String::new(),
+        UiStatus::Generating => {
+            let frame = SPINNER_FRAMES[loading_frame % SPINNER_FRAMES.len()];
+            format!("Generating... {frame}")
+        }
+        UiStatus::RunningTool { name } => {
+            let frame = SPINNER_FRAMES[loading_frame % SPINNER_FRAMES.len()];
+            format!("Running {name}... {frame}")
+        }
+        UiStatus::LoadingTasks => {
+            let frame = SPINNER_FRAMES[loading_frame % SPINNER_FRAMES.len()];
+            format!("Loading tasks... {frame}")
+        }
+        UiStatus::WaitingForPermission => "Waiting for permission…".into(),
+        UiStatus::Error { message, severity } => {
+            let tag = match severity {
+                Severity::Info => "INFO",
+                Severity::Warning => "WARN",
+                Severity::Error => "ERR",
+            };
+            // Truncate long error messages for the status bar (char-safe)
+            let display = truncate_for_display(message, 50);
+            format!("[{tag}] {display}")
+        }
+    }
+}
 
 fn status_bar_text(app: &App) -> String {
     let context = app_key_context(app);
@@ -743,19 +818,12 @@ fn status_bar_text(app: &App) -> String {
     // Task detail shows a bespoke status line with task ID
     if is_detail {
         if let Some(task) = &app.task_detail_cache {
-            return format!(" Task: {}  {CONNECTION_INDICATOR}", task.id);
+            return format!(" Task: {}  {}", task.id, app.connection_health.label());
         }
     }
 
-    // State indicator (generating/interrupted)
-    let state_text: String = match app.state {
-        AppState::Generating => {
-            let frame = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
-            format!("Generating... {frame}")
-        }
-        AppState::Interrupted => "Interrupted.".into(),
-        AppState::Resting => String::new(),
-    };
+    // State indicator
+    let state_text = ui_status_label(&app.ui_status, app.loading_frame);
 
     // Dynamic footer hints from KEY_BINDINGS table
     let bindings = footer_bindings(context);
@@ -765,33 +833,50 @@ fn status_bar_text(app: &App) -> String {
         .collect::<Vec<_>>()
         .join("  ");
 
-    // Extra status message if present
-    let status_prefix = if app.status_message.is_empty() {
-        String::new()
-    } else {
-        format!("{} | ", app.status_message)
+    // Extra info message if present
+    let info_prefix = match &app.info_message {
+        Some(msg) => format!("{msg} | "),
+        None => String::new(),
     };
+
+    let health_label = app.connection_health.label();
 
     if !state_text.is_empty() {
         if !binding_text.is_empty() {
-            format!(" {status_prefix}{state_text}  ·  {binding_text}  {CONNECTION_INDICATOR}")
+            format!(" {info_prefix}{state_text}  ·  {binding_text}  {health_label}")
         } else {
-            format!(" {status_prefix}{state_text}  {CONNECTION_INDICATOR}")
+            format!(" {info_prefix}{state_text}  {health_label}")
         }
     } else if !binding_text.is_empty() {
-        format!(" {status_prefix}{binding_text}  {CONNECTION_INDICATOR}")
+        format!(" {info_prefix}{binding_text}  {health_label}")
+    } else if !info_prefix.is_empty() {
+        format!(" {info_prefix}{health_label}")
     } else {
-        format!(" {status_prefix}{CONNECTION_INDICATOR}")
+        format!(" {health_label}")
     }
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let text = status_bar_text(app);
 
-    let style = match app.state {
-        AppState::Resting => theme.fg_muted,
-        AppState::Generating => theme.status_running,
-        AppState::Interrupted => theme.status_error,
+    // Derive style from UiStatus
+    let style = match &app.ui_status {
+        UiStatus::Idle | UiStatus::WaitingForPermission => theme.fg_muted,
+        UiStatus::Generating | UiStatus::RunningTool { .. } | UiStatus::LoadingTasks => {
+            theme.status_running
+        }
+        UiStatus::Error {
+            severity: Severity::Info,
+            ..
+        } => theme.status_info,
+        UiStatus::Error {
+            severity: Severity::Warning,
+            ..
+        } => theme.status_warning,
+        UiStatus::Error {
+            severity: Severity::Error,
+            ..
+        } => theme.status_error,
     };
 
     // Use Line::raw (no wrapping) so the status bar never wraps to the next
@@ -1209,6 +1294,7 @@ fn render_tool_card(lines: &mut Vec<Line>, tc: &ToolCallDisplay, area_width: usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ConnectionHealth;
     use crate::events::TuiEvent;
 
     #[test]
@@ -1299,7 +1385,7 @@ mod tests {
     #[test]
     fn test_status_bar_generating_shows_interrupt_hint() {
         let mut app = App::new();
-        app.state = AppState::Generating;
+        app.ui_status = UiStatus::Generating;
         let text = status_bar_text(&app);
         assert!(
             text.contains("Generating"),
@@ -1312,17 +1398,41 @@ mod tests {
     }
 
     #[test]
-    fn test_status_bar_interrupted_shows_message() {
+    fn test_status_bar_error_shows_ui_status() {
         let mut app = App::new();
-        app.state = AppState::Interrupted;
+        app.ui_status = UiStatus::Error {
+            message: "API timeout".into(),
+            severity: Severity::Error,
+        };
+        let text = status_bar_text(&app);
+        assert!(text.contains("ERR"), "status should show ERR tag: {text}");
+        assert!(
+            text.contains("API timeout"),
+            "status should show error message: {text}"
+        );
+    }
+
+    #[test]
+    fn test_status_bar_running_tool_shows_name() {
+        let mut app = App::new();
+        app.ui_status = UiStatus::RunningTool {
+            name: "bash".into(),
+        };
         let text = status_bar_text(&app);
         assert!(
-            text.contains("Interrupted"),
-            "status should show Interrupted: {text}"
+            text.contains("Running bash"),
+            "status should show running tool name: {text}"
         );
+    }
+
+    #[test]
+    fn test_status_bar_loading_tasks_shows_spinner() {
+        let mut app = App::new();
+        app.ui_status = UiStatus::LoadingTasks;
+        let text = status_bar_text(&app);
         assert!(
-            text.contains("Clear conversation"),
-            "status should still show context bindings when interrupted: {text}"
+            text.contains("Loading tasks"),
+            "status should show loading: {text}"
         );
     }
 
@@ -1331,9 +1441,35 @@ mod tests {
         let app = App::new();
         let text = status_bar_text(&app);
         assert!(
-            text.contains("connected"),
-            "status bar should include 'connected' text, got: {text}"
+            text.contains("unknown"),
+            "status bar should show 'unknown' health by default, got: {text}"
         );
+    }
+
+    #[test]
+    fn test_connection_health_label_unknown() {
+        assert_eq!(ConnectionHealth::Unknown.label(), "API: unknown");
+    }
+
+    #[test]
+    fn test_connection_health_label_connected() {
+        assert_eq!(ConnectionHealth::Connected.label(), "API: connected");
+    }
+
+    #[test]
+    fn test_connection_health_label_error() {
+        assert_eq!(
+            ConnectionHealth::Error {
+                message: "err".into()
+            }
+            .label(),
+            "API: error"
+        );
+    }
+
+    #[test]
+    fn test_connection_health_label_offline() {
+        assert_eq!(ConnectionHealth::Offline.label(), "API: offline");
     }
 
     // ── Tool card style tests (delegated to theme module) ──────────────
@@ -1568,7 +1704,7 @@ mod tests {
             "status bar should show task ID in detail view: {text}"
         );
         assert!(
-            text.contains("connected"),
+            text.contains("API: unknown"),
             "status bar should include connection indicator text: {text}"
         );
     }

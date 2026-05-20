@@ -17,6 +17,7 @@ pub struct Theme {
     pub status_warning: Style,
     pub status_error: Style,
     pub status_running: Style,
+    pub status_info: Style,
 
     // ── Surfaces & borders ────────────────────────────────────────
     pub surface_modal: Style,
@@ -105,6 +106,7 @@ fn color_theme() -> Theme {
         status_warning: Style::default().fg(Color::Yellow),
         status_error: Style::default().fg(Color::Red),
         status_running: Style::default().fg(Color::Yellow),
+        status_info: Style::default().fg(Color::Cyan),
 
         // Surfaces & borders
         surface_modal: Style::default().bg(Color::Black),
@@ -160,6 +162,7 @@ fn no_color_theme() -> Theme {
         status_warning: bold,
         status_error: reversed,
         status_running: bold,
+        status_info: dim,
 
         // Surfaces & borders
         surface_modal: Style::default().bg(Color::Reset),
