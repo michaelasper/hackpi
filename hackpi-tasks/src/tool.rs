@@ -371,6 +371,21 @@ impl TaskTool {
             }
         };
 
+        // Validate that the blocker task exists
+        match self.store.get(blocked_by).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return ToolResult::SystemError {
+                    message: format!("Cannot block: blocker task {blocked_by} does not exist."),
+                }
+            }
+            Err(e) => {
+                return ToolResult::SystemError {
+                    message: format!("Failed to check blocker task {blocked_by}: {e}"),
+                }
+            }
+        }
+
         let mut blockers = existing.blocked_by.clone();
         if blockers.contains(&blocked_by.to_string()) {
             return ToolResult::Success {

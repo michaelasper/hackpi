@@ -192,6 +192,12 @@ pub async fn handle_task_command(cmd: &TaskCommand, store: &dyn TaskStore) -> Re
             let existing = store.get(id).await?;
             match existing {
                 Some(ref t) => {
+                    // Validate that the blocker task exists
+                    if store.get(blocked_by).await?.is_none() {
+                        return Ok(format!(
+                            "Cannot block: blocker task {blocked_by} does not exist."
+                        ));
+                    }
                     let mut blockers = t.blocked_by.clone();
                     if blockers.contains(&blocked_by.clone()) {
                         return Ok(format!("{id} is already blocked by {blocked_by}"));
