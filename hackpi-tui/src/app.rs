@@ -95,6 +95,8 @@ pub struct App {
     /// Character offset of the cursor within the input buffer.
     /// Synced from `InputHandler::cursor` so the UI can position the terminal cursor.
     pub input_cursor: usize,
+    /// Whether the contextual help overlay is visible (? key).
+    pub help_visible: bool,
 }
 
 impl Default for App {
@@ -128,6 +130,7 @@ impl App {
             task_create_input: String::new(),
             loading_frame: 0,
             input_cursor: 0,
+            help_visible: false,
         }
     }
 
@@ -480,6 +483,16 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Return the current focus target derived from view, state, and overlays.
+    pub fn focus_target(&self) -> crate::interaction::FocusTarget {
+        crate::interaction::focus_target(self)
+    }
+
+    /// Return the current active overlay, if any.
+    pub fn active_overlay(&self) -> Option<crate::interaction::OverlayKind> {
+        crate::interaction::active_overlay(self)
     }
 
     /// Internal: create a task synchronously via the task store.

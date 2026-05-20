@@ -248,6 +248,9 @@ async fn main() -> anyhow::Result<()> {
                             GlobalKeyAction::Exit => {
                                 break;
                             }
+                            GlobalKeyAction::Help => {
+                                app.help_visible = !app.help_visible;
+                            }
                             GlobalKeyAction::None => {
                                 // Not a global control — fall through to modal-specific or
                                 // default handling.
@@ -342,7 +345,9 @@ async fn main() -> anyhow::Result<()> {
                                             }
                                         }
                                         KeyCode::Esc => {
-                                            if !matches!(app.active_view, AppView::Conversation) {
+                                            if app.help_visible {
+                                                app.help_visible = false;
+                                            } else if !matches!(app.active_view, AppView::Conversation) {
                                                 app.go_back();
                                                 // Refresh cache when returning to TaskBoard
                                                 if matches!(app.active_view, AppView::TaskBoard) {
@@ -556,9 +561,12 @@ enum GlobalKeyAction {
     Clear,
     /// Ctrl+D — exit hackpi.
     Exit,
+    /// ? — show context help overlay.
+    Help,
 }
 
-/// Check if a key event matches a documented global control (Ctrl+C, Ctrl+L, Ctrl+D).
+/// Check if a key event matches a documented global control
+/// (Ctrl+C, Ctrl+L, Ctrl+D, ?).
 ///
 /// Returns the corresponding [`GlobalKeyAction`] if matched, or [`GlobalKeyAction::None`]
 /// if the key does not correspond to a global control. This function is intentionally
@@ -571,6 +579,7 @@ enum GlobalKeyAction {
 /// | Ctrl+C | Interrupt     | Only when generating |
 /// | Ctrl+L | Clear         | Always               |
 /// | Ctrl+D | Exit          | Always               |
+/// | ?      | Show help     | Always               |
 #[must_use]
 fn classify_global_key(key: &Event, app: &App) -> GlobalKeyAction {
     match key {
@@ -584,6 +593,7 @@ fn classify_global_key(key: &Event, app: &App) -> GlobalKeyAction {
             }
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => GlobalKeyAction::Clear,
             (KeyModifiers::CONTROL, KeyCode::Char('d')) => GlobalKeyAction::Exit,
+            (KeyModifiers::NONE, KeyCode::Char('?')) => GlobalKeyAction::Help,
             _ => GlobalKeyAction::None,
         },
         _ => GlobalKeyAction::None,
@@ -690,6 +700,29 @@ mod tests {
     fn test_enter_is_not_global() {
         let app = app_with_state(AppState::Resting);
         let action = classify_global_key(&key(KeyCode::Enter, KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    // ── ? (Help) ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_question_mark_always_shows_help() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Char('?'), KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::Help);
+    }
+
+    #[test]
+    fn test_question_mark_shows_help_during_generating() {
+        let app = app_with_state(AppState::Generating);
+        let action = classify_global_key(&key(KeyCode::Char('?'), KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::Help);
+    }
+
+    #[test]
+    fn test_ctrl_question_is_not_help() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Char('?'), KeyModifiers::CONTROL), &app);
         assert_eq!(action, GlobalKeyAction::None);
     }
 
