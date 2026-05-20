@@ -498,6 +498,18 @@ impl App {
     }
 }
 
+/// The outcome of handling a slash command, used to communicate the result
+/// back to the main event loop so it can take appropriate action (e.g., exit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    /// The command was handled normally. Continue the event loop.
+    Handled,
+    /// The user requested the application to exit. Break the main loop.
+    ExitRequested,
+    /// The command performed an action that requires a re-render (e.g., /clear).
+    NeedsRender,
+}
+
 /// Metadata about a registered slash command for autocomplete display.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CommandInfo {
@@ -577,7 +589,7 @@ async fn invoke_tool_and_render(
     params: serde_json::Value,
     tool_registry: &ToolRegistry,
     tui_tx: &tokio::sync::mpsc::UnboundedSender<TuiEvent>,
-) -> bool {
+) -> CommandOutcome {
     let tool_id = format!(
         "slash-{tool_name}-{}",
         std::time::SystemTime::now()
@@ -591,7 +603,7 @@ async fn invoke_tool_and_render(
         None => {
             let err = format!("Tool '{tool_name}' is not registered.");
             tui_tx.send(TuiEvent::Error(err)).ok();
-            return true;
+            return CommandOutcome::Handled;
         }
     };
 
@@ -619,7 +631,7 @@ async fn invoke_tool_and_render(
         .ok();
 
     tui_tx.send(TuiEvent::Done).ok();
-    true
+    CommandOutcome::Handled
 }
 
 pub async fn handle_slash_command(
@@ -628,7 +640,7 @@ pub async fn handle_slash_command(
     tui_tx: &tokio::sync::mpsc::UnboundedSender<TuiEvent>,
     guard_evaluator: &mut GuardEvaluator,
     tool_registry: &hackpi_core::tools::ToolRegistry,
-) -> bool {
+) -> CommandOutcome {
     let parts: Vec<&str> = cmd.trim().splitn(2, char::is_whitespace).collect();
     let command = parts[0];
     match command {
@@ -659,15 +671,15 @@ Available commands:
                 .send(TuiEvent::StreamChunk(help_text.to_string()))
                 .ok();
             tui_tx.send(TuiEvent::Done).ok();
-            true
+            CommandOutcome::Handled
         }
         "/clear" => {
             app.clear();
-            true
+            CommandOutcome::NeedsRender
         }
         "/quit" => {
             app.quit_requested = true;
-            true
+            CommandOutcome::ExitRequested
         }
         "/guardrails:status" => {
             let rule_count = guard_evaluator.rule_count();
@@ -687,14 +699,14 @@ Guardrails Status:
             );
             tui_tx.send(TuiEvent::StreamChunk(status_text)).ok();
             tui_tx.send(TuiEvent::Done).ok();
-            true
+            CommandOutcome::Handled
         }
         "/guardrails:clean" => {
             guard_evaluator.clear_session();
             let msg = "Session cache cleared.".to_string();
             tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
             tui_tx.send(TuiEvent::Done).ok();
-            true
+            CommandOutcome::Handled
         }
         cmd if cmd.starts_with("/guardrails:onboarding") => {
             let rest = parts.get(1).copied().unwrap_or("");
@@ -712,14 +724,14 @@ Guardrails Onboarding Presets:
    /guardrails:onboarding permissive - Permissive rules with minimal restrictions";
                     tui_tx.send(TuiEvent::StreamChunk(summary.to_string())).ok();
                     tui_tx.send(TuiEvent::Done).ok();
-                    return true;
+                    return CommandOutcome::Handled;
                 }
                 _ => {
                     let err = format!(
                         "Unknown preset: '{preset}'. Available: strict, balanced, permissive"
                     );
                     tui_tx.send(TuiEvent::Error(err)).ok();
-                    return true;
+                    return CommandOutcome::Handled;
                 }
             };
 
@@ -731,7 +743,7 @@ Guardrails Onboarding Presets:
                             "Cannot determine workspace root for guardrails config".into(),
                         ))
                         .ok();
-                    return true;
+                    return CommandOutcome::Handled;
                 }
             };
 
@@ -739,21 +751,21 @@ Guardrails Onboarding Presets:
             if let Err(e) = std::fs::create_dir_all(&hackpi_dir) {
                 let err = format!("Failed to create directory {e}");
                 tui_tx.send(TuiEvent::Error(err)).ok();
-                return true;
+                return CommandOutcome::Handled;
             }
 
             let config_path = hackpi_dir.join("guardrails.json");
             if let Err(e) = std::fs::write(&config_path, config_json) {
                 let err = format!("Failed to write config file: {e}");
                 tui_tx.send(TuiEvent::Error(err)).ok();
-                return true;
+                return CommandOutcome::Handled;
             }
 
             // Reload rules from the new config
             if let Err(e) = guard_evaluator.load_rules() {
                 let err = format!("Failed to load rules after writing config: {e}");
                 tui_tx.send(TuiEvent::Error(err)).ok();
-                return true;
+                return CommandOutcome::Handled;
             }
 
             let rule_count = guard_evaluator.rule_count();
@@ -763,7 +775,7 @@ Guardrails Onboarding Presets:
             );
             tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
             tui_tx.send(TuiEvent::Done).ok();
-            true
+            CommandOutcome::Handled
         }
         "/git:status" => {
             invoke_tool_and_render(
@@ -806,7 +818,7 @@ Guardrails Onboarding Presets:
                             tui_tx.send(TuiEvent::Error(e.to_string())).ok();
                         }
                     }
-                    true
+                    CommandOutcome::Handled
                 }
                 None => {
                     tui_tx
@@ -814,7 +826,7 @@ Guardrails Onboarding Presets:
                             "Task store not initialized. Task commands are unavailable.".into(),
                         ))
                         .ok();
-                    true
+                    CommandOutcome::Handled
                 }
             }
         }
@@ -841,7 +853,7 @@ Guardrails Onboarding Presets:
                             tui_tx.send(TuiEvent::Error(e)).ok();
                         }
                     }
-                    true
+                    CommandOutcome::Handled
                 }
                 None => {
                     tui_tx
@@ -849,7 +861,7 @@ Guardrails Onboarding Presets:
                             "Task store not initialized. Task commands are unavailable.".into(),
                         ))
                         .ok();
-                    true
+                    CommandOutcome::Handled
                 }
             }
         }
@@ -890,12 +902,12 @@ Export complete:
                     tui_tx.send(TuiEvent::Error(err)).ok();
                 }
             }
-            true
+            CommandOutcome::Handled
         }
         _ => {
             let err = format!("Unknown command: {command}. Type /help for available commands.");
             tui_tx.send(TuiEvent::Error(err)).ok();
-            true
+            CommandOutcome::Handled
         }
     }
 }
@@ -1055,6 +1067,55 @@ mod tests {
     use hackpi_guardrails::SettingsPaths;
     use tokio::sync::mpsc;
 
+    // ── CommandOutcome tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_slash_quit_returns_exit_requested() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let outcome =
+            handle_slash_command("/quit", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+        assert_eq!(outcome, CommandOutcome::ExitRequested);
+        assert!(app.quit_requested, "/quit should set quit_requested flag");
+    }
+
+    #[tokio::test]
+    async fn test_slash_clear_returns_needs_render() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let outcome =
+            handle_slash_command("/clear", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+        assert_eq!(outcome, CommandOutcome::NeedsRender);
+    }
+
+    #[tokio::test]
+    async fn test_slash_help_returns_handled() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let outcome =
+            handle_slash_command("/help", &mut app, &tx, &mut ge, &make_tool_registry()).await;
+        assert_eq!(outcome, CommandOutcome::Handled);
+    }
+
+    #[tokio::test]
+    async fn test_slash_unknown_returns_handled() {
+        let mut app = App::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut ge, _dir) = make_guard_evaluator();
+        let outcome = handle_slash_command(
+            "/nonexistent",
+            &mut app,
+            &tx,
+            &mut ge,
+            &make_tool_registry(),
+        )
+        .await;
+        assert_eq!(outcome, CommandOutcome::Handled);
+    }
+
     /// Helper to create a GuardEvaluator backed by a temp directory.
     fn make_guard_evaluator() -> (GuardEvaluator, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1073,9 +1134,9 @@ mod tests {
         let mut app = App::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled =
+        let outcome =
             handle_slash_command("/help", &mut app, &tx, &mut ge, &make_tool_registry()).await;
-        assert!(handled);
+        assert_eq!(outcome, CommandOutcome::Handled);
     }
 
     #[tokio::test]
@@ -1085,7 +1146,7 @@ mod tests {
         let (mut ge, _dir) = make_guard_evaluator();
         let registry = make_tool_registry();
         let handled = handle_slash_command("/help", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
         let mut found_chunk = false;
         let mut found_done = false;
         while let Ok(event) = rx.try_recv() {
@@ -1111,9 +1172,9 @@ mod tests {
         assert_eq!(app.conversation.len(), 1);
         let (tx, _rx) = mpsc::unbounded_channel();
         let (mut ge, _dir) = make_guard_evaluator();
-        let handled =
+        let outcome =
             handle_slash_command("/clear", &mut app, &tx, &mut ge, &make_tool_registry()).await;
-        assert!(handled);
+        assert_eq!(outcome, CommandOutcome::NeedsRender);
         assert!(app.conversation.is_empty());
         assert!(app.input.is_empty());
     }
@@ -1125,7 +1186,7 @@ mod tests {
         let (mut ge, _dir) = make_guard_evaluator();
         let handled =
             handle_slash_command("/unknown", &mut app, &tx, &mut ge, &make_tool_registry()).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
             if let TuiEvent::Error(msg) = event {
@@ -1151,7 +1212,7 @@ mod tests {
             &make_tool_registry(),
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
         let mut found_chunk = false;
         let mut found_done = false;
         while let Ok(event) = rx.try_recv() {
@@ -1189,7 +1250,7 @@ mod tests {
             &make_tool_registry(),
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         // Verify session cache is cleared
         assert_eq!(ge.session_cache_len(), 0);
@@ -1222,7 +1283,7 @@ mod tests {
             &make_tool_registry(),
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         // Verify rules were loaded
         assert!(
@@ -1267,7 +1328,7 @@ mod tests {
             &make_tool_registry(),
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
         let mut found_summary = false;
         while let Ok(event) = rx.try_recv() {
             if let TuiEvent::StreamChunk(msg) = event {
@@ -1293,7 +1354,7 @@ mod tests {
             &make_tool_registry(),
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
         assert!(ge.rule_count() > 0);
 
         let config_path = dir.path().join(".hackpi/guardrails.json");
@@ -1325,7 +1386,7 @@ mod tests {
             &make_tool_registry(),
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
         assert!(ge.rule_count() > 0);
 
         let config_path = dir.path().join(".hackpi/guardrails.json");
@@ -1356,7 +1417,7 @@ mod tests {
             &make_tool_registry(),
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
             if let TuiEvent::Error(msg) = event {
@@ -1381,7 +1442,11 @@ mod tests {
         for cmd in &cmds {
             let handled =
                 handle_slash_command(cmd, &mut app, &tx, &mut ge, &make_tool_registry()).await;
-            assert!(handled, "command '{cmd}' should prevent agent spawn");
+            assert_eq!(
+                handled,
+                CommandOutcome::Handled,
+                "command '{cmd}' should be handled"
+            );
         }
     }
 
@@ -1394,7 +1459,11 @@ mod tests {
         let (mut ge, _dir) = make_guard_evaluator();
         let registry = make_tool_registry();
         let handled = handle_slash_command("/git:status", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled, "/git:status should be handled");
+        assert_eq!(
+            handled,
+            CommandOutcome::Handled,
+            "/git:status should be handled"
+        );
     }
 
     #[tokio::test]
@@ -1404,7 +1473,11 @@ mod tests {
         let (mut ge, _dir) = make_guard_evaluator();
         let registry = make_tool_registry();
         let handled = handle_slash_command("/git:log", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled, "/git:log should be handled");
+        assert_eq!(
+            handled,
+            CommandOutcome::Handled,
+            "/git:log should be handled"
+        );
     }
 
     #[tokio::test]
@@ -1415,7 +1488,11 @@ mod tests {
         let registry = make_tool_registry();
         let handled =
             handle_slash_command("/github:pr-list", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled, "/github:pr-list should be handled");
+        assert_eq!(
+            handled,
+            CommandOutcome::Handled,
+            "/github:pr-list should be handled"
+        );
     }
 
     #[tokio::test]
@@ -1813,7 +1890,7 @@ mod tests {
             &registry,
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -1840,7 +1917,7 @@ mod tests {
 
         // List tasks
         let handled = handle_slash_command("/task list", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -1866,7 +1943,7 @@ mod tests {
 
         // Use /tasks alias
         let handled = handle_slash_command("/tasks", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -1897,7 +1974,7 @@ mod tests {
 
         let handled =
             handle_slash_command("/task show TSK-001", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -1928,7 +2005,7 @@ mod tests {
             &registry,
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -1964,7 +2041,7 @@ mod tests {
 
         let handled =
             handle_slash_command("/task done TSK-001", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -1994,7 +2071,7 @@ mod tests {
             &registry,
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -2015,7 +2092,7 @@ mod tests {
         let registry = make_tool_registry();
 
         let handled = handle_slash_command("/task list", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -2035,7 +2112,7 @@ mod tests {
         let registry = make_tool_registry();
 
         let handled = handle_slash_command("/tasks", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -2061,7 +2138,7 @@ mod tests {
         let handled =
             handle_slash_command("/task move TSK-001 done", &mut app, &tx, &mut ge, &registry)
                 .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -2081,7 +2158,7 @@ mod tests {
         let registry = make_tool_registry();
 
         let handled = handle_slash_command("/task create", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -2949,7 +3026,11 @@ mod tests {
         app.handle_event(TuiEvent::Done);
 
         let handled = handle_slash_command("/export", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled, "/export should be handled");
+        assert_eq!(
+            handled,
+            CommandOutcome::Handled,
+            "/export should be handled"
+        );
 
         // Verify output events
         let mut found_chunk = false;
@@ -2989,7 +3070,7 @@ mod tests {
             &registry,
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         // Verify file was written
         assert!(
@@ -3032,7 +3113,7 @@ mod tests {
             &registry,
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_error = false;
         while let Ok(event) = rx.try_recv() {
@@ -3052,7 +3133,7 @@ mod tests {
         let registry = make_tool_registry();
 
         let handled = handle_slash_command("/export", &mut app, &tx, &mut ge, &registry).await;
-        assert!(handled);
+        assert_eq!(handled, CommandOutcome::Handled);
 
         let mut found_chunk = false;
         while let Ok(event) = rx.try_recv() {
@@ -3089,6 +3170,10 @@ mod tests {
         let (mut ge, _dir) = make_guard_evaluator();
         let handled =
             handle_slash_command("/export", &mut app, &tx, &mut ge, &make_tool_registry()).await;
-        assert!(handled, "/export should prevent agent spawn");
+        assert_eq!(
+            handled,
+            CommandOutcome::Handled,
+            "/export should prevent agent spawn"
+        );
     }
 }

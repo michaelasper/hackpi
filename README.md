@@ -59,7 +59,7 @@ hackpi is a TUI application — launch it and type natural-language requests.
 |-----|--------|
 | `Enter` | Send message |
 | `Ctrl+C` | Cancel in-flight request |
-| `Esc` | Clear input |
+| `Esc` | Dismiss autocomplete / Cancel task creation / Go back to previous view |
 
 ### Configuration
 

@@ -1,4 +1,4 @@
-use crate::app::{handle_slash_command, App, AppState};
+use crate::app::{handle_slash_command, App, AppState, CommandOutcome};
 use crate::events::TuiEvent;
 use crate::input::InputHandler;
 use crate::ui;
@@ -114,7 +114,7 @@ async fn run_scenario_async(path: &Path) -> anyhow::Result<()> {
                 input.set_submit(text.clone());
                 if let Some(submitted) = input.last_submitted() {
                     if submitted.starts_with('/') {
-                        let handled = handle_slash_command(
+                        let outcome = handle_slash_command(
                             &submitted,
                             &mut app,
                             &tui_tx,
@@ -122,10 +122,9 @@ async fn run_scenario_async(path: &Path) -> anyhow::Result<()> {
                             &tool_registry,
                         )
                         .await;
-                        if !handled {
-                            anyhow::bail!(
-                                "Step {step_num}/{total}: slash command '{submitted}' was not handled"
-                            );
+                        if outcome == CommandOutcome::ExitRequested {
+                            // Allow /quit to exit without error
+                            return Ok(());
                         }
                         // Drain TuiEvent channel and process events through app.
                         drain_tui_events(&mut app, &mut tui_rx).await;

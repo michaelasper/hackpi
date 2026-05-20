@@ -12,6 +12,13 @@ All keyboard shortcuts in the hackpi TUI.
 | `Ctrl+L` | Clear conversation |
 | `Ctrl+D` | Exit hackpi |
 
+## Navigation
+
+| Key | Action |
+|-----|--------|
+| `Esc` | Dismiss autocomplete popover / Cancel task creation / Go back to previous view (TaskDetail → TaskBoard, TaskBoard/TaskGraph → Conversation) |
+| `Tab` | Cycle views: Conversation → TaskBoard → TaskGraph → Conversation |
+
 ## Scrolling
 
 | Key | Action |
