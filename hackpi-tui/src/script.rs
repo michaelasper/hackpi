@@ -1,4 +1,4 @@
-use crate::app::{handle_slash_command, App, AppState, CommandOutcome};
+use crate::app::{handle_slash_command, App, CommandOutcome, UiStatus};
 use crate::events::TuiEvent;
 use crate::input::InputHandler;
 use crate::ui;
@@ -208,8 +208,8 @@ fn handle_key_in_app(app: &mut App, input: &mut InputHandler, key_str: &str) {
     // Global controls (checked BEFORE modal branches)
     match key_event.code {
         KeyCode::Char('c') if key_event.modifiers == KeyModifiers::CONTROL => {
-            if matches!(app.state, AppState::Generating) {
-                app.state = AppState::Interrupted;
+            if app.ui_status.is_generating() {
+                app.set_interrupted();
             }
             return;
         }
@@ -307,7 +307,7 @@ fn handle_key_in_app(app: &mut App, input: &mut InputHandler, key_str: &str) {
                 let has_input = !input.buffer.trim().is_empty();
                 if matches!(app.active_view, crate::app::AppView::TaskBoard) && !has_input {
                     app.enter_task_detail();
-                } else if !matches!(app.state, AppState::Generating) {
+                } else if !app.ui_status.is_active() {
                     input.handle_key(key_event);
                 }
             }
@@ -353,7 +353,7 @@ fn handle_key_in_app(app: &mut App, input: &mut InputHandler, key_str: &str) {
                 }
             }
             _ => {
-                if !matches!(app.state, AppState::Generating) {
+                if !app.ui_status.is_active() {
                     input.handle_key(key_event);
                 }
             }
@@ -366,7 +366,7 @@ fn handle_key_in_app(app: &mut App, input: &mut InputHandler, key_str: &str) {
     app.update_autocomplete_state();
 
     // Process any submitted text (from Enter handling).
-    if !matches!(app.state, AppState::Generating) {
+    if !app.ui_status.is_active() {
         if let Some(submitted) = input.last_submitted() {
             if submitted.starts_with('/') {
                 // Can't handle slash commands here synchronously, so just
@@ -423,12 +423,20 @@ fn run_assertions(
     }
 
     if let Some(ref expected_state) = assert.state {
-        let actual_state = match app.state {
-            AppState::Resting => "Resting",
-            AppState::Generating => "Generating",
-            AppState::Interrupted => "Interrupted",
+        let actual_state = match app.ui_status {
+            UiStatus::Idle => "Idle",
+            UiStatus::Generating => "Generating",
+            UiStatus::RunningTool { .. } => "RunningTool",
+            UiStatus::LoadingTasks => "LoadingTasks",
+            UiStatus::WaitingForPermission => "WaitingForPermission",
+            UiStatus::Error { .. } => "Error",
         };
-        if actual_state != expected_state.as_str() {
+        let expected_legacy = match expected_state.as_str() {
+            "Resting" => "Idle",
+            "Interrupted" => "Idle",
+            other => other,
+        };
+        if actual_state != expected_legacy {
             anyhow::bail!(
                 "Step {step_num}/{total}: expected state='{expected_state}', got '{actual_state}'"
             );
@@ -436,12 +444,16 @@ fn run_assertions(
     }
 
     if let Some(ref expected_msg) = assert.status_message {
-        if app.status_message != *expected_msg {
-            anyhow::bail!(
-                "Step {step_num}/{total}: expected status_message='{expected_msg}', \
-                 got '{}'",
-                app.status_message
-            );
+        match &app.info_message {
+            Some(actual_msg) if actual_msg == expected_msg => {}
+            None if expected_msg.is_empty() => {}
+            _ => {
+                anyhow::bail!(
+                    "Step {step_num}/{total}: expected status_message='{expected_msg}', \
+                     got '{:?}'",
+                    app.info_message
+                );
+            }
         }
     }
 
@@ -750,18 +762,20 @@ mod tests {
     fn test_handle_key_ctrl_c_interrupts_when_generating() {
         let mut app = App::new();
         let mut input = InputHandler::new();
-        app.state = AppState::Generating;
+        app.ui_status = UiStatus::Generating;
         handle_key_in_app(&mut app, &mut input, "CtrlC");
-        assert!(matches!(app.state, AppState::Interrupted));
+        // Interrupted sets Idle with an info message
+        assert_eq!(app.ui_status, UiStatus::Idle);
+        assert_eq!(app.info_message, Some("Generation interrupted.".into()));
     }
 
     #[test]
-    fn test_handle_key_ctrl_c_noop_when_resting() {
+    fn test_handle_key_ctrl_c_noop_when_idle() {
         let mut app = App::new();
         let mut input = InputHandler::new();
-        app.state = AppState::Resting;
+        app.ui_status = UiStatus::Idle;
         handle_key_in_app(&mut app, &mut input, "CtrlC");
-        assert!(matches!(app.state, AppState::Resting));
+        assert_eq!(app.ui_status, UiStatus::Idle);
     }
 
     #[test]
@@ -812,7 +826,7 @@ mod tests {
     fn test_handle_key_char_blocked_when_generating() {
         let mut app = App::new();
         let mut input = InputHandler::new();
-        app.state = AppState::Generating;
+        app.ui_status = UiStatus::Generating;
         handle_key_in_app(&mut app, &mut input, "Char(x)");
         assert!(
             input.buffer.is_empty(),
@@ -841,7 +855,7 @@ mod tests {
         // After Enter + submit handling, conversation should have a user entry
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].text, "hi");
-        assert!(matches!(app.state, AppState::Generating));
+        assert_eq!(app.ui_status, UiStatus::Generating);
     }
 
     #[test]

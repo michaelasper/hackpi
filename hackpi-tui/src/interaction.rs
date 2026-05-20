@@ -279,7 +279,7 @@ pub fn app_key_context(app: &App) -> KeyContext {
     // No overlay — derive from focus target and state.
     match focus_target(app) {
         FocusTarget::ConversationInput => {
-            if matches!(app.state, crate::app::AppState::Resting) {
+            if !app.ui_status.is_active() {
                 KeyContext::Composer
             } else {
                 KeyContext::Conversation
@@ -298,12 +298,11 @@ pub fn focus_target(app: &App) -> FocusTarget {
     match &app.active_view {
         crate::app::AppView::Conversation => {
             // If the app is generating, the focus is on the scrollback
-            // (input is disabled). If resting, focus is on the input.
-            match app.state {
-                crate::app::AppState::Resting => FocusTarget::ConversationInput,
-                crate::app::AppState::Generating | crate::app::AppState::Interrupted => {
-                    FocusTarget::ConversationScrollback
-                }
+            // (input is disabled). If idle, focus is on the input.
+            if app.ui_status.is_active() {
+                FocusTarget::ConversationScrollback
+            } else {
+                FocusTarget::ConversationInput
             }
         }
         crate::app::AppView::TaskBoard => FocusTarget::TaskBoard,
@@ -332,7 +331,7 @@ pub fn active_overlay(app: &App) -> Option<OverlayKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, AppState, AppView};
+    use crate::app::{App, AppView, UiStatus};
 
     // ── FocusTarget tests ──────────────────────────────────────────────
 
@@ -349,11 +348,24 @@ mod tests {
     #[test]
     fn test_focus_target_conversation_generating_is_scrollback() {
         let mut app = App::new();
-        app.state = AppState::Generating;
+        app.ui_status = UiStatus::Generating;
         assert_eq!(
             focus_target(&app),
             FocusTarget::ConversationScrollback,
             "generating conversation should focus scrollback"
+        );
+    }
+
+    #[test]
+    fn test_focus_target_conversation_running_tool_is_scrollback() {
+        let mut app = App::new();
+        app.ui_status = UiStatus::RunningTool {
+            name: "bash".into(),
+        };
+        assert_eq!(
+            focus_target(&app),
+            FocusTarget::ConversationScrollback,
+            "running tool should focus scrollback"
         );
     }
 
@@ -493,7 +505,7 @@ mod tests {
     #[test]
     fn test_app_key_context_generating_conversation() {
         let mut app = App::new();
-        app.state = AppState::Generating;
+        app.ui_status = UiStatus::Generating;
         assert_eq!(app_key_context(&app), KeyContext::Conversation);
     }
 

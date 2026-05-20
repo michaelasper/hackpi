@@ -33,13 +33,124 @@ pub enum AppView {
     TaskGraph,
 }
 
-pub enum AppState {
-    Resting,
+/// Severity level for error and informational messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Purely informational message.
+    Info,
+    /// A warning — something unexpected but non-fatal.
+    Warning,
+    /// An error — something went wrong.
+    Error,
+}
+
+/// Fine-grained UI status replacing the old ad-hoc `AppState` + `status_message`.
+///
+/// Each variant carries the information needed to render a distinct visual state
+/// in both the status bar and the conversation area.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiStatus {
+    /// No activity — waiting for user input.
+    Idle,
+    /// LLM is streaming a text response.
     Generating,
-    Interrupted,
+    /// A tool is currently executing.
+    RunningTool { name: String },
+    /// Task data is being loaded from the store.
+    LoadingTasks,
+    /// A permission prompt is awaiting user decision.
+    WaitingForPermission,
+    /// An error or informational state to display in the status bar and optionally
+    /// in the conversation area.
+    Error { message: String, severity: Severity },
+}
+
+impl UiStatus {
+    /// Returns `true` when the app is in an active/generating state that should
+    /// disable input and show activity indicators.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Generating | Self::RunningTool { .. } | Self::LoadingTasks
+        )
+    }
+
+    /// Returns `true` when the app is generating (streaming text), for spinner
+    /// tick decisions in the main loop.
+    pub fn is_generating(&self) -> bool {
+        matches!(self, Self::Generating | Self::RunningTool { .. })
+    }
+}
+
+/// Connection health indicator for the status bar.
+///
+/// Replaces the hard-coded "● connected" with a live health label.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionHealth {
+    /// No request has been made yet — initial state.
+    Unknown,
+    /// The last interaction succeeded.
+    Connected,
+    /// The last interaction produced an error.
+    Error { message: String },
+    /// The endpoint is unreachable or the client is offline.
+    Offline,
+}
+
+impl ConnectionHealth {
+    /// Return a human-readable label for the status bar.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unknown => "API: unknown",
+            Self::Connected => "API: connected",
+            Self::Error { .. } => "API: error",
+            Self::Offline => "API: offline",
+        }
+    }
+
+    /// Update health based on a tool result or error event.
+    pub fn observe_event(&mut self, event: &TuiEvent) {
+        match event {
+            TuiEvent::ToolResult { result, .. } => match result {
+                ToolResult::Success { .. } => *self = Self::Connected,
+                ToolResult::SystemError { message } => {
+                    *self = Self::Error {
+                        message: message.clone(),
+                    }
+                }
+                ToolResult::Timeout => {
+                    *self = Self::Error {
+                        message: "request timed out".into(),
+                    }
+                }
+                ToolResult::Cancelled => {
+                    // Cancellation is not a connection error
+                }
+            },
+            TuiEvent::Error(msg) => {
+                *self = Self::Error {
+                    message: msg.clone(),
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The kind of a conversation entry — either a normal message or a system error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConversationEntryKind {
+    /// A regular user or assistant message.
+    Message,
+    /// A system error rendered inline in the conversation.
+    SystemError {
+        severity: Severity,
+        recovery_hint: Option<String>,
+    },
 }
 
 pub struct ConversationEntry {
+    pub kind: ConversationEntryKind,
     pub role: String,
     pub text: String,
     pub tool_calls: Vec<ToolCallDisplay>,
@@ -58,7 +169,10 @@ pub enum ToolCallStatus {
 }
 
 pub struct App {
-    pub state: AppState,
+    /// Fine-grained UI status (Idle, Generating, RunningTool, Error, etc.).
+    pub ui_status: UiStatus,
+    /// Connection health indicator for the status bar.
+    pub connection_health: ConnectionHealth,
     pub input: String,
     /// Frame counter for animated loading spinner.
     pub loading_frame: usize,
@@ -69,7 +183,9 @@ pub struct App {
     /// Set to false when the user manually scrolls up.
     pub auto_scroll: bool,
     pub usage: Option<Usage>,
-    pub status_message: String,
+    /// Transient informational message (e.g. "Created TSK-003"), shown in the
+    /// status bar and auto-cleared on the next user action.
+    pub info_message: Option<String>,
     pub quit_requested: bool,
     pub pending_permission: Option<PermissionPrompt>,
     pub task_store: Option<Arc<hackpi_tasks::JsonTaskStore>>,
@@ -109,13 +225,14 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         Self {
-            state: AppState::Resting,
+            ui_status: UiStatus::Idle,
+            connection_health: ConnectionHealth::Unknown,
             input: String::new(),
             conversation: VecDeque::new(),
             scroll_offset: 0,
             auto_scroll: true,
             usage: None,
-            status_message: String::new(),
+            info_message: None,
             quit_requested: false,
             pending_permission: None,
             task_store: None,
@@ -135,15 +252,31 @@ impl App {
         }
     }
 
+    /// Set the UI status to Interrupted (used by Ctrl+C in the main loop).
+    pub fn set_interrupted(&mut self) {
+        self.ui_status = UiStatus::Idle;
+        self.info_message = Some("Generation interrupted.".into());
+    }
+
+    /// Returns `true` when the app is in an active/generating state.
+    pub fn is_generating(&self) -> bool {
+        self.ui_status.is_generating()
+    }
+
     pub fn handle_event(&mut self, event: TuiEvent) {
+        // Pass non-error events to connection health tracking
+        self.connection_health.observe_event(&event);
+
         match event {
             TuiEvent::Submit(text) => {
+                self.info_message = None;
                 self.conversation.push_back(ConversationEntry {
+                    kind: ConversationEntryKind::Message,
                     role: "user".into(),
                     text,
                     tool_calls: Vec::new(),
                 });
-                self.state = AppState::Generating;
+                self.ui_status = UiStatus::Generating;
                 self.auto_scroll = true;
                 self.scroll_offset = 0;
                 self.input.clear();
@@ -156,6 +289,7 @@ impl App {
                 };
                 if needs_new {
                     self.conversation.push_back(ConversationEntry {
+                        kind: ConversationEntryKind::Message,
                         role: "assistant".into(),
                         text: chunk,
                         tool_calls: Vec::new(),
@@ -165,6 +299,7 @@ impl App {
                 }
             }
             TuiEvent::ToolCall { id, name, input } => {
+                self.ui_status = UiStatus::RunningTool { name: name.clone() };
                 self.auto_scroll = true;
                 let needs_new = match self.conversation.back() {
                     Some(e) => e.role != "assistant",
@@ -172,6 +307,7 @@ impl App {
                 };
                 if needs_new {
                     self.conversation.push_back(ConversationEntry {
+                        kind: ConversationEntryKind::Message,
                         role: "assistant".into(),
                         text: String::new(),
                         tool_calls: Vec::new(),
@@ -187,7 +323,7 @@ impl App {
                     });
                 }
             }
-            TuiEvent::ToolResult { id, result } => {
+            TuiEvent::ToolResult { id, result, .. } => {
                 self.auto_scroll = true;
                 if let Some(entry) = self.conversation.back_mut() {
                     for tc in &mut entry.tool_calls {
@@ -197,22 +333,38 @@ impl App {
                         }
                     }
                 }
+                // After a tool completes, revert to generating if still in a tool
+                // running state (the next chunk or tool call will update it).
             }
             TuiEvent::Usage(usage) => {
                 self.usage = Some(usage);
             }
             TuiEvent::Error(err) => {
-                self.status_message = err;
-                self.state = AppState::Resting;
+                // Create a visible conversation entry for the error
+                let recovery_hint = recovery_hint_for_error(&err);
+                self.conversation.push_back(ConversationEntry {
+                    kind: ConversationEntryKind::SystemError {
+                        severity: Severity::Error,
+                        recovery_hint,
+                    },
+                    role: "system".into(),
+                    text: err.clone(),
+                    tool_calls: Vec::new(),
+                });
+                self.ui_status = UiStatus::Error {
+                    message: err,
+                    severity: Severity::Error,
+                };
             }
             TuiEvent::Done => {
-                self.state = AppState::Resting;
+                self.ui_status = UiStatus::Idle;
             }
             TuiEvent::PermissionRequest {
                 id,
                 reason,
                 response,
             } => {
+                self.ui_status = UiStatus::WaitingForPermission;
                 self.pending_permission = Some(PermissionPrompt {
                     id,
                     reason,
@@ -320,14 +472,14 @@ impl App {
                     self.task_detail_cache = None;
                     self.task_detail_blocked_by = Vec::new();
                     self.task_detail_blocking = Vec::new();
-                    self.status_message = format!("Task {id} not found");
+                    self.info_message = Some(format!("Task {id} not found"));
                     self.active_view = AppView::TaskBoard;
                 }
                 Err(e) => {
                     self.task_detail_cache = None;
                     self.task_detail_blocked_by = Vec::new();
                     self.task_detail_blocking = Vec::new();
-                    self.status_message = format!("Error loading task: {e}");
+                    self.info_message = Some(format!("Error loading task: {e}"));
                     self.active_view = AppView::TaskBoard;
                 }
             }
@@ -402,7 +554,7 @@ impl App {
     /// Update autocomplete visibility based on current state.
     pub fn update_autocomplete_state(&mut self) {
         let should_show = self.input.starts_with('/')
-            && matches!(self.state, AppState::Resting)
+            && !self.ui_status.is_active()
             && matches!(
                 self.active_view,
                 AppView::Conversation | AppView::TaskBoard | AppView::TaskDetail(_)
@@ -459,7 +611,7 @@ impl App {
     pub fn submit_create_task(&mut self) -> Option<String> {
         let title = self.task_create_input.trim().to_string();
         if title.is_empty() {
-            self.status_message = "Task title cannot be empty.".to_string();
+            self.info_message = Some("Task title cannot be empty.".to_string());
             return None;
         }
 
@@ -470,7 +622,7 @@ impl App {
         match result {
             Some(task) => {
                 let id = task.id.clone();
-                self.status_message = format!("Created {}: \"{}\"", id, task.title);
+                self.info_message = Some(format!("Created {}: \"{}\"", id, task.title));
                 self.refresh_task_cache();
                 // Select the newly created task
                 for (i, t) in self.task_list_cache.iter().enumerate() {
@@ -482,7 +634,7 @@ impl App {
                 Some(id)
             }
             None => {
-                self.status_message = "Failed to create task.".to_string();
+                self.info_message = Some("Failed to create task.".to_string());
                 None
             }
         }
@@ -1011,6 +1163,28 @@ const PERMISSIVE_CONFIG: &str = r#"{
   }
 }"#;
 
+/// Generate a short, actionable recovery hint for a given error message.
+///
+/// Returns `None` when no reasonable hint can be derived.
+fn recovery_hint_for_error(err: &str) -> Option<String> {
+    let lower = err.to_lowercase();
+    if lower.contains("tool") && (lower.contains("not found") || lower.contains("unregistered")) {
+        Some("Check the tool name and try again.".into())
+    } else if lower.contains("permission") || lower.contains("denied") {
+        Some("Request permission or use /guardrails:status to check rules.".into())
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        Some("The request timed out. Try again or use a simpler query.".into())
+    } else if lower.contains("api") || lower.contains("connection") || lower.contains("network") {
+        Some("Check your API connection and try again.".into())
+    } else if lower.contains("guardrail") || lower.contains("deny") {
+        Some("Modify guardrails config or run /guardrails:status.".into())
+    } else if lower.contains("parse") || lower.contains("malformed") || lower.contains("invalid") {
+        Some("Check the input format and try again.".into())
+    } else {
+        None
+    }
+}
+
 /// Map a key character to a `PermissionDecision`, matching the key bindings
 /// used in the TUI event loop when a permission prompt is active.
 pub fn permission_decision_from_key(c: char) -> Option<PermissionDecision> {
@@ -1044,6 +1218,25 @@ pub fn format_conversation(conversation: &VecDeque<ConversationEntry>) -> String
         let msg_num = i + 1;
         output.push_str(&format!("## Message {msg_num}\n"));
         output.push_str(&format!("**Role**: {}\n", entry.role));
+
+        match &entry.kind {
+            ConversationEntryKind::SystemError {
+                severity,
+                recovery_hint,
+            } => {
+                let severity_label = match severity {
+                    Severity::Info => "Info",
+                    Severity::Warning => "Warning",
+                    Severity::Error => "Error",
+                };
+                output.push_str(&format!("**Type**: System Error ({severity_label})\n"));
+                if let Some(hint) = recovery_hint {
+                    output.push_str(&format!("**Recovery**: {hint}\n"));
+                }
+            }
+            ConversationEntryKind::Message => {}
+        }
+
         output.push_str("---\n");
 
         if !entry.text.is_empty() {
@@ -1623,7 +1816,7 @@ mod tests {
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].role, "user");
         assert_eq!(app.conversation[0].text, "hello");
-        assert!(matches!(app.state, AppState::Generating));
+        assert_eq!(app.ui_status, UiStatus::Generating);
     }
 
     /// Regression test for COR-158: Submit handler must clear app.input
@@ -1646,7 +1839,7 @@ mod tests {
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].text, "hello");
         // State should be Generating
-        assert!(matches!(app.state, AppState::Generating));
+        assert_eq!(app.ui_status, UiStatus::Generating);
     }
 
     #[test]
@@ -1701,20 +1894,34 @@ mod tests {
     }
 
     #[test]
-    fn test_done_sets_resting() {
+    fn test_done_sets_idle() {
         let mut app = App::new();
         app.handle_event(TuiEvent::Submit("hello".into()));
         app.handle_event(TuiEvent::Done);
-        assert!(matches!(app.state, AppState::Resting));
+        assert_eq!(app.ui_status, UiStatus::Idle);
     }
 
     #[test]
-    fn test_error_sets_resting_and_message() {
+    fn test_error_sets_error_ui_status_and_conversation_entry() {
         let mut app = App::new();
         app.handle_event(TuiEvent::Submit("hello".into()));
         app.handle_event(TuiEvent::Error("API error".into()));
-        assert!(matches!(app.state, AppState::Resting));
-        assert_eq!(app.status_message, "API error");
+        assert_eq!(
+            app.ui_status,
+            UiStatus::Error {
+                message: "API error".into(),
+                severity: Severity::Error,
+            }
+        );
+        // Should have a conversation entry for the error
+        assert_eq!(app.conversation.len(), 2);
+        let last = app.conversation.back().unwrap();
+        assert_eq!(last.role, "system");
+        assert!(matches!(
+            last.kind,
+            ConversationEntryKind::SystemError { .. }
+        ));
+        assert!(last.text.contains("API error"));
     }
 
     #[test]
@@ -2593,7 +2800,7 @@ mod tests {
     #[test]
     fn test_autocomplete_update_hidden_when_generating() {
         let mut app = App::new();
-        app.state = AppState::Generating;
+        app.ui_status = UiStatus::Generating;
         app.input = "/".to_string();
         app.update_autocomplete_state();
         assert!(!app.autocomplete_visible);
@@ -2815,7 +3022,7 @@ mod tests {
         app.task_create_input = "   ".to_string();
         let result = app.submit_create_task();
         assert!(result.is_none());
-        assert!(app.status_message.contains("empty"));
+        assert_eq!(app.info_message, Some("Task title cannot be empty.".into()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2839,7 +3046,7 @@ mod tests {
         assert_eq!(app.selected_task_idx, 0);
         assert!(!app.creating_task);
         assert!(app.task_create_input.is_empty());
-        assert!(app.status_message.contains(&id));
+        assert!(app.info_message.as_ref().unwrap().contains(&id));
     }
 
     #[test]
@@ -2850,7 +3057,7 @@ mod tests {
         app.task_create_input = "Test".to_string();
         let result = app.submit_create_task();
         assert!(result.is_none());
-        assert!(app.status_message.contains("Failed"));
+        assert_eq!(app.info_message, Some("Failed to create task.".into()));
     }
 
     // ── Export slash command tests ────────────────────────────────────────
@@ -2893,6 +3100,7 @@ mod tests {
     fn test_format_conversation_single_user_message() {
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "user".into(),
             text: "Hello, world!".into(),
             tool_calls: Vec::new(),
@@ -2909,11 +3117,13 @@ mod tests {
     fn test_format_conversation_assistant_with_tool_calls() {
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "user".into(),
             text: "Read the file".into(),
             tool_calls: Vec::new(),
         });
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "assistant".into(),
             text: "Let me check that file.".into(),
             tool_calls: vec![
@@ -2954,6 +3164,7 @@ mod tests {
     fn test_format_conversation_tool_timeout() {
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "assistant".into(),
             text: "".into(),
             tool_calls: vec![ToolCallDisplay {
@@ -2972,6 +3183,7 @@ mod tests {
     fn test_format_conversation_tool_error() {
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "assistant".into(),
             text: "".into(),
             tool_calls: vec![ToolCallDisplay {
@@ -2992,6 +3204,7 @@ mod tests {
     fn test_format_conversation_tool_cancelled() {
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "assistant".into(),
             text: "Cancelling...".into(),
             tool_calls: vec![ToolCallDisplay {
@@ -3010,6 +3223,7 @@ mod tests {
     fn test_format_conversation_no_text_shows_empty_content_area() {
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "user".into(),
             text: "".into(),
             tool_calls: Vec::new(),
@@ -3025,18 +3239,20 @@ mod tests {
         // Verify the formatting is safe for various edge cases
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "user".into(),
             text: "Hello".into(),
             tool_calls: Vec::new(),
         });
         conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
             role: "assistant".into(),
-            text: "Hi".into(),
+            text: "".into(),
             tool_calls: vec![ToolCallDisplay {
                 id: "tc1".into(),
-                name: "tool".into(),
+                name: "fetch".into(),
                 summary: ToolSummary::Unknown,
-                status: ToolCallStatus::Running,
+                status: ToolCallStatus::Done(ToolResult::Timeout),
             }],
         });
 
