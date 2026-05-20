@@ -134,9 +134,12 @@ impl Tool for SearchGrepTool {
 
             let file_path = entry.path().to_path_buf();
 
-            // Apply glob filter
+            // Apply glob filter against relative path
             if let Some(ref m) = glob_matcher {
-                if !m.is_match(&file_path) {
+                let rel_path = file_path
+                    .strip_prefix(&self.workspace_root)
+                    .unwrap_or(&file_path);
+                if !m.is_match(rel_path) {
                     continue;
                 }
             }
@@ -366,9 +369,13 @@ impl Tool for SearchGrepTool {
                 continue;
             }
 
-            // Apply glob filter
+            // Apply glob filter against relative path
             if let Some(ref m) = glob_matcher {
-                if !m.is_match(entry.path()) {
+                let rel_path = entry
+                    .path()
+                    .strip_prefix(&self.workspace_root)
+                    .unwrap_or(entry.path());
+                if !m.is_match(rel_path) {
                     continue;
                 }
             }
@@ -615,6 +622,43 @@ mod tests {
         assert!(
             content.contains("handle_auth"),
             "output should include matching line content, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_grep_include_glob_relative_matches_correctly() {
+        let dir = temp_dir();
+        create_file(&dir, "src/auth.rs", "pub fn handle_auth() {}");
+        create_file(&dir, "src/db.rs", "pub fn query_db() {}");
+        create_file(&dir, "tests/integration.rs", "mod auth; mod db;");
+
+        let tool = SearchGrepTool::new(dir.clone());
+        // Relative glob should match files under src/ only
+        let params = serde_json::json!({
+            "pattern": "fn",
+            "include_glob": "src/**/*.rs"
+        });
+        let ctx = hackpi_core::tools::ToolContext {
+            workspace_root: dir.clone(),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        let content = match result {
+            hackpi_core::tools::ToolResult::Success { content } => content,
+            other => panic!("expected Success, got {other:?}"),
+        };
+
+        assert!(
+            content.contains("src/auth.rs"),
+            "output should include src/auth.rs, got: {content}"
+        );
+        assert!(
+            content.contains("src/db.rs"),
+            "output should include src/db.rs, got: {content}"
+        );
+        assert!(
+            !content.contains("tests/"),
+            "output should NOT include files under tests/, got: {content}"
         );
     }
 
