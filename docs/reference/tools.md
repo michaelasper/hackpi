@@ -220,3 +220,142 @@ Text processing: `grep`, `head`, `tail`, `sort`, `wc`, `cut`, `tr`, `uniq`
 - No arbitrary binary execution
 - Path traversal protection on all filesystem operations
 - Execution limits: max 50 call depth, 10000 commands, 10000 loop iterations
+
+---
+
+## git_read
+
+Read-only git operations for inspecting repository state.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `operation` | string | yes | One of: `status`, `diff`, `diff_staged`, `log`, `branch_list`, `remote_list`, `show` |
+| `count` | integer | no | Number of log entries (default: 20, max: 100) |
+| `revision` | string | no | Revision for `show` (HEAD, branch name, or hash) |
+
+### Operations
+
+| Operation | Output |
+|-----------|--------|
+| `status` | Working tree status (staged, unstaged, untracked changes) |
+| `diff` | Unstaged diff of working tree changes |
+| `diff_staged` | Diff of staged (index) changes |
+| `log` | Recent commit history with hashes, authors, dates, and messages |
+| `branch_list` | List of local branches with current branch marker |
+| `remote_list` | List of configured remotes with URLs |
+| `show` | Full diff for a specific commit or reference |
+
+### Environment
+
+- Uses the repository containing the current working directory
+- No authentication required (read-only)
+
+---
+
+## git_write
+
+Mutating git operations with safety checks.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `operation` | string | yes | One of: `add`, `commit`, `push`, `pull`, `fetch`, `checkout`, `branch_create`, `branch_delete`, `merge`, `rebase`, `stash`, `stash_pop`, `reset` |
+| `paths` | array of strings | no | File paths for `add` or `checkout` operations |
+| `all` | boolean | no | Stage all changes (for `add`) |
+| `message` | string | no | Commit message or stash message |
+| `remote` | string | no | Remote name (default: `origin`) |
+| `branch` | string | no | Branch name for checkout/create/delete/merge |
+| `force` | boolean | no | Force push |
+| `create` | boolean | no | Create branch when checking out |
+
+### Destructive operations
+
+Some operations modify git history or remote state:
+
+| Operation | Safety note |
+|-----------|-------------|
+| `push` | Requires `--force` flag for force push |
+| `reset` | Defaults to `--mixed` (keeps working tree changes) |
+| `merge` | Creates merge commits by default (no fast-forward) |
+| `rebase` | Rewrites local branch history |
+| `branch_delete` | Deletes a local branch |
+
+### Environment
+
+- Uses the repository containing the current working directory
+- Uses the git user config for commit authorship
+
+---
+
+## github
+
+GitHub operations for PRs, issues, labels, and releases.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `operation` | string | yes | One of: `pr_create`, `pr_list`, `pr_merge`, `pr_checkout`, `issue_create`, `issue_list`, `issue_close`, `issue_comment`, `label_add`, `label_list`, `release_create`, `release_list` |
+| `owner` | string | no | Repository owner (inferred from git remote if omitted) |
+| `repo` | string | no | Repository name (inferred from git remote if omitted) |
+| `title` | string | no | Title for PR or issue creation |
+| `head` | string | no | Head branch for PR |
+| `base` | string | no | Base branch for PR (e.g. `main`) |
+| `body` | string | no | Body text for PR, issue, comment, or release |
+| `draft` | boolean | no | Create PR or release as draft |
+| `number` | integer | no | PR/issue number for merge/checkout/close/comment |
+
+### Authentication
+
+Requires `HACKPI_GITHUB_TOKEN` environment variable (falls back to `GITHUB_TOKEN`).
+
+### Destructive operations
+
+| Operation | Safety note |
+|-----------|-------------|
+| `pr_merge` | Merges a pull request |
+| `pr_checkout` | Fetches and checks out a PR branch locally |
+| `issue_close` | Closes an issue |
+| `release_create` | Creates a GitHub release |
+
+---
+
+## task
+
+Manage tasks with workflow-defined state transitions.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `operation` | string | yes | One of: `create`, `list`, `show`, `update`, `transition`, `block`, `unblock` |
+| `title` | string | no | Task title (required for `create`) |
+| `description` | string | no | Task description |
+| `id` | string | no | Task ID in `TSK-XXX` format |
+| `state` | string | no | Target state for `transition` |
+| `priority` | string | no | One of: `none`, `low`, `medium`, `high`, `urgent` |
+| `labels` | array of strings | no | Labels for the task |
+| `assignee` | string | no | Assignee identifier |
+| `blocked_by` | string | no | Task ID to block this task |
+
+### Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `create` | Create a new task with title, description, priority, labels |
+| `list` | List all tasks with state, priority, blocking info |
+| `show` | Show full task details by ID |
+| `update` | Update task fields (title, description, priority, labels, assignee) |
+| `transition` | Move task to a new state (validated against workflow) |
+| `block` | Add a blocking dependency on another task |
+| `unblock` | Remove a blocking dependency |
+
+### Workflow states
+
+Tasks follow a configurable state machine. The default workflow is:
+`Backlog → Todo → In Progress → In Review → Staged/Ready → Done`
+
+Transitions are validated — invalid transitions return a clear error.
