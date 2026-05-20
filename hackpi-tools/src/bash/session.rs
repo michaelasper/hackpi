@@ -223,7 +223,12 @@ impl BashSession {
                     filtered_args.push(arg.to_string());
                 }
 
+                // Save previous values before applying temporary overrides
+                // so we can restore them after command execution.
+                let mut env_restore: Vec<(String, Option<String>)> = Vec::new();
                 for (k, v) in &env_overrides {
+                    let old = self.env.get(k).cloned();
+                    env_restore.push((k.clone(), old));
                     self.env.insert(k.clone(), v.clone());
                 }
 
@@ -261,8 +266,15 @@ impl BashSession {
                 // its contents are NOT added to the shared caller stdout — no leak.
                 // If stdout was NOT redirected, output went directly into shared stdout.
 
-                for (k, _) in &env_overrides {
-                    self.env.remove(k);
+                // Restore previous environment values — a variable that existed
+                // before the temporary override gets its old value back; a variable
+                // that was newly created by the override is removed.
+                for (k, old) in &env_restore {
+                    if let Some(val) = old {
+                        self.env.insert(k.clone(), val.clone());
+                    } else {
+                        self.env.remove(k);
+                    }
                 }
 
                 if merge_stderr {
