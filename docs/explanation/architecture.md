@@ -1,6 +1,6 @@
 # Architecture Overview
 
-hackpi is a Rust workspace with four crates, streaming communication, and a virtual bash environment.
+hackpi is a Rust workspace with six crates, streaming communication, and a virtual bash environment.
 
 ## Crate structure
 
@@ -9,7 +9,9 @@ hackpi/
 ├── hackpi-core/       # Agent loop, API client, tool registry, shared types
 ├── hackpi-tools/      # read, search_grep, edit, write, bash
 ├── hackpi-tui/        # ratatui terminal interface
-└── hackpi-guardrails/ # Permission checking and path validation
+├── hackpi-guardrails/ # Permission checking and path validation
+├── hackpi-tasks/      # Task store, workflow state machine, slash-command task management
+└── hackpi-vcs/        # Git read/write and GitHub tools
 ```
 
 ### Dependency graph
@@ -18,12 +20,16 @@ hackpi/
 hackpi-tui
 ├── hackpi-core
 │   └── hackpi-guardrails
+├── hackpi-tasks
+│   └── hackpi-core
+├── hackpi-vcs
+│   └── hackpi-core
 └── hackpi-tools
     └── hackpi-core
         └── hackpi-guardrails
 ```
 
-`hackpi-core` is the shared foundation. `hackpi-guardrails` sits at the bottom with no internal dependencies. `hackpi-tui` pulls in everything to wire the agent loop, tools, and UI together.
+`hackpi-core` is the shared foundation. `hackpi-guardrails` sits at the bottom with no internal dependencies. `hackpi-tui` pulls in everything to wire the agent loop, tools, tasks, VCS, and UI together.
 
 ## Data flow
 

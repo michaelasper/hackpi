@@ -162,6 +162,11 @@ Type `/` in the input to open the autocomplete popover, then type to filter:
 | `search_grep` | Context-aware ripgrep wrapper with `context_lines` |
 | `edit` | Replace/append/prepend lines anchored to hashes — rejects stale anchors |
 | `write` | Atomic file creation jailed to workspace root |
+| `bash` | Virtual shell with in-memory filesystem, built-in commands, pipes, and redirects |
+| `git_read` | Read-only git operations: status, diff, log, branches, remotes |
+| `git_write` | Mutating git operations: add, commit, push, merge, branch, rebase, stash |
+| `github` | GitHub operations: PRs, issues, labels, and releases |
+| `task` | Task management with workflow-defined states and blocking dependencies |
 | `bash` | Virtual filesystem with command registry — no network, no arbitrary exec |
 | `git_read` | Read git status and log |
 | `github` | List GitHub pull requests |
