@@ -318,6 +318,21 @@ impl FileSystem for InMemoryFs {
             }
         }
 
+        // If the target is a symlink, write through it instead of replacing it
+        if let Some(existing) = current.children.get(file_name) {
+            if existing.is_symlink {
+                if let Some(target) = &existing.symlink_target {
+                    let resolved = if target.is_relative() {
+                        path.parent().unwrap_or(Path::new("/")).join(target)
+                    } else {
+                        target.clone()
+                    };
+                    drop(guard);
+                    return self.write(&resolved, content);
+                }
+            }
+        }
+
         current.children.insert(
             file_name.into(),
             FileNode {
