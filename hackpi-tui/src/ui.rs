@@ -926,7 +926,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let prefix = "> ";
     let display = if app.input.is_empty() && !app.ui_status.is_active() {
-        format!("{prefix}type a message...")
+        format!("{prefix}Type a message…")
     } else {
         format!("{prefix}{}", app.input)
     };
@@ -962,11 +962,11 @@ fn ui_status_label(status: &UiStatus, loading_frame: usize) -> String {
         UiStatus::Idle => String::new(),
         UiStatus::Generating => {
             let frame = SPINNER_FRAMES[loading_frame % SPINNER_FRAMES.len()];
-            format!("Generating... {frame}")
+            format!("Generating… {frame}")
         }
         UiStatus::RunningTool { name } => {
             let frame = SPINNER_FRAMES[loading_frame % SPINNER_FRAMES.len()];
-            format!("Running {name}... {frame}")
+            format!("Running {name}… {frame}")
         }
         UiStatus::LoadingTasks => {
             let frame = SPINNER_FRAMES[loading_frame % SPINNER_FRAMES.len()];
@@ -1489,10 +1489,7 @@ fn render_tool_card(lines: &mut Vec<Line>, tc: &ToolCallDisplay, area_width: usi
             }
         },
         ToolCallStatus::Running => {
-            lines.push(Line::from(Span::styled(
-                "│ Running...",
-                theme.status_running,
-            )));
+            lines.push(Line::from(Span::styled("│ Running…", theme.status_running)));
         }
     }
 
@@ -3787,7 +3784,7 @@ mod tests {
             "80x24 should render tabs: {cell_str}"
         );
         assert!(
-            cell_str.contains("type a message"),
+            cell_str.contains("Type a message"),
             "80x24 should render input placeholder: {cell_str}"
         );
         assert!(

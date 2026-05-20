@@ -1,10 +1,10 @@
-# Oven Design Document
+# Hackpi Design Document
 
-A Rust-based coding agent with a virtual bash filesystem, hash-anchored edits, a context-aware riprep wrapper, and a full ratatui TUI. Optimized for local DeepSeek V4 Flash via Anthropic-format API.
+A Rust-based coding agent with a virtual bash filesystem, hash-anchored edits, a context-aware ripgrep wrapper, and a full ratatui TUI. Optimized for local DeepSeek V4 Flash via Anthropic-format API.
 
 ## Workspace Structure
 
-Three-crate Rust workspace:
+Six-crate Rust workspace:
 
 ```
 hackpi/
@@ -32,21 +32,40 @@ hackpi/
 │       ├── read.rs          # read tool
 │       ├── search_grep.rs   # context-aware rg wrapper
 │       └── write.rs         # write tool
-└── hackpi-tui/
+├── hackpi-tui/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── app.rs           # TUI state machine
+│       ├── ui.rs            # ratatui render functions
+│       ├── events.rs        # event channels
+│       └── input.rs         # text input handling
+├── hackpi-guardrails/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── guards.rs        # guard rule types and evaluation
+│       └── config.rs        # rule loading and persistence
+├── hackpi-tasks/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── task.rs          # Task, NewTask types and store trait
+│       ├── json_store.rs    # JSON-backed task storage
+│       └── commands.rs      # slash-command parsing and handling
+└── hackpi-vcs/
     ├── Cargo.toml
     └── src/
         ├── lib.rs
-        ├── app.rs           # TUI state machine
-        ├── ui.rs            # ratatui render functions
-        ├── events.rs        # event channels
-        └── input.rs         # text input handling
+        ├── git_read.rs      # git status/log read tool
+        └── github.rs        # GitHub PR listing tool
 ```
 
 ### Workspace Cargo.toml
 
 ```toml
 [workspace]
-members = ["hackpi-core", "hackpi-tools", "hackpi-tui"]
+members = ["hackpi-core", "hackpi-tools", "hackpi-tui", "hackpi-guardrails", "hackpi-tasks", "hackpi-vcs"]
 resolver = "2"
 ```
 

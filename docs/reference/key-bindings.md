@@ -14,61 +14,71 @@ contextual help overlay.
 | `Ctrl+C` | Interrupt current generation |
 | `Ctrl+L` | Clear conversation |
 | `Ctrl+D` | Exit hackpi |
-| `?` | Show context help overlay |
+| `?` | Show contextual help overlay |
+| `Tab` | Cycle views (Conversation → Task Board → Graph → Conversation) |
 
-## Focus-specific bindings
+## Context-specific bindings
 
-| Context | Key | Action |
-|---------|-----|--------|
-| **Composer** | `Enter` | Submit message |
-| | `Esc` | Clear input |
-| | `Tab` | Cycle views |
-| **Conversation** | `Up` / `Down` | Scroll |
-| | `PgUp` / `PgDn` | Scroll faster |
-| | `Home` | Scroll to top |
-| | `End` | Scroll to bottom |
-| **Task board** | `Up` / `Down` | Navigate tasks |
-| | `Enter` | View task detail |
-| | `n` | Create task |
-| | `Esc` | Go back to conversation |
-| **Task detail** | `Up` / `Down` | Navigate fields |
-| | `Esc` | Go back to task board |
+### Composer (text input, resting state)
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Submit message |
+| `Shift+Enter` | Insert newline in input |
+| `Esc` | Clear input |
+| `/` | Start slash command (opens autocomplete) |
+
+### Conversation scrollback (generating or manual scroll)
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Scroll conversation |
+| `PgUp` / `PgDn` | Scroll faster |
+| `Home` | Scroll to top |
+| `End` | Scroll to bottom |
+
+When the app is generating, the scrollback is automatically pinned to the
+latest content. Pressing any scroll key switches to manual scroll mode.
+Scrolling to the bottom re-enables auto-scroll.
+
+### Task board
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Navigate tasks |
+| `Enter` | View task detail |
+| `n` | Create task |
+| `Esc` | Go back to conversation |
+| `/` | Start slash command |
+
+### Task detail
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Navigate fields |
+| `Esc` | Go back to task board |
 
 ## Overlay bindings
 
-These take effect when the corresponding overlay is active:
+These take effect when the corresponding overlay is active and trap all keyboard
+input until dismissed.
 
-| Overlay | Key | Action |
-|---------|-----|--------|
-| **Help overlay** | `Esc` | Close help |
-| **Autocomplete** | `Up` / `Down` | Navigate commands |
-| | `Tab` | Select command |
-| | `Enter` | Submit command |
-| | `Esc` | Close palette |
-| **Permission prompt** | `1`–`5` | Choose decision |
-| | `Esc` | Deny |
-| **Task creation** | `Enter` | Create task |
-| | `Esc` | Cancel |
+### Help overlay (press `?`)
 
-## Focus model
+| Key | Action |
+|-----|--------|
+| `Esc` | Close help |
 
-The current focus target is determined by the active view and app state:
+### Slash command autocomplete
 
-| View | State | Focus target |
-|------|-------|--------------|
-| Conversation | Resting | Composer (input field) |
-| Conversation | Generating | Scrollback |
-| Task board | Any | Task list |
-| Task detail | Any | Task detail |
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Navigate commands |
+| `Tab` | Select highlighted command |
+| `Enter` | Submit selected command |
+| `Esc` | Close palette without selecting |
 
-When an overlay is active (help, permission prompt, autocomplete, task creation),
-it traps all keyboard input until dismissed.
-
-## Permission prompts
-
-When a permission prompt is active, decisions are grouped by risk tier.
-Number keys select decisions, and persistent decisions require a
-two-step confirmation.
+### Permission prompt
 
 | Key | Decision | Risk tier | Persists? |
 |-----|----------|-----------|-----------|
@@ -78,3 +88,46 @@ two-step confirmation.
 | `4` | Always allow this pattern | Persistent rule | Yes — press `4` twice to confirm |
 | `5` | Always deny this pattern | Persistent rule | Yes (saved to config) |
 | `Esc` | Cancel | — | No (resets confirmation mode) |
+
+Decisions are grouped by risk tier in the modal. Persistent rules require a
+two-step confirmation: press `4` once to enter confirmation mode, then press `4`
+again to confirm. Any other key press cancels the confirmation.
+
+### Task creation prompt
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Create task with entered title |
+| `Esc` | Cancel task creation |
+
+## Focus model
+
+The current focus target is determined by the active view and app state:
+
+| View | State | Focus target |
+|------|-------|--------------|
+| Conversation | Resting | Composer (input field) |
+| Conversation | Generating/loading | Conversation scrollback |
+| Task board | Any | Task list |
+| Task detail | Any | Task detail fields |
+| Task graph | Any | Falls back to Composer input |
+
+When an overlay is active (help, permission prompt, autocomplete, task creation),
+it traps all keyboard input regardless of the underlying focus target.
+
+## Status bar
+
+The status bar shows dynamically generated footer hints based on the current
+context. Key bindings with `footer: true` in the binding table appear as
+`[Key] Action` hints. The right side of the status bar shows the connection
+health indicator:
+
+| Indicator | Meaning |
+|-----------|---------|
+| `API: unknown` | No request has been made yet |
+| `API: connected` | Last interaction succeeded |
+| `API: error` | Last interaction produced an error |
+| `API: offline` | Endpoint is unreachable |
+
+Status messages (Generating…, Running bash…, Loading tasks…) appear in the
+left/center of the status bar alongside the footer hints.
