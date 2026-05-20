@@ -489,7 +489,7 @@ async fn test_replace_with_valid_end_anchor_succeeds() {
     );
 
     let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
-    assert_eq!(content, "new_a\nnew_b\nnew_c\nline4\nline5");
+    assert_eq!(content, "new_a\nnew_b\nnew_c\nline4\nline5\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -517,7 +517,7 @@ async fn test_replace_text_with_lines_array() {
     let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
     assert_eq!(
         content,
-        "fn main() {\n    let x = 42;\n    println!(\"{x}\");\n}"
+        "fn main() {\n    let x = 42;\n    println!(\"{x}\");\n}\n"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -572,7 +572,7 @@ async fn test_range_anchor_syntax_in_pos() {
     assert!(result.contains("Applied 1 edit(s)"));
 
     let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
-    assert_eq!(content, "line1\nline2\nnew_line3\nnew_line4\nnew_line5");
+    assert_eq!(content, "line1\nline2\nnew_line3\nnew_line4\nnew_line5\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -658,7 +658,7 @@ async fn test_atomic_write_creates_file_with_correct_content() {
 
     // Verify file content
     let content = std::fs::read_to_string(dir.join("test.rs")).unwrap();
-    assert_eq!(content, "modified content");
+    assert_eq!(content, "modified content\n");
 
     // Verify no temp files are left behind (tempfile uses `tmp_` prefix)
     let has_temp = std::fs::read_dir(&dir)
@@ -716,7 +716,7 @@ async fn test_symlink_temp_file_attack_is_prevented() {
 
     // Verify the target file was modified correctly
     let content = std::fs::read_to_string(dir.join("target.rs")).unwrap();
-    assert_eq!(content, "modified content");
+    assert_eq!(content, "modified content\n");
 
     // Verify the symlink target outside the workspace was NOT modified
     #[cfg(unix)]
@@ -756,7 +756,7 @@ async fn test_pre_existing_temp_path_does_not_block_edit() {
 
     // Verify the target file was modified correctly
     let content = std::fs::read_to_string(dir.join("target.rs")).unwrap();
-    assert_eq!(content, "modified content");
+    assert_eq!(content, "modified content\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
