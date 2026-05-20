@@ -136,6 +136,7 @@ impl Tool for EditTool {
         };
 
         let lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
+        let had_trailing_newline = original.ends_with('\n');
         let ops = match deserialize_edit_ops(edits) {
             Ok(o) => o,
             Err(e) => return ToolResult::SystemError { message: e },
@@ -427,7 +428,10 @@ impl Tool for EditTool {
             }
         }
 
-        let result = current_lines.join("\n");
+        let mut result = current_lines.join("\n");
+        if had_trailing_newline {
+            result.push('\n');
+        }
 
         let original_perms = std::fs::metadata(&canonical).ok().map(|m| m.permissions());
 
