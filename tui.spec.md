@@ -15,16 +15,16 @@ Terminal UI for the hackpi coding agent, built with ratatui + crossterm.
 │  │  ● assistant:                           ││
 │  │  Let me look at the current code...      ││
 │  │                                          ││
-│  │  ┌─ read src/main.rs ──────────────────┐ ││
-│  │  │  1#VR:fn main() {                  │ ││
-│  │  │  2#KT:    println!("hello");        │ ││
-│  │  │  3#BH:}                             │ ││
-│  │  └─────────────────────────────────────┘ ││
-│  │                                          ││
-│  │  ┌─ edit src/main.rs ───────────────────┐││
-│  │  │  replace 1#VR → 4 lines               ││
-│  │  │  ✓ Accepted                           ││
-│  │  └──────────────────────────────────────┘││
+ │  │  ┌─ ✓ read  src/main.rs [Success] ──────┐ ││
+ │  │  │  1#VR:fn main() {                  │ ││
+ │  │  │  2#KT:    println!("hello");        │ ││
+ │  │  │  3#BH:}                             │ ││
+ │  │  └─────────────────────────────────────┘ ││
+ │  │                                          ││
+ │  │  ┌─ ✓ edit  src/main.rs  (1 op) [Success]┐││
+ │  │  │  replace 1#VR → 4 lines               ││
+ │  │  │  ✓ Accepted                           ││
+ │  │  └──────────────────────────────────────┘││
 │  │                                          ││
 │  │  Done. Added fibonacci function and      ││
 │  │  integrated it into the CLI handler.     ││
@@ -48,8 +48,29 @@ Terminal UI for the hackpi coding agent, built with ratatui + crossterm.
    - Scrollable list of messages
    - Each user message: prefixed with `○ me:`
    - Each assistant message: prefixed with `● assistant:`
-   - Tool calls render as bordered cards with title
+   - Tool calls render as bordered action cards with structured summary
    - Streaming content renders inline as it arrives
+   - Card format:
+     ```text
+     ┌─ {status_symbol} {tool_title} [{status_label}] ──┐
+     │ {content lines}                                   │
+     └───────────────────────────────────────────────────┘
+     ```
+   - Status symbols (three-channel differentiation: glyph + label + color):
+     - `✓ [Success]` — green: tool completed successfully
+     - `✗ [Failed]` — red: tool returned an error
+     - `⚠ [Timeout]` — yellow: tool timed out
+     - `⊘ [Cancelled]` — muted: tool was cancelled
+     - `⋯ [Running]` — yellow: tool is still executing
+   - Tool titles are structured summaries derived from tool name + JSON input:
+     - `read  src/main.rs` — shows file path, optional offset/limit
+     - `edit  src/main.rs  (2 ops)` — shows path and operation count
+     - `bash  cargo test` — shows command (truncated at 60 chars)
+     - `search  fn main` — shows search pattern
+     - `write  /path/to/file` — shows write target
+     - `git  status` — shows git operation
+     - `github  PR list` — shows github operation
+     - `task  do_something` — shows task command
    - Card types:
      - `read` — shows file content with hashline prefixes
      - `edit` — shows operation, affected lines, accept/reject status
@@ -97,7 +118,11 @@ Terminal UI for the hackpi coding agent, built with ratatui + crossterm.
 - 60fps render loop (16ms tick rate)
 - Differential rendering (ratatui handles this)
 - Spinner animation during LLM response streaming
-- Colored tool cards (distinct border colors per tool type)
+- Tool action cards with:
+  - Distinct border colors per tool type (tool-type color for card frame)
+  - Semantic status colors for result content (green=success, red=error, yellow=running/warning)
+  - Bordered cards adapt to conversation area width (`area.width`)
+  - Content lines are wrapped as `│ {line}` with status-appropriate coloring
 - Syntax highlighting in file content (future)
 
 ## Interaction Model
@@ -114,7 +139,7 @@ Terminal UI for the hackpi coding agent, built with ratatui + crossterm.
 - Tool execution dispatched to tokio blocking pool
 - Channel-based communication between LLM task and TUI
   - `TuiEvent::StreamChunk(String)` — new response text
-  - `TuiEvent::ToolCall(ToolCall)` — tool started
-  - `TuiEvent::ToolResult(ToolResult)` — tool completed
+  - `TuiEvent::ToolCall(ToolCall)` — tool started (carries optional JSON `input` for summary derivation)
+  - `TuiEvent::ToolResult(ToolResult)` — tool completed  
   - `TuiEvent::Error(String)` — error occurred
   - `TuiEvent::Done` — generation complete
