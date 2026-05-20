@@ -227,152 +227,160 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         }
-                    } else if app.autocomplete_visible {
-                        // Autocomplete popover is active — intercept navigation/selection keys
-                        match key.code {
-                            KeyCode::Up => {
-                                app.autocomplete_prev();
-                            }
-                            KeyCode::Down => {
-                                app.autocomplete_next();
-                            }
-                            KeyCode::Tab => {
-                                if let Some(cmd) = app.autocomplete_select() {
-                                    let full_cmd = format!("{} ", cmd);
-                                    input.buffer = full_cmd;
-                                    input.cursor = input.buffer.len();
-                                    app.autocomplete_visible = false;
-                                }
-                            }
-                            KeyCode::Enter => {
-                                if let Some(cmd) = app.autocomplete_select() {
-                                    let full_cmd = cmd.to_string();
-                                    input.set_submit(full_cmd);
-                                    app.autocomplete_visible = false;
-                                } else {
-                                    // No selection — pass through to normal Enter handling
-                                    input.handle_key(key);
-                                }
-                            }
-                            KeyCode::Esc => {
-                                app.autocomplete_visible = false;
-                            }
-                            _ => {
-                                input.handle_key(key);
-                            }
-                        }
-                    } else if app.creating_task {
-                        // Task creation inline prompt is active
-                        match key.code {
-                            KeyCode::Enter => {
-                                app.submit_create_task();
-                            }
-                            KeyCode::Esc => {
-                                app.cancel_create_task();
-                            }
-                            KeyCode::Backspace => {
-                                app.task_create_input.pop();
-                            }
-                            KeyCode::Char(ch) => {
-                                app.task_create_input.push(ch);
-                            }
-                            _ => {}
-                        }
                     } else {
-                        match key.code {
-                            KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                                if matches!(app.state, AppState::Generating) {
-                                    signal_tx.send(true).ok();
-                                    cancelled.store(true, Ordering::Relaxed);
-                                    app.state = AppState::Interrupted;
-                                }
+                        // Global controls are checked BEFORE modal branches so they always
+                        // work regardless of autocomplete, task-creation, or other modal state.
+                        match classify_global_key(&key_event, &app) {
+                            GlobalKeyAction::Interrupt => {
+                                signal_tx.send(true).ok();
+                                cancelled.store(true, Ordering::Relaxed);
+                                app.state = AppState::Interrupted;
                             }
-                            KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
+                            GlobalKeyAction::Clear => {
                                 app.clear();
                             }
-                            KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                            GlobalKeyAction::Exit => {
                                 break;
                             }
-                            KeyCode::Tab => {
-                                app.cycle_view();
-                                // Refresh cache when entering TaskBoard
-                                if matches!(app.active_view, AppView::TaskBoard) {
-                                    app.refresh_task_cache();
-                                }
-                            }
-                            KeyCode::Up => {
-                                if matches!(app.active_view, AppView::TaskBoard) {
-                                    app.task_cursor_up();
-                                } else if matches!(app.active_view, AppView::TaskDetail(_)) {
-                                    app.task_detail_prev();
-                                } else {
-                                    app.auto_scroll = false;
-                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
-                                }
-                            }
-                            KeyCode::Down => {
-                                if matches!(app.active_view, AppView::TaskBoard) {
-                                    app.task_cursor_down();
-                                } else if matches!(app.active_view, AppView::TaskDetail(_)) {
-                                    app.task_detail_next();
-                                } else {
-                                    app.auto_scroll = false;
-                                    app.scroll_offset = app.scroll_offset.saturating_add(3);
-                                }
-                            }
-                            KeyCode::Enter => {
-                                let has_input = !input.buffer.trim().is_empty();
-                                if matches!(app.active_view, AppView::TaskBoard)
-                                    && !has_input
-                                {
-                                    app.enter_task_detail();
-                                } else if !matches!(app.state, AppState::Generating) {
-                                    input.handle_key(key);
-                                }
-                            }
-                            KeyCode::Esc => {
-                                if !matches!(app.active_view, AppView::Conversation) {
-                                    app.go_back();
-                                    // Refresh cache when returning to TaskBoard
-                                    if matches!(app.active_view, AppView::TaskBoard) {
-                                        app.refresh_task_cache();
+                            GlobalKeyAction::None => {
+                                // Not a global control — fall through to modal-specific or
+                                // default handling.
+                                if app.autocomplete_visible {
+                                    // Autocomplete popover is active — intercept navigation/selection keys
+                                    match key.code {
+                                        KeyCode::Up => {
+                                            app.autocomplete_prev();
+                                        }
+                                        KeyCode::Down => {
+                                            app.autocomplete_next();
+                                        }
+                                        KeyCode::Tab => {
+                                            if let Some(cmd) = app.autocomplete_select() {
+                                                let full_cmd = format!("{} ", cmd);
+                                                input.buffer = full_cmd;
+                                                input.cursor = input.buffer.len();
+                                                app.autocomplete_visible = false;
+                                            }
+                                        }
+                                        KeyCode::Enter => {
+                                            if let Some(cmd) = app.autocomplete_select() {
+                                                let full_cmd = cmd.to_string();
+                                                input.set_submit(full_cmd);
+                                                app.autocomplete_visible = false;
+                                            } else {
+                                                // No selection — pass through to normal Enter handling
+                                                input.handle_key(key);
+                                            }
+                                        }
+                                        KeyCode::Esc => {
+                                            app.autocomplete_visible = false;
+                                        }
+                                        _ => {
+                                            input.handle_key(key);
+                                        }
                                     }
-                                }
-                            }
-                            KeyCode::Char('n') => {
-                                if matches!(
-                                    app.active_view,
-                                    AppView::TaskBoard | AppView::TaskDetail(_)
-                                ) {
-                                    app.begin_create_task();
-                                }
-                            }
-                            KeyCode::PageUp => {
-                                if matches!(app.active_view, AppView::Conversation) {
-                                    app.auto_scroll = false;
-                                }
-                                app.scroll_offset = app.scroll_offset.saturating_sub(10);
-                            }
-                            KeyCode::PageDown => {
-                                if matches!(app.active_view, AppView::Conversation) {
-                                    app.auto_scroll = false;
-                                }
-                                app.scroll_offset = app.scroll_offset.saturating_add(10);
-                            }
-                            KeyCode::Home => {
-                                if matches!(app.active_view, AppView::Conversation) {
-                                    app.auto_scroll = false;
-                                }
-                                app.scroll_offset = 0;
-                            }
-                            KeyCode::End => {
-                                if matches!(app.active_view, AppView::Conversation) {
-                                    app.auto_scroll = true;
-                                }
-                            }
-                            _ => {
-                                if !matches!(app.state, AppState::Generating) {
-                                    input.handle_key(key);
+                                } else if app.creating_task {
+                                    // Task creation inline prompt is active
+                                    match key.code {
+                                        KeyCode::Enter => {
+                                            app.submit_create_task();
+                                        }
+                                        KeyCode::Esc => {
+                                            app.cancel_create_task();
+                                        }
+                                        KeyCode::Backspace => {
+                                            app.task_create_input.pop();
+                                        }
+                                        KeyCode::Char(ch) => {
+                                            app.task_create_input.push(ch);
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    match key.code {
+                                        KeyCode::Tab => {
+                                            app.cycle_view();
+                                            // Refresh cache when entering TaskBoard
+                                            if matches!(app.active_view, AppView::TaskBoard) {
+                                                app.refresh_task_cache();
+                                            }
+                                        }
+                                        KeyCode::Up => {
+                                            if matches!(app.active_view, AppView::TaskBoard) {
+                                                app.task_cursor_up();
+                                            } else if matches!(app.active_view, AppView::TaskDetail(_)) {
+                                                app.task_detail_prev();
+                                            } else {
+                                                app.auto_scroll = false;
+                                                app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                            }
+                                        }
+                                        KeyCode::Down => {
+                                            if matches!(app.active_view, AppView::TaskBoard) {
+                                                app.task_cursor_down();
+                                            } else if matches!(app.active_view, AppView::TaskDetail(_)) {
+                                                app.task_detail_next();
+                                            } else {
+                                                app.auto_scroll = false;
+                                                app.scroll_offset = app.scroll_offset.saturating_add(3);
+                                            }
+                                        }
+                                        KeyCode::Enter => {
+                                            let has_input = !input.buffer.trim().is_empty();
+                                            if matches!(app.active_view, AppView::TaskBoard)
+                                                && !has_input
+                                            {
+                                                app.enter_task_detail();
+                                            } else if !matches!(app.state, AppState::Generating) {
+                                                input.handle_key(key);
+                                            }
+                                        }
+                                        KeyCode::Esc => {
+                                            if !matches!(app.active_view, AppView::Conversation) {
+                                                app.go_back();
+                                                // Refresh cache when returning to TaskBoard
+                                                if matches!(app.active_view, AppView::TaskBoard) {
+                                                    app.refresh_task_cache();
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char('n') => {
+                                            if matches!(
+                                                app.active_view,
+                                                AppView::TaskBoard | AppView::TaskDetail(_)
+                                            ) {
+                                                app.begin_create_task();
+                                            }
+                                        }
+                                        KeyCode::PageUp => {
+                                            if matches!(app.active_view, AppView::Conversation) {
+                                                app.auto_scroll = false;
+                                            }
+                                            app.scroll_offset = app.scroll_offset.saturating_sub(10);
+                                        }
+                                        KeyCode::PageDown => {
+                                            if matches!(app.active_view, AppView::Conversation) {
+                                                app.auto_scroll = false;
+                                            }
+                                            app.scroll_offset = app.scroll_offset.saturating_add(10);
+                                        }
+                                        KeyCode::Home => {
+                                            if matches!(app.active_view, AppView::Conversation) {
+                                                app.auto_scroll = false;
+                                            }
+                                            app.scroll_offset = 0;
+                                        }
+                                        KeyCode::End => {
+                                            if matches!(app.active_view, AppView::Conversation) {
+                                                app.auto_scroll = true;
+                                            }
+                                        }
+                                        _ => {
+                                            if !matches!(app.state, AppState::Generating) {
+                                                input.handle_key(key);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -522,4 +530,209 @@ async fn main() -> anyhow::Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+/// Represents the action to take when a recognized global control key is pressed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GlobalKeyAction {
+    /// Not a recognized global control key.
+    None,
+    /// Ctrl+C — interrupt the current generation.
+    Interrupt,
+    /// Ctrl+L — clear the conversation.
+    Clear,
+    /// Ctrl+D — exit hackpi.
+    Exit,
+}
+
+/// Check if a key event matches a documented global control (Ctrl+C, Ctrl+L, Ctrl+D).
+///
+/// Returns the corresponding [`GlobalKeyAction`] if matched, or [`GlobalKeyAction::None`]
+/// if the key does not correspond to a global control. This function is intentionally
+/// pure (no side effects) to make it easily testable.
+///
+/// # Documented global controls
+///
+/// | Key    | Action        | Condition            |
+/// |--------|---------------|----------------------|
+/// | Ctrl+C | Interrupt     | Only when generating |
+/// | Ctrl+L | Clear         | Always               |
+/// | Ctrl+D | Exit          | Always               |
+#[must_use]
+fn classify_global_key(key: &Event, app: &App) -> GlobalKeyAction {
+    match key {
+        Event::Key(key_event) => match (key_event.modifiers, key_event.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                if matches!(app.state, AppState::Generating) {
+                    GlobalKeyAction::Interrupt
+                } else {
+                    GlobalKeyAction::None
+                }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('l')) => GlobalKeyAction::Clear,
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) => GlobalKeyAction::Exit,
+            _ => GlobalKeyAction::None,
+        },
+        _ => GlobalKeyAction::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Event;
+    use crossterm::event::KeyEvent;
+
+    /// Build a minimal App with a given state for test use.
+    fn app_with_state(state: AppState) -> App {
+        let mut app = App::new();
+        app.state = state;
+        app
+    }
+
+    /// Helper to build a key event.
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    // ── Ctrl+C (Interrupt) ──────────────────────────────────────
+
+    #[test]
+    fn test_ctrl_c_interrupts_when_generating() {
+        let app = app_with_state(AppState::Generating);
+        let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Interrupt);
+    }
+
+    #[test]
+    fn test_ctrl_c_does_nothing_when_resting() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    #[test]
+    fn test_ctrl_c_does_nothing_when_interrupted() {
+        let app = app_with_state(AppState::Interrupted);
+        let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    // ── Ctrl+L (Clear) ──────────────────────────────────────────
+
+    #[test]
+    fn test_ctrl_l_always_clears() {
+        let app = app_with_state(AppState::Generating);
+        let action = classify_global_key(&key(KeyCode::Char('l'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Clear);
+    }
+
+    #[test]
+    fn test_ctrl_l_clears_during_resting() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Char('l'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Clear);
+    }
+
+    // ── Ctrl+D (Exit) ───────────────────────────────────────────
+
+    #[test]
+    fn test_ctrl_d_always_exits() {
+        let app = app_with_state(AppState::Generating);
+        let action = classify_global_key(&key(KeyCode::Char('d'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Exit);
+    }
+
+    #[test]
+    fn test_ctrl_d_exits_during_resting() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Char('d'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Exit);
+    }
+
+    // ── Non-global keys are None ────────────────────────────────
+
+    #[test]
+    fn test_plain_c_is_not_global() {
+        let app = app_with_state(AppState::Generating);
+        let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    #[test]
+    fn test_ctrl_x_is_not_global() {
+        let app = app_with_state(AppState::Generating);
+        let action = classify_global_key(&key(KeyCode::Char('x'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    #[test]
+    fn test_escape_is_not_global() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Esc, KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    #[test]
+    fn test_enter_is_not_global() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Enter, KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    // ── Autocomplete-visible does NOT affect routing ────────────
+
+    #[test]
+    fn test_ctrl_c_interrupts_even_when_autocomplete_visible() {
+        let mut app = app_with_state(AppState::Generating);
+        app.autocomplete_visible = true;
+        let action = classify_global_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Interrupt);
+    }
+
+    #[test]
+    fn test_ctrl_l_clears_even_when_autocomplete_visible() {
+        let mut app = app_with_state(AppState::Resting);
+        app.autocomplete_visible = true;
+        let action = classify_global_key(&key(KeyCode::Char('l'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Clear);
+    }
+
+    #[test]
+    fn test_ctrl_d_exits_even_when_autocomplete_visible() {
+        let mut app = app_with_state(AppState::Generating);
+        app.autocomplete_visible = true;
+        let action = classify_global_key(&key(KeyCode::Char('d'), KeyModifiers::CONTROL), &app);
+        assert_eq!(action, GlobalKeyAction::Exit);
+    }
+
+    // ── Autocomplete-specific keys still work ───────────────────
+
+    #[test]
+    fn test_autocomplete_up_is_not_global() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Up, KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    #[test]
+    fn test_autocomplete_down_is_not_global() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Down, KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    #[test]
+    fn test_autocomplete_tab_is_not_global() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Tab, KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
+
+    #[test]
+    fn test_autocomplete_esc_is_not_global() {
+        let app = app_with_state(AppState::Resting);
+        let action = classify_global_key(&key(KeyCode::Esc, KeyModifiers::NONE), &app);
+        assert_eq!(action, GlobalKeyAction::None);
+    }
 }
