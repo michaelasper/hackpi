@@ -310,6 +310,12 @@ impl FileSystem for InMemoryFs {
                 );
             }
             current = current.children.get_mut(*seg).unwrap();
+            if !current.is_dir {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("'{}' is not a directory", seg),
+                ));
+            }
         }
 
         current.children.insert(
@@ -552,6 +558,12 @@ impl FileSystem for InMemoryFs {
                 );
             }
             current = current.children.get_mut(name).unwrap();
+            if !current.is_dir {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("'{name}' is not a directory"),
+                ));
+            }
         }
 
         Ok(())
@@ -626,6 +638,12 @@ impl FileSystem for InMemoryFs {
                 );
             }
             current = current.children.get_mut(*seg).unwrap();
+            if !current.is_dir {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("'{seg}' is not a directory"),
+                ));
+            }
         }
 
         current.children.insert(
