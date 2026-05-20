@@ -1,0 +1,21 @@
+{
+    "name": "Help and Clear",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "/help",
+            "assert": {
+                "render_contains": "Available commands",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "submit",
+            "text": "/clear",
+            "assert": {
+                "conversation_len": 0,
+                "state": "Resting"
+            }
+        }
+    ]
+}

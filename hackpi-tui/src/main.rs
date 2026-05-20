@@ -35,8 +35,14 @@ fn build_system_prompt() -> String {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    // Parse --god flag manually to avoid adding a CLI dependency
-    let god_mode = std::env::args().any(|arg| arg == "--god");
+    // Parse CLI flags manually to avoid adding a CLI dependency.
+    let mut args: Vec<String> = std::env::args().collect();
+    let god_mode = args.iter().any(|arg| arg == "--god");
+
+    // Check for --script <path> mode. If present, run the scenario and exit.
+    if let Some(script_path) = hackpi_tui::script::parse_script_args(&mut args) {
+        return hackpi_tui::script::run_scenario(std::path::Path::new(&script_path));
+    }
 
     // Create GuardEvaluator with settings paths from current directory
     let workspace_root = std::env::current_dir()?;
