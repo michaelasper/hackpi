@@ -11,7 +11,7 @@ use hackpi_core::tools::ToolRegistry;
 use hackpi_core::types::ApiConfig;
 use hackpi_guardrails::{GuardEvaluator, PermissionDecision, SettingsPaths};
 use hackpi_tools::register_all_tools;
-use hackpi_tui::app::{handle_slash_command, App, AppState, AppView};
+use hackpi_tui::app::{handle_slash_command, App, AppState, AppView, CommandOutcome};
 use hackpi_tui::events::TuiEvent;
 use hackpi_tui::input::InputHandler;
 use hackpi_tui::ui;
@@ -408,7 +408,7 @@ async fn main() -> anyhow::Result<()> {
                                 // Dropping the guard after the call is safe since no
                                 // other task touches the evaluator concurrently here.
                                 let mut guard = guard_evaluator.write().unwrap();
-                                handle_slash_command(
+                                let outcome = handle_slash_command(
                                     &submitted,
                                     &mut app,
                                     &tui_tx,
@@ -417,6 +417,13 @@ async fn main() -> anyhow::Result<()> {
                                 )
                                 .await;
                                 drop(guard);
+
+                                // Handle exit-requested outcomes
+                                if matches!(outcome, CommandOutcome::ExitRequested)
+                                    || app.quit_requested
+                                {
+                                    break;
+                                }
                                 // Refresh task cache after task operations on TaskBoard
                                 if submitted.starts_with("/task") {
                                     if matches!(app.active_view, AppView::TaskBoard) {
