@@ -75,8 +75,7 @@ hackpi is a TUI application — launch it and type natural-language requests.
 |---------|-----|--------|
 | **Composer** (input) | `Enter` | Submit message |
 | | `Shift+Enter` | Insert newline |
-| | `Esc` | Clear input |
-| | `/` | Start slash command |
+| | `/` | Start slash command (opens autocomplete) |
 | **Conversation** (scrollback) | `Up` / `Down` | Scroll conversation |
 | | `PgUp` / `PgDn` | Scroll faster |
 | | `Home` | Scroll to top |

@@ -25,7 +25,6 @@ contextual help overlay.
 |-----|--------|
 | `Enter` | Submit message |
 | `Shift+Enter` | Insert newline in input |
-| `Esc` | Clear input |
 | `/` | Start slash command (opens autocomplete) |
 
 ### Conversation scrollback (generating or manual scroll)

@@ -745,6 +745,16 @@ pub const SLASH_COMMANDS: &[CommandInfo] = &[
     },
 ];
 
+/// Generate the `/help` output text from the canonical SLASH_COMMANDS source.
+/// This keeps help text in sync automatically — no separate hardcoded list to maintain.
+pub fn format_help_text() -> String {
+    let mut lines = String::from("Available commands:\n");
+    for cmd in SLASH_COMMANDS {
+        lines.push_str(&format!("   {} - {}\n", cmd.name, cmd.description));
+    }
+    lines
+}
+
 /// Return all slash commands whose name starts with the given filter text (case-insensitive).
 pub fn filter_commands(filter: &str) -> Vec<&'static CommandInfo> {
     let lower = filter.to_lowercase();
@@ -822,28 +832,7 @@ pub async fn handle_slash_command(
     let command = parts[0];
     match command {
         "/help" => {
-            let help_text = "\
-Available commands:
-   /help  - Show this help message
-   /clear - Clear the conversation
-   /quit  - Exit the application
-   /guardrails:status - Show guardrails status
-   /guardrails:clean - Clear session cache
-   /guardrails:onboarding [preset] - Write a preset guardrails config
-   /git:status - Show git status (via git_read)
-   /git:log - Show recent git log (via git_read)
-   /github:pr-list - List open pull requests (via github)
-   /task create <title> - Create a new task
-   /task list - List all tasks
-   /task show <id> - Show task details
-   /task move <id> <state> - Move task to a new state
-   /task done <id> - Mark task as done
-   /task block <id> <blocked_by> - Add blocking dependency
-   /task unblock <id> <blocked_by> - Remove blocking dependency
-   /task label <id> <label> - Add a label to a task
-   /task assign <id> <assignee> - Assign task to someone
-   /tasks - Alias for /task list
-   /export [path] - Export conversation to text file";
+            let help_text = format_help_text();
             tui_tx
                 .send(TuiEvent::StreamChunk(help_text.to_string()))
                 .ok();
@@ -1372,13 +1361,12 @@ mod tests {
         assert_eq!(handled, CommandOutcome::Handled);
         let mut found_chunk = false;
         let mut found_done = false;
+        let mut help_text = String::new();
         while let Ok(event) = rx.try_recv() {
             match event {
                 TuiEvent::StreamChunk(text) => {
                     found_chunk = true;
-                    assert!(text.contains("/help"));
-                    assert!(text.contains("/clear"));
-                    assert!(text.contains("/quit"));
+                    help_text.push_str(&text);
                 }
                 TuiEvent::Done => found_done = true,
                 _ => {}
@@ -1386,6 +1374,34 @@ mod tests {
         }
         assert!(found_chunk);
         assert!(found_done);
+
+        // Every registered SLASH_COMMAND must appear in the help output
+        for cmd in SLASH_COMMANDS {
+            assert!(
+                help_text.contains(cmd.name),
+                "/help output should mention {} but it does not appear in:\n{help_text}",
+                cmd.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_help_text_includes_all_commands() {
+        let help = format_help_text();
+        assert!(help.starts_with("Available commands:"));
+        for cmd in SLASH_COMMANDS {
+            assert!(
+                help.contains(cmd.name),
+                "format_help_text() should include '{}' but it does not appear in:\n{help}",
+                cmd.name
+            );
+            assert!(
+                help.contains(cmd.description),
+                "format_help_text() should include description '{}' for cmd '{}'",
+                cmd.description,
+                cmd.name
+            );
+        }
     }
 
     #[tokio::test]
@@ -2422,21 +2438,12 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             if let TuiEvent::StreamChunk(text) = event {
                 found_chunk = true;
-                assert!(
-                    text.contains("/task create"),
-                    "help should list /task create"
-                );
-                assert!(text.contains("/task list"), "help should list /task list");
-                assert!(text.contains("/task show"), "help should list /task show");
-                assert!(text.contains("/task move"), "help should list /task move");
-                assert!(text.contains("/task done"), "help should list /task done");
-                assert!(text.contains("/task block"), "help should list /task block");
-                assert!(text.contains("/task label"), "help should list /task label");
-                assert!(
-                    text.contains("/task assign"),
-                    "help should list /task assign"
-                );
+                // Help text is generated from SLASH_COMMANDS, so /task and /tasks
+                // appear as top-level entries with a description like
+                // "Manage tasks (create, list, show, ...)"
+                assert!(text.contains("/task"), "help should list /task");
                 assert!(text.contains("/tasks"), "help should list /tasks");
+                assert!(text.contains("Manage tasks"), "help should describe /task");
             }
         }
         assert!(found_chunk);
