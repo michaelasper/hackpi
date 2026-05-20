@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 // ── Response types ──
 
@@ -92,6 +93,8 @@ impl GitHubClient {
     pub fn new(token: &str, base_url: &str) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .user_agent("hackpi-vcs/0.1")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
@@ -1788,20 +1791,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout_handling() {
-        // Use a non-routable address with a very short timeout
+        // Use a non-routable address — the client's built-in connect_timeout (10s)
+        // will fire rather than hanging indefinitely.
         let client = GitHubClient::new("test-token", "http://192.0.2.1:1").unwrap();
 
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), client.validate_token()).await;
+        // Wrap in a generous safety net so the test suite never hangs even if
+        // the client-level timeout is somehow misconfigured.
+        let result = tokio::time::timeout(Duration::from_secs(15), client.validate_token()).await;
 
-        // Should complete (either timeout or error) within our outer timeout
         match result {
             Ok(inner) => {
-                // Inner result should be an error
-                assert!(inner.is_err(), "Expected error, got: {inner:?}");
+                // The client's built-in timeout should produce an error.
+                assert!(
+                    inner.is_err(),
+                    "Expected client timeout error, got: {inner:?}"
+                );
             }
             Err(_) => {
-                // Outer timeout is also acceptable — the request took too long
+                // Outer safety-net timeout — client-level timeout likely misconfigured.
+                panic!(
+                    "Client-level timeout did not fire within 15s — check connect_timeout setting"
+                );
             }
         }
     }
