@@ -422,6 +422,7 @@ mod tests {
                 details: "rm -rf /".into(),
             },
             response: Some(tx),
+            confirming_always_allow: false,
         });
         assert_eq!(active_overlay(&app), Some(OverlayKind::PermissionPrompt));
     }
@@ -463,6 +464,7 @@ mod tests {
                 details: "test".into(),
             },
             response: Some(tx),
+            confirming_always_allow: false,
         });
         assert_eq!(
             active_overlay(&app),
@@ -485,6 +487,7 @@ mod tests {
                 details: "test".into(),
             },
             response: Some(tx),
+            confirming_always_allow: false,
         });
         assert_eq!(app_key_context(&app), KeyContext::PermissionPrompt);
     }

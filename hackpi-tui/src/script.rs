@@ -892,6 +892,7 @@ mod tests {
                 details: "test".into(),
             },
             response: Some(tx),
+            confirming_always_allow: false,
         });
         handle_key_in_app(&mut app, &mut input, "Char(1)");
         assert!(app.pending_permission.is_none());
@@ -914,6 +915,7 @@ mod tests {
                 details: "test".into(),
             },
             response: Some(tx),
+            confirming_always_allow: false,
         });
         // Esc should deny
         // Permission prompt handling in handle_key_in_app checks for Esc via

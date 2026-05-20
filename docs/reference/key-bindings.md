@@ -66,13 +66,15 @@ it traps all keyboard input until dismissed.
 
 ## Permission prompts
 
-When a permission prompt is active, number keys select decisions:
+When a permission prompt is active, decisions are grouped by risk tier.
+Number keys select decisions, and persistent decisions require a
+two-step confirmation.
 
-| Key | Decision | Persists? |
-|-----|----------|-----------|
-| `1` | Allow once | No |
-| `2` | Allow for session | Until exit |
-| `3` | Deny | No |
-| `4` | Always allow | Yes (saved to config) |
-| `5` | Always deny | Yes (saved to config) |
-| `Esc` | Deny (same as `3`) | No |
+| Key | Decision | Risk tier | Persists? |
+|-----|----------|-----------|-----------|
+| `1` | Allow once | This request | No |
+| `3` | Deny | This request | No |
+| `2` | Allow until exit | This session | Until exit |
+| `4` | Always allow this pattern | Persistent rule | Yes — press `4` twice to confirm |
+| `5` | Always deny this pattern | Persistent rule | Yes (saved to config) |
+| `Esc` | Cancel | — | No (resets confirmation mode) |
