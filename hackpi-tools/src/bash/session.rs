@@ -231,12 +231,23 @@ impl BashSession {
                 let resolved_args: Vec<String> =
                     filtered_args.iter().map(|a| self.resolve_vars(a)).collect();
 
+                // When stdout is redirected to a file, use a per-command buffer
+                // so redirected output doesn't leak to the caller and prior
+                // output from earlier commands doesn't get written to the file.
+                let mut cmd_stdout: Vec<u8> = Vec::new();
+                let cmd_stdout_ptr: &mut Vec<u8> =
+                    if redirect_stdout_to_file.is_some() || redirect_append_to_file.is_some() {
+                        &mut cmd_stdout
+                    } else {
+                        stdout
+                    };
+
                 let mut ctx = CommandContext {
                     fs: self.fs.as_ref(),
                     env: &mut self.env,
                     cwd: &mut self.cwd,
                     stdin: stdin_local,
-                    stdout,
+                    stdout: cmd_stdout_ptr,
                     stderr: actual_stderr,
                     signal: self.signal.as_ref(),
                     host_workspace_root: Some(self.host_workspace_root.clone()),
@@ -245,6 +256,10 @@ impl BashSession {
                 let exit_code = self
                     .registry
                     .execute(&resolved_name, &resolved_args, &mut ctx);
+
+                // Note: if stdout was redirected, cmd_stdout is a separate buffer and
+                // its contents are NOT added to the shared caller stdout — no leak.
+                // If stdout was NOT redirected, output went directly into shared stdout.
 
                 for (k, _) in &env_overrides {
                     self.env.remove(k);
@@ -255,17 +270,30 @@ impl BashSession {
                 }
 
                 if let Some(path) = redirect_stdout_to_file {
-                    let _ = self.fs.write(Path::new(&path), stdout);
+                    if let Err(e) = self.fs.write(Path::new(&path), &cmd_stdout) {
+                        let _ =
+                            writeln!(stderr, "write error: failed to write stdout to {path}: {e}");
+                    }
                 }
                 if let Some(path) = redirect_append_to_file {
                     let existing = self.fs.read(Path::new(&path)).unwrap_or_default();
                     let mut content = existing;
-                    content.extend_from_slice(stdout);
-                    let _ = self.fs.write(Path::new(&path), &content);
+                    content.extend_from_slice(&cmd_stdout);
+                    if let Err(e) = self.fs.write(Path::new(&path), &content) {
+                        let _ = writeln!(
+                            stderr,
+                            "write error: failed to append stdout to {path}: {e}"
+                        );
+                    }
                 }
                 if let Some(path) = redirect_stderr_to_file {
                     if let Some(captured) = stderr_capture {
-                        let _ = self.fs.write(Path::new(&path), &captured);
+                        if let Err(e) = self.fs.write(Path::new(&path), &captured) {
+                            let _ = writeln!(
+                                stderr,
+                                "write error: failed to write stderr to {path}: {e}"
+                            );
+                        }
                     }
                 }
 
