@@ -1,4 +1,5 @@
 use crate::app::{AppState, AppView, ToolCallStatus};
+use crate::interaction::{app_key_context, footer_bindings};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -51,6 +52,10 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     if app.creating_task {
         render_task_create_prompt(frame, chunks[2], app);
+    }
+
+    if app.help_visible {
+        render_help_overlay(frame, area, app);
     }
 }
 
@@ -321,13 +326,6 @@ fn render_task_board(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Footer showing available commands
-    items.push(ListItem::new(Line::from("")));
-    items.push(ListItem::new(Line::from(Span::styled(
-        "  ↑/↓ navigate  Enter detail  Esc back  n new task  /task move <id> <state>",
-        Style::default().fg(Color::DarkGray),
-    ))));
-
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::NONE)
@@ -552,10 +550,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, input_area);
 
     // Show the terminal cursor at the current typing position.
-    // Only when the user can type (Resting state, no active modals).
-    if matches!(app.state, AppState::Resting)
-        && app.pending_permission.is_none()
-        && !app.creating_task
+    // Only when the focus target is ConversationInput.
+    if matches!(
+        app.focus_target(),
+        crate::interaction::FocusTarget::ConversationInput
+    ) && !app.help_visible
     {
         let prefix_len: u16 = prefix.len() as u16;
         let cursor_col = input_area.x + prefix_len + app.input_cursor as u16;
@@ -571,25 +570,51 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 fn status_bar_text(app: &App) -> String {
-    let view_hint = match &app.active_view {
-        AppView::Conversation => "",
-        AppView::TaskBoard => "Tab:Tasks  ",
-        AppView::TaskDetail(id) => return format!(" Task: {id}  |  Esc back  ↑/↓ navigate  ●"),
-        AppView::TaskGraph => "Tab:Graph  ",
-    };
+    let context = app_key_context(app);
+    let is_detail = matches!(app.active_view, AppView::TaskDetail(_));
+
+    // Task detail shows a bespoke status line with task ID
+    if is_detail {
+        if let Some(task) = &app.task_detail_cache {
+            return format!(" Task: {}  ●", task.id);
+        }
+    }
+
+    // State indicator (generating/interrupted)
     let state_text: String = match app.state {
-        AppState::Resting => "Ctrl+C interrupt  Ctrl+L clear  Ctrl+D exit  /help".into(),
         AppState::Generating => {
             let frame = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
-            format!("Generating... {frame} (Ctrl+C to interrupt)")
+            format!("Generating... {frame}")
         }
-        AppState::Interrupted => "Interrupted. Press any key.".into(),
+        AppState::Interrupted => "Interrupted.".into(),
+        AppState::Resting => String::new(),
     };
-    let conn = "●";
-    if app.status_message.is_empty() {
-        format!(" {view_hint}{state_text}  {conn}")
+
+    // Dynamic footer hints from KEY_BINDINGS table
+    let bindings = footer_bindings(context);
+    let binding_text: String = bindings
+        .iter()
+        .map(|b| format!("[{}] {}", b.key, b.action))
+        .collect::<Vec<_>>()
+        .join("  ");
+
+    // Extra status message if present
+    let status_prefix = if app.status_message.is_empty() {
+        String::new()
     } else {
-        format!(" {view_hint}{} | {state_text}  {conn}", app.status_message)
+        format!("{} | ", app.status_message)
+    };
+
+    if !state_text.is_empty() {
+        if !binding_text.is_empty() {
+            format!(" {status_prefix}{state_text}  ·  {binding_text}  ●")
+        } else {
+            format!(" {status_prefix}{state_text}  ●")
+        }
+    } else if !binding_text.is_empty() {
+        format!(" {status_prefix}{binding_text}  ●")
+    } else {
+        format!(" {status_prefix}●")
     }
 }
 
@@ -872,6 +897,83 @@ fn render_task_create_prompt(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Render the contextual help overlay showing key bindings for the current context.
+///
+/// Uses a centered modal similar to the permission prompt. Content is generated
+/// dynamically from the `KEY_BINDINGS` table, filtered by `app_key_context`.
+/// Footer bindings are listed first, followed by additional bindings.
+fn render_help_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let context = app_key_context(app);
+    let bindings = super::interaction::help_bindings(context);
+
+    // Modal dimensions
+    let modal_width = 60u16;
+    // Height: top border (1) + title (1) + empty (1) + bindings + bottom border (1)
+    let binding_count = bindings.len() as u16;
+    let modal_height = (binding_count + 4).clamp(8, 24);
+
+    let x = (area.width.saturating_sub(modal_width)) / 2;
+    let y = (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect {
+        x,
+        y,
+        width: modal_width.min(area.width),
+        height: modal_height.min(area.height),
+    };
+
+    frame.render_widget(Clear, modal_area);
+
+    let context_name = format!("{context:?}");
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title
+    lines.push(Line::from(Span::styled(
+        format!(" ⌨ Help — {context_name} "),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    for binding in &bindings {
+        let key_style = if binding.footer {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let action_style = if binding.footer {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(format!("{:<12}", binding.key), key_style),
+            Span::styled(binding.action, action_style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Press Esc to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .alignment(Alignment::Left);
+
+    frame.render_widget(paragraph, modal_area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,10 +1053,15 @@ mod tests {
     fn test_status_bar_resting_shows_bindings() {
         let app = App::new();
         let text = status_bar_text(&app);
-        assert!(text.contains("Ctrl+C"), "status should show Ctrl+C: {text}");
-        assert!(text.contains("Ctrl+L"), "status should show Ctrl+L: {text}");
-        assert!(text.contains("Ctrl+D"), "status should show Ctrl+D: {text}");
-        assert!(text.contains("/help"), "status should show /help: {text}");
+        assert!(
+            text.contains("Interrupt generation"),
+            "status should show Interrupt generation: {text}"
+        );
+        assert!(
+            text.contains("Clear conversation"),
+            "status should show Clear conversation: {text}"
+        );
+        assert!(text.contains("Exit"), "status should show Exit: {text}");
     }
 
     #[test]
@@ -967,8 +1074,8 @@ mod tests {
             "status should show Generating: {text}"
         );
         assert!(
-            text.contains("Ctrl+C"),
-            "should show interrupt hint: {text}"
+            text.contains("Interrupt generation"),
+            "should show interrupt hint via context bindings: {text}"
         );
     }
 
@@ -980,6 +1087,10 @@ mod tests {
         assert!(
             text.contains("Interrupted"),
             "status should show Interrupted: {text}"
+        );
+        assert!(
+            text.contains("Clear conversation"),
+            "status should still show context bindings when interrupted: {text}"
         );
     }
 
@@ -1293,10 +1404,27 @@ mod tests {
     fn test_render_task_detail_shows_task_id_in_status() {
         let mut app = App::new();
         app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: "Test".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::None,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        });
         let text = status_bar_text(&app);
         assert!(
             text.contains("TSK-001"),
             "status bar should show task ID in detail view: {text}"
+        );
+        assert!(
+            text.contains("●"),
+            "status bar should include connection indicator: {text}"
         );
     }
 
@@ -2308,7 +2436,8 @@ mod tests {
     #[test]
     fn test_render_task_board_footer_shows_n_key() {
         use ratatui::backend::TestBackend;
-        let backend = TestBackend::new(80, 24);
+        // Use a wide terminal so all footer bindings fit without truncation
+        let backend = TestBackend::new(160, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
         let mut app = App::new();
@@ -2337,8 +2466,13 @@ mod tests {
             .collect::<Vec<&str>>()
             .concat();
         assert!(
-            cell_str.contains("n new task"),
-            "footer should mention 'n new task', got: {cell_str}"
+            cell_str.contains("Create task"),
+            "footer should mention Create task, got tail: ...{}",
+            &cell_str[cell_str.len().saturating_sub(200)..]
+        );
+        assert!(
+            cell_str.contains("Navigate tasks"),
+            "footer should mention Navigate tasks"
         );
     }
 
