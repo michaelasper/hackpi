@@ -1240,3 +1240,76 @@ fn test_stdout_to_stderr_redirect_captured() {
         _ => panic!("expected Simple command"),
     }
 }
+
+// --- which command tests ---
+
+#[test]
+fn test_which_finds_builtin() {
+    let mut session = new_session();
+    let out = session.execute("which echo");
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(output_stdout(&out), "echo");
+}
+
+#[test]
+fn test_which_not_found() {
+    let mut session = new_session();
+    let out = session.execute("which nonexistent_cmd");
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        out.stdout.is_empty(),
+        "stdout should be empty when not found"
+    );
+}
+
+#[test]
+fn test_which_no_args_exits_zero() {
+    let mut session = new_session();
+    let out = session.execute("which");
+    assert_eq!(out.exit_code, 0);
+    assert!(out.stdout.is_empty(), "stdout should be empty with no args");
+}
+
+#[test]
+fn test_which_multiple_some_found() {
+    let mut session = new_session();
+    let out = session.execute("which echo ls nonexistent");
+    assert_eq!(out.exit_code, 0, "should exit 0 if at least one is found");
+    let stdout = output_stdout(&out);
+    assert!(stdout.contains("echo"), "should list echo");
+    assert!(stdout.contains("ls"), "should list ls");
+    assert!(
+        !stdout.contains("nonexistent"),
+        "should not print unknown commands"
+    );
+}
+
+#[test]
+fn test_which_help_shows_description() {
+    let mut session = new_session();
+    let out = session.execute("which --help");
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stdout.contains("Locate a built-in command"),
+        "which --help should show description, got: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn test_which_registered_not_command_not_found() {
+    let mut session = new_session();
+    let out = session.execute("which");
+    assert_ne!(
+        out.exit_code, 127,
+        "which should be a registered command, not 'command not found'"
+    );
+}
+
+#[test]
+fn test_which_finds_which_itself() {
+    let mut session = new_session();
+    let out = session.execute("which which");
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(output_stdout(&out), "which");
+}

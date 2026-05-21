@@ -61,6 +61,7 @@ impl CommandRegistry {
         cmds.insert("export".to_string(), cmd_export);
         cmds.insert("ln".to_string(), cmd_ln);
         cmds.insert("cargo".to_string(), cmd_cargo);
+        cmds.insert("which".to_string(), cmd_which);
 
         let mut help = HashMap::new();
         help.insert("cd", "cd [path]  Change directory (default: ~)");
@@ -97,6 +98,7 @@ impl CommandRegistry {
             "cargo",
             "cargo [subcommand..]  Run cargo commands on the host (real) filesystem",
         );
+        help.insert("which", "which [commands...]  Locate a built-in command");
 
         Self {
             commands: cmds,
@@ -695,4 +697,40 @@ fn cmd_cargo(args: &[String], ctx: &mut CommandContext) -> i32 {
     }
 
     output.status.code().unwrap_or(1)
+}
+
+/// Check whether each argument names a registered built-in command.
+///
+/// For each argument that matches a known built-in, prints the name to stdout.
+/// Exits with 0 if at least one match was found, 1 if none matched.
+/// With no arguments, exits 0 and prints nothing — matching real `which`.
+fn cmd_which(args: &[String], ctx: &mut CommandContext) -> i32 {
+    // No args: exit 0 and print nothing (matches real `which` behavior).
+    if args.is_empty() {
+        return 0;
+    }
+
+    #[rustfmt::skip]
+    const BUILTINS: &[&str] = &[
+        "cat",   "cd",   "cargo", "cp",
+        "cut",   "echo", "env",   "export",
+        "grep",  "head", "ln",    "ls",
+        "mkdir", "mv",   "pwd",   "rm",
+        "sort",  "tail", "touch", "tr",
+        "uniq",  "wc",   "which",
+    ];
+
+    let mut found = false;
+    for arg in args {
+        if BUILTINS.contains(&arg.as_str()) {
+            let _ = writeln!(ctx.stdout, "{arg}");
+            found = true;
+        }
+    }
+
+    if found {
+        0
+    } else {
+        1
+    }
 }
