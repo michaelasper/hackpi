@@ -17,6 +17,7 @@ pub enum ConversationEntryKind {
     },
 }
 
+#[derive(Debug)]
 pub struct ConversationEntry {
     pub kind: ConversationEntryKind,
     pub role: String,
@@ -24,6 +25,7 @@ pub struct ConversationEntry {
     pub tool_calls: Vec<ToolCallDisplay>,
 }
 
+#[derive(Debug)]
 pub struct ToolCallDisplay {
     pub id: String,
     pub name: String,
@@ -31,6 +33,7 @@ pub struct ToolCallDisplay {
     pub status: ToolCallStatus,
 }
 
+#[derive(Debug)]
 pub enum ToolCallStatus {
     Running,
     Done(ToolResult),
