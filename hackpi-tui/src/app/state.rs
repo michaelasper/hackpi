@@ -5,7 +5,7 @@ use crate::events::TuiEvent;
 use hackpi_core::tools::ToolResult;
 use hackpi_core::types::Usage;
 
-use super::conversation::ConversationEntry;
+use super::conversation::{ConversationEntry, DiagnosticsEntry};
 use super::permissions::PermissionPrompt;
 
 /// Active view in the TUI.
@@ -16,6 +16,10 @@ pub enum AppView {
     TaskDetail(String),
     /// Placeholder for a future graph view.
     TaskGraph,
+    /// Diagnostics log view showing protocol-level diagnostic messages
+    /// (SSE parse failures, stream warnings, etc.) separate from the
+    /// conversation viewport.
+    Diagnostics,
 }
 
 /// Severity level for error and informational messages.
@@ -131,6 +135,9 @@ pub struct App {
     /// Frame counter for animated loading spinner.
     pub loading_frame: usize,
     pub conversation: VecDeque<ConversationEntry>,
+    /// Protocol-level diagnostics stored separately from the conversation
+    /// viewport (SSE parse failures, stream truncation warnings, etc.).
+    pub diagnostics: VecDeque<DiagnosticsEntry>,
     /// Visual row offset from top (used when `auto_scroll` is false).
     pub scroll_offset: usize,
     /// When true, the conversation view scrolls to show the latest content.

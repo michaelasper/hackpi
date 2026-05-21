@@ -159,6 +159,13 @@ pub const KEY_BINDINGS: &[KeyBinding] = &[
         action: "Create task",
         footer: true,
     },
+    // ── Diagnostics ─────────────────────────────────────────────────────
+    KeyBinding {
+        context: KeyContext::Conversation,
+        key: "d",
+        action: "View diagnostics",
+        footer: true,
+    },
     // ── TaskDetail ──────────────────────────────────────────────────────
     KeyBinding {
         context: KeyContext::TaskDetail,
@@ -308,6 +315,7 @@ pub fn focus_target(app: &App) -> FocusTarget {
         crate::app::AppView::TaskBoard => FocusTarget::TaskBoard,
         crate::app::AppView::TaskDetail(_) => FocusTarget::TaskDetail,
         crate::app::AppView::TaskGraph => FocusTarget::ConversationInput,
+        crate::app::AppView::Diagnostics => FocusTarget::ConversationScrollback,
     }
 }
 

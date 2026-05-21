@@ -68,7 +68,11 @@ pub enum AgentEvent {
         result: ToolResult,
     },
     Done,
+    /// A user-facing error that should be shown in the conversation viewport.
     Error(String),
+    /// A protocol-level diagnostic message (SSE parse failures, stream warnings).
+    /// These are routed to the diagnostics store, not the conversation viewport.
+    Diagnostic(String),
     Usage(Usage),
     PermissionRequest {
         id: u64,

@@ -191,6 +191,14 @@ async fn main() -> anyhow::Result<()> {
                     AgentEvent::Error(err) => {
                         tui_tx.send(TuiEvent::Error(err)).ok();
                     }
+                    AgentEvent::Diagnostic(msg) => {
+                        tui_tx
+                            .send(TuiEvent::Diagnostic {
+                                level: hackpi_tui::events::DiagnosticLevel::Warning,
+                                message: msg,
+                            })
+                            .ok();
+                    }
                     AgentEvent::Done => {
                         tui_tx.send(TuiEvent::Done).ok();
                     }
@@ -434,6 +442,11 @@ async fn main() -> anyhow::Result<()> {
                                                 input.handle_key(key);
                                             }
                                         }
+                                        KeyCode::Char('d') => {
+                                            if !app.ui_status.is_active() {
+                                                app.active_view = AppView::Diagnostics;
+                                            }
+                                        }
                                         KeyCode::PageUp => {
                                             if matches!(app.active_view, AppView::Conversation) {
                                                 app.auto_scroll = false;
@@ -574,6 +587,14 @@ async fn main() -> anyhow::Result<()> {
                 }
                 AgentEvent::Error(err) => {
                     tui_tx.send(TuiEvent::Error(err)).ok();
+                }
+                AgentEvent::Diagnostic(msg) => {
+                    tui_tx
+                        .send(TuiEvent::Diagnostic {
+                            level: hackpi_tui::events::DiagnosticLevel::Warning,
+                            message: msg,
+                        })
+                        .ok();
                 }
                 AgentEvent::Done => {
                     tui_tx.send(TuiEvent::Done).ok();
