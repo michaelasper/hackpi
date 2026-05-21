@@ -479,8 +479,8 @@ mod tests {
             "modal should show [5] Always deny this pattern"
         );
         assert!(
-            cell_str.contains("[Esc] Cancel"),
-            "modal should show [Esc] Cancel"
+            cell_str.contains("[Esc] Deny"),
+            "modal should show [Esc] Deny"
         );
     }
 
@@ -596,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_permission_modal_long_values_truncated_at_80x24() {
+    fn test_render_permission_modal_long_values_wrapped_at_80x24() {
         use ratatui::backend::TestBackend;
         let backend = TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -628,14 +628,54 @@ mod tests {
             .collect::<Vec<&str>>()
             .concat();
 
-        // Very long values should not appear in full
+        // Long values should NOT be silently truncated — at least 50 contiguous
+        // characters should be visible in the buffer (wrapping, not ellipsis).
         assert!(
-            !cell_str.contains(&"x".repeat(100)),
-            "long details should be truncated"
+            cell_str.contains(&"x".repeat(50)),
+            "long details should be wrapped and visible, got: {:?}",
+            cell_str.chars().take(200).collect::<String>()
         );
         assert!(
-            !cell_str.contains(&"y".repeat(50)),
-            "long tool name should be truncated"
+            cell_str.contains(&"y".repeat(30)),
+            "long tool name should be wrapped and visible, got: {:?}",
+            cell_str.chars().take(200).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn test_render_permission_modal_shows_esc_deny() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let reason = hackpi_guardrails::GuardReason {
+            guard: hackpi_guardrails::GuardType::CommandGate,
+            tool: "bash".into(),
+            details: "rm -rf /".into(),
+        };
+
+        let mut app = App::new();
+        app.pending_permission = Some(crate::app::PermissionPrompt {
+            id: 1,
+            reason,
+            response: Some(tx),
+            confirming_always_allow: false,
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        assert!(
+            cell_str.contains("[Esc] Deny"),
+            "modal should show 'Esc = Deny', got: {cell_str:?}"
         );
     }
 
@@ -2665,57 +2705,6 @@ mod tests {
     fn test_truncate_for_display_one_char_max() {
         let result = truncate_for_display("hello", 1);
         assert_eq!(result, "…", "1 char max should return …");
-    }
-
-    #[test]
-    fn test_render_permission_modal_truncates_long_values() {
-        use ratatui::backend::TestBackend;
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let very_long_details = "a".repeat(200);
-        let very_long_tool = "b".repeat(100);
-        let reason = hackpi_guardrails::GuardReason {
-            guard: hackpi_guardrails::GuardType::CommandGate,
-            tool: very_long_tool,
-            details: very_long_details,
-        };
-
-        let mut app = App::new();
-        app.pending_permission = Some(crate::app::PermissionPrompt {
-            id: 1,
-            reason,
-            response: Some(tx),
-            confirming_always_allow: false,
-        });
-
-        terminal.draw(|f| render(f, &app)).unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let cell_str: String = buffer
-            .content
-            .iter()
-            .map(|c| c.symbol())
-            .collect::<Vec<&str>>()
-            .concat();
-        assert!(
-            cell_str.contains("Permission Required"),
-            "modal should show title"
-        );
-        assert!(
-            cell_str.contains("Allow once"),
-            "modal should show Allow once option"
-        );
-        // The long values should be truncated (there should be no 200 consecutive 'a's)
-        assert!(
-            !cell_str.contains(&"a".repeat(100)),
-            "long details should be truncated"
-        );
-        assert!(
-            !cell_str.contains(&"b".repeat(50)),
-            "long tool name should be truncated"
-        );
     }
 
     // ── COR-277: Autocomplete bounds at narrow widths tests ───────────────────

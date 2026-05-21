@@ -1,12 +1,12 @@
 use crate::app::App;
 use crate::interaction::app_key_context;
 use crate::theme::Theme;
-use crate::ui::{modal_rect, truncate_for_display};
+use crate::ui::modal_rect;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -149,36 +149,24 @@ pub(crate) fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App, 
         None => return,
     };
 
-    // Responsive modal sizing: 85% of terminal width/height, capped at 60x20
-    let modal_area = modal_rect(area, 60, 20, 85, 85);
+    // Responsive modal sizing: 90% width, 85% height — no artificial width cap
+    let modal_area = modal_rect(area, area.width, 30, 90, 85);
 
-    // Clear the area behind the modal
+    // ── Dim the background so the modal is the only visual focus ──────
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .bg(Color::Black)
+            .add_modifier(Modifier::DIM),
+    );
+
+    // Clear the area behind the modal (restore to default for modal rendering)
     frame.render_widget(Clear, modal_area);
 
     let reason = &prompt.reason;
     let guard_name = format!("{}", reason.guard);
 
-    // Determine usable width inside borders (2 chars for left/right borders)
-    let content_width = modal_area.width.saturating_sub(2) as usize;
-
-    // Truncate long values to avoid overflowing the modal
-    let details_truncated = if content_width > 10 {
-        truncate_for_display(&reason.details, content_width.saturating_sub(10))
-    } else {
-        truncate_for_display(&reason.details, 20)
-    };
-    let tool_truncated = if content_width > 8 {
-        truncate_for_display(&reason.tool, content_width.saturating_sub(8))
-    } else {
-        truncate_for_display(&reason.tool, 20)
-    };
-    let guard_truncated = if content_width > 8 {
-        truncate_for_display(&guard_name, content_width.saturating_sub(8))
-    } else {
-        truncate_for_display(&guard_name, 20)
-    };
-
-    // Build modal content lines
+    // Build modal content lines (NOT truncated; Paragraph::wrap handles overflow)
     let mut lines: Vec<Line> = Vec::new();
 
     // Title
@@ -188,18 +176,18 @@ pub(crate) fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App, 
     )));
     lines.push(Line::from(""));
 
-    // Details (truncated to modal width)
+    // Detail rows — full text, no silent truncation
     lines.push(Line::from(vec![
         Span::styled(" Pattern: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(details_truncated),
+        Span::raw(&reason.details),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" Tool:    ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(tool_truncated),
+        Span::raw(&reason.tool),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" Guard:   ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(guard_truncated),
+        Span::raw(&guard_name),
     ]));
     lines.push(Line::from(""));
 
@@ -253,8 +241,8 @@ pub(crate) fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App, 
     )));
     lines.push(Line::from(""));
 
-    // Esc hint
-    lines.push(Line::from(Span::styled(" [Esc] Cancel", theme.fg_muted)));
+    // Esc hint — explicitly says "Deny" to match the implemented action
+    lines.push(Line::from(Span::styled(" [Esc] Deny", theme.fg_muted)));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -263,6 +251,7 @@ pub(crate) fn render_permission_modal(frame: &mut Frame, area: Rect, app: &App, 
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(block)
+        .wrap(Wrap { trim: false })
         .alignment(Alignment::Left);
 
     frame.render_widget(paragraph, modal_area);
