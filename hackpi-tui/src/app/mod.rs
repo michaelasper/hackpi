@@ -2475,6 +2475,29 @@ mod tests {
     }
 
     #[test]
+    fn test_format_conversation_tool_command_error() {
+        let mut conversation = VecDeque::new();
+        conversation.push_back(ConversationEntry {
+            kind: ConversationEntryKind::Message,
+            role: "assistant".into(),
+            text: "".into(),
+            tool_calls: vec![ToolCallDisplay {
+                id: "tc1".into(),
+                name: "bash".into(),
+                summary: ToolSummary::Unknown,
+                status: ToolCallStatus::Done(ToolResult::CommandError {
+                    content: "npx: command not found".into(),
+                    exit_code: 127,
+                }),
+            }],
+        });
+
+        let result = format_conversation(&conversation);
+        assert!(result.contains("**Status**: Done (Exit 127)"));
+        assert!(result.contains("npx: command not found"));
+    }
+
+    #[test]
     fn test_format_conversation_no_text_shows_empty_content_area() {
         let mut conversation = VecDeque::new();
         conversation.push_back(ConversationEntry {

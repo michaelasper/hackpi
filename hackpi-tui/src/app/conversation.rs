@@ -120,6 +120,9 @@ pub fn format_conversation(conversation: &VecDeque<ConversationEntry>) -> String
                         ToolResult::SystemError { message } => {
                             format!("Done (Error: {message})")
                         }
+                        ToolResult::CommandError { content, exit_code } => {
+                            format!("Done (Exit {exit_code})\n\n```\n{content}\n```")
+                        }
                         ToolResult::Timeout => "Done (Timeout)".to_string(),
                         ToolResult::Cancelled => "Done (Cancelled)".to_string(),
                     },

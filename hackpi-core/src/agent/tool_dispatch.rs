@@ -79,6 +79,20 @@ impl Agent {
                     ));
                     ToolResult::Timeout
                 }
+                Some(ToolResult::CommandError { content, exit_code }) => {
+                    let message = format!("Command exited with code {exit_code}\n{content}");
+                    let truncated = truncate_output(
+                        &message,
+                        MAX_TOOL_RESULT_BYTES,
+                        &pending_call.id,
+                        &self.workspace_root,
+                    );
+                    tool_results.push(ContentBlock::tool_result(&pending_call.id, &truncated));
+                    ToolResult::CommandError {
+                        content: truncated,
+                        exit_code: *exit_code,
+                    }
+                }
                 Some(ToolResult::Cancelled) => {
                     tx.send(AgentEvent::Done).ok();
                     return None;
