@@ -1,0 +1,45 @@
+name: TUI Scenario Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build hackpi binary
+        run: cargo build -p hackpi-tui
+
+      - name: Run TUI scenario tests
+        run: |
+          total=0
+          passed=0
+          failed=0
+          for scenario in tests/scenarios/*.json; do
+            total=$((total + 1))
+            name=$(basename "$scenario" .json)
+            echo "::group::📋 $name"
+            if ./target/debug/hackpi --script "$scenario" 2>&1; then
+              echo "::notice::✅ $name passed"
+              passed=$((passed + 1))
+            else
+              echo "::error::❌ $name FAILED"
+              failed=$((failed + 1))
+            fi
+            echo "::endgroup::"
+          done
+          echo "---"
+          echo "Results: $passed/$total passed, $failed failed"
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
