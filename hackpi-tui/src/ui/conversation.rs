@@ -10,6 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn user_prefix() -> &'static str {
     " ○ me: "
@@ -123,6 +124,50 @@ pub(crate) fn render_conversation(frame: &mut Frame, area: Rect, app: &App, them
     frame.render_widget(paragraph, area);
 }
 
+// ── Tool card helpers ─────────────────────────────────────────────
+
+/// Wrap a single tool card body line to fit within `inner_width` display columns.
+///
+/// Each output line carries the `│ ` prefix. Lines that exceed the inner width are
+/// split at display-width boundaries (CJK-aware via `unicode-width`) so that no
+/// rendered line exceeds the card borders. Continuation lines use the same `│ `
+/// prefix, creating a clean visual indent.
+fn wrap_card_body_line(line_content: &str, inner_width: usize, style: Style) -> Vec<Line<'static>> {
+    if inner_width == 0 {
+        return vec![];
+    }
+
+    if line_content.is_empty() {
+        return vec![Line::from(Span::styled("│ ".to_string(), style))];
+    }
+
+    let display_width = UnicodeWidthStr::width(line_content);
+    if display_width <= inner_width {
+        return vec![Line::from(Span::styled(format!("│ {line_content}"), style))];
+    }
+
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut current = String::new();
+    let mut current_width: usize = 0;
+
+    for c in line_content.chars() {
+        let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if current_width + c_width > inner_width {
+            result.push(Line::from(Span::styled(format!("│ {current}"), style)));
+            current.clear();
+            current_width = 0;
+        }
+        current.push(c);
+        current_width += c_width;
+    }
+
+    if !current.is_empty() {
+        result.push(Line::from(Span::styled(format!("│ {current}"), style)));
+    }
+
+    result
+}
+
 // ── Tool card component ────────────────────────────────────────────
 
 /// Render a tool call as a bordered action card with structured summary.
@@ -136,6 +181,8 @@ pub(crate) fn render_conversation(frame: &mut Frame, area: Rect, app: &App, them
 ///
 /// The card width adapts to the conversation area width. Status uses
 /// semantic colors (green=success, red=error, yellow=running/warning).
+/// Body lines that exceed the inner card width wrap with continued
+/// indentation so output never breaks the card borders.
 pub(crate) fn render_tool_card(
     lines: &mut Vec<Line>,
     tc: &ToolCallDisplay,
@@ -152,7 +199,8 @@ pub(crate) fn render_tool_card(
     // Build the title portion for the top border
     let title_content = format!(" {status_symbol} {title} [{status_label}] ");
     let top_width = area_width.saturating_sub(4); // ┌─ and ─┐
-    let filler_needed = top_width.saturating_sub(title_content.len());
+    let title_display_width = UnicodeWidthStr::width(&*title_content);
+    let filler_needed = top_width.saturating_sub(title_display_width);
     let top_border = if filler_needed > 0 {
         format!("┌─{title_content}{}─┐", "─".repeat(filler_needed))
     } else {
@@ -162,47 +210,66 @@ pub(crate) fn render_tool_card(
     // Top border with title — use tool-type color
     lines.push(Line::from(Span::styled(top_border, card_style)));
 
-    // Content lines (with │ prefix)
+    // Inner content width = card width minus │ prefix (2 cols)
+    let inner_width = area_width.saturating_sub(2);
+
+    // Content lines (with │ prefix), wrapped to inner_width
     match &tc.status {
         ToolCallStatus::Done(result) => match result {
             hackpi_core::tools::ToolResult::Success { content } => {
                 for line_content in content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("│ {line_content}"),
+                    lines.extend(wrap_card_body_line(
+                        line_content,
+                        inner_width,
                         theme.fg_default,
-                    )));
+                    ));
                 }
             }
             hackpi_core::tools::ToolResult::SystemError { message } => {
                 for line_content in message.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("│ {line_content}"),
+                    lines.extend(wrap_card_body_line(
+                        line_content,
+                        inner_width,
                         tool_status_s,
-                    )));
+                    ));
                 }
             }
             hackpi_core::tools::ToolResult::CommandError { content, exit_code } => {
                 // Show the exit code as the first line for scanability
-                lines.push(Line::from(Span::styled(
-                    format!("│ [Exit {exit_code}]"),
+                lines.extend(wrap_card_body_line(
+                    &format!("[Exit {exit_code}]"),
+                    inner_width,
                     tool_status_s,
-                )));
+                ));
                 for line_content in content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("│ {line_content}"),
+                    lines.extend(wrap_card_body_line(
+                        line_content,
+                        inner_width,
                         tool_status_s,
-                    )));
+                    ));
                 }
             }
             hackpi_core::tools::ToolResult::Timeout => {
-                lines.push(Line::from(Span::styled("│ Timed out.", tool_status_s)));
+                lines.extend(wrap_card_body_line(
+                    "Timed out.",
+                    inner_width,
+                    tool_status_s,
+                ));
             }
             hackpi_core::tools::ToolResult::Cancelled => {
-                lines.push(Line::from(Span::styled("│ Cancelled.", tool_status_s)));
+                lines.extend(wrap_card_body_line(
+                    "Cancelled.",
+                    inner_width,
+                    tool_status_s,
+                ));
             }
         },
         ToolCallStatus::Running => {
-            lines.push(Line::from(Span::styled("│ Running…", theme.status_running)));
+            lines.extend(wrap_card_body_line(
+                "Running…",
+                inner_width,
+                theme.status_running,
+            ));
         }
     }
 
