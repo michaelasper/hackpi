@@ -109,6 +109,9 @@ impl Agent {
                 ApiEvent::Error(err) => {
                     tx.send(AgentEvent::Error(err)).ok();
                 }
+                ApiEvent::Diagnostic(msg) => {
+                    tx.send(AgentEvent::Diagnostic(msg)).ok();
+                }
                 ApiEvent::Done => break,
             }
         }

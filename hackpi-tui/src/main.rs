@@ -191,6 +191,14 @@ async fn main() -> anyhow::Result<()> {
                     AgentEvent::Error(err) => {
                         tui_tx.send(TuiEvent::Error(err)).ok();
                     }
+                    AgentEvent::Diagnostic(msg) => {
+                        tui_tx
+                            .send(TuiEvent::Diagnostic {
+                                level: hackpi_tui::events::DiagnosticLevel::Warning,
+                                message: msg,
+                            })
+                            .ok();
+                    }
                     AgentEvent::Done => {
                         tui_tx.send(TuiEvent::Done).ok();
                     }
@@ -574,6 +582,14 @@ async fn main() -> anyhow::Result<()> {
                 }
                 AgentEvent::Error(err) => {
                     tui_tx.send(TuiEvent::Error(err)).ok();
+                }
+                AgentEvent::Diagnostic(msg) => {
+                    tui_tx
+                        .send(TuiEvent::Diagnostic {
+                            level: hackpi_tui::events::DiagnosticLevel::Warning,
+                            message: msg,
+                        })
+                        .ok();
                 }
                 AgentEvent::Done => {
                     tui_tx.send(TuiEvent::Done).ok();

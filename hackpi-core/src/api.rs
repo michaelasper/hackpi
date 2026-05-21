@@ -167,7 +167,7 @@ where
                     }
                     Err(e) => {
                         tracing::warn!("Failed to parse SSE event: {e}, data: {data}");
-                        tx.send(ApiEvent::Error(format!("Failed to parse SSE event: {e}")))
+                        tx.send(ApiEvent::Diagnostic(format!("SSE parse failure: {e}")))
                             .ok();
                     }
                 }
@@ -204,6 +204,10 @@ where
 #[derive(Debug, Clone)]
 pub enum ApiEvent {
     Event(Box<StreamEvent>),
+    /// A protocol-level diagnostic message (e.g. SSE parse failures,
+    /// stream truncation warnings). These are routed to the diagnostics
+    /// store rather than shown as user-facing errors in the conversation view.
+    Diagnostic(String),
     Error(String),
     Done,
 }
@@ -303,7 +307,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -340,7 +344,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -357,8 +361,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_sse_stream_invalid_json_sends_error_event() {
-        // Invalid JSON in an SSE data line should send an ApiEvent::Error
+    async fn test_process_sse_stream_invalid_json_sends_diagnostic() {
+        // Invalid JSON in an SSE data line should send an ApiEvent::Diagnostic,
+        // not an ApiEvent::Error — protocol parse failures are diagnostics.
         let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
             Ok(b"data: {invalid json}\n".to_vec()),
             Ok(b"data: [DONE]\n".to_vec()),
@@ -369,9 +374,11 @@ mod tests {
             .await
             .expect("process_sse_stream should succeed");
 
+        let mut diagnostics = Vec::new();
         let mut errors = Vec::new();
         while let Some(event) = rx.recv().await {
             match event {
+                ApiEvent::Diagnostic(msg) => diagnostics.push(msg),
                 ApiEvent::Error(msg) => errors.push(msg),
                 ApiEvent::Done => break,
                 _ => {}
@@ -379,14 +386,18 @@ mod tests {
         }
 
         assert_eq!(
-            errors.len(),
+            diagnostics.len(),
             1,
-            "should have sent one error event for invalid JSON"
+            "should have sent one diagnostic event for invalid JSON"
         );
         assert!(
-            errors[0].contains("Failed to parse"),
-            "error message should describe parse failure: {}",
-            errors[0]
+            diagnostics[0].contains("SSE parse failure"),
+            "diagnostic message should describe parse failure: {}",
+            diagnostics[0]
+        );
+        assert!(
+            errors.is_empty(),
+            "should not send an error for protocol-level parse failures"
         );
     }
 
@@ -403,7 +414,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -434,7 +445,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -465,7 +476,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -511,7 +522,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -545,7 +556,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -618,7 +629,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -654,6 +665,7 @@ mod tests {
             match event {
                 ApiEvent::Event(e) => events.push(e),
                 ApiEvent::Error(e) => errors.push(e),
+                ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -690,6 +702,7 @@ mod tests {
             match event {
                 ApiEvent::Event(e) => events.push(e),
                 ApiEvent::Error(e) => errors.push(e),
+                ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -716,7 +729,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }
@@ -859,7 +872,7 @@ mod tests {
         while let Some(event) = rx.recv().await {
             match event {
                 ApiEvent::Event(e) => events.push(e),
-                ApiEvent::Error(_) => {}
+                ApiEvent::Error(_) | ApiEvent::Diagnostic(_) => {}
                 ApiEvent::Done => break,
             }
         }

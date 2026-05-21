@@ -48,6 +48,7 @@ impl App {
             loading_frame: 0,
             input_cursor: 0,
             help_visible: false,
+            diagnostics: VecDeque::new(),
         }
     }
 
@@ -158,6 +159,12 @@ impl App {
                     severity: Severity::Error,
                 };
             }
+            TuiEvent::Diagnostic { level, message } => {
+                // Route protocol diagnostics to the separate diagnostics
+                // store instead of creating a conversation entry.
+                self.diagnostics
+                    .push_back(DiagnosticsEntry::new(level, message));
+            }
             TuiEvent::Done => {
                 self.ui_status = UiStatus::Idle;
             }
@@ -185,12 +192,13 @@ impl App {
         self.auto_scroll = true;
     }
 
-    /// Cycle the active view: Conversation → TaskBoard → TaskGraph (placeholder) → Conversation.
+    /// Cycle the active view: Conversation → TaskBoard → TaskGraph (placeholder) → Diagnostics → Conversation.
     pub fn cycle_view(&mut self) {
         self.active_view = match &self.active_view {
             AppView::Conversation | AppView::TaskDetail(_) => AppView::TaskBoard,
             AppView::TaskBoard => AppView::TaskGraph,
-            AppView::TaskGraph => AppView::Conversation,
+            AppView::TaskGraph => AppView::Diagnostics,
+            AppView::Diagnostics => AppView::Conversation,
         };
     }
 
@@ -358,7 +366,9 @@ impl App {
             && matches!(
                 self.active_view,
                 AppView::Conversation | AppView::TaskBoard | AppView::TaskDetail(_)
-            );
+            )
+            // Diagnostics view does not support slash commands
+            && self.active_view != AppView::Diagnostics;
 
         if should_show && !self.filtered_commands().is_empty() {
             self.autocomplete_visible = true;
@@ -387,6 +397,11 @@ impl App {
                 self.active_view = AppView::Conversation;
             }
         }
+    }
+
+    /// Clear all stored diagnostics.
+    pub fn clear_diagnostics(&mut self) {
+        self.diagnostics.clear();
     }
 
     /// Enter the task creation prompt mode. Only valid in TaskBoard view.
@@ -1701,10 +1716,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_cycles_task_graph_to_conversation() {
+    fn test_tab_cycles_task_graph_to_diagnostics() {
         let mut app = App::new();
         app.cycle_view(); // → TaskBoard
         app.cycle_view(); // → TaskGraph
+        app.cycle_view(); // → Diagnostics
+        assert_eq!(app.active_view, AppView::Diagnostics);
+    }
+
+    #[test]
+    fn test_tab_cycles_diagnostics_to_conversation() {
+        let mut app = App::new();
+        app.cycle_view(); // → TaskBoard
+        app.cycle_view(); // → TaskGraph
+        app.cycle_view(); // → Diagnostics
         app.cycle_view(); // → Conversation
         assert_eq!(app.active_view, AppView::Conversation);
     }
@@ -1712,7 +1737,7 @@ mod tests {
     #[test]
     fn test_tab_cycles_full_loop() {
         let mut app = App::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             app.cycle_view();
         }
         assert_eq!(app.active_view, AppView::Conversation);

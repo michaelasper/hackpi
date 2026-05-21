@@ -2,6 +2,24 @@ use hackpi_core::tools::ToolResult;
 use hackpi_core::types::Usage;
 use hackpi_guardrails::{GuardReason, PermissionDecision};
 
+/// Severity level for diagnostics messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+impl std::fmt::Display for DiagnosticLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Info => write!(f, "INFO"),
+            Self::Warning => write!(f, "WARN"),
+            Self::Error => write!(f, "ERR"),
+        }
+    }
+}
+
 /// Structured summary of a tool call, derived from the tool name and its
 /// JSON input parameters. Enables rendering of semantic action cards with
 /// operation-specific titles and targets (e.g. "read src/main.rs").
@@ -335,6 +353,13 @@ pub enum TuiEvent {
         result: ToolResult,
     },
     Error(String),
+    /// A protocol-level diagnostic message (SSE parse failure, stream
+    /// truncation warning, etc.) that should be stored in the diagnostics
+    /// store rather than rendered as a conversation entry.
+    Diagnostic {
+        level: DiagnosticLevel,
+        message: String,
+    },
     Usage(Usage),
     Done,
     PermissionRequest {
@@ -393,6 +418,12 @@ impl TuiEvent {
             TuiEvent::Error(msg) => Some(serde_json::json!({
                 "type": "error",
                 "message": msg,
+                "timestamp": ts,
+            })),
+            TuiEvent::Diagnostic { level, message } => Some(serde_json::json!({
+                "type": "diagnostic",
+                "level": level.to_string(),
+                "message": message,
                 "timestamp": ts,
             })),
             TuiEvent::Usage(u) => Some(serde_json::json!({

@@ -1,4 +1,5 @@
 pub mod conversation;
+pub mod diagnostics;
 pub mod input;
 pub mod layout;
 pub mod modals;
@@ -14,6 +15,7 @@ pub use layout::{
 
 // ── Crate-visible re-exports (used by tests and sub-modules) ─────────────
 pub(crate) use conversation::render_conversation;
+pub(crate) use diagnostics::render_diagnostics;
 pub(crate) use modals::{
     render_autocomplete_modal, render_help_overlay, render_permission_modal,
     render_task_create_prompt,
@@ -61,6 +63,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppView::TaskGraph => {
             render_task_graph(frame, root.main, app, &theme);
         }
+        AppView::Diagnostics => {
+            render_diagnostics(frame, root.main, app, &theme);
+        }
     }
 
     render_input(frame, root.input, app, &theme);
@@ -91,19 +96,31 @@ fn render_tab_header(
     app: &App,
     theme: &Theme,
 ) {
+    let diag_count = app.diagnostics.len();
     let tabs = [
-        ("Conversation", matches!(active_view, AppView::Conversation)),
+        ("Conv", matches!(active_view, AppView::Conversation)),
         (
             "Tasks",
             matches!(active_view, AppView::TaskBoard | AppView::TaskDetail(_)),
         ),
         ("Graph", matches!(active_view, AppView::TaskGraph)),
+        (
+            &format!(
+                "Diag{}",
+                if diag_count > 0 {
+                    format!("({diag_count})")
+                } else {
+                    String::new()
+                }
+            ),
+            matches!(active_view, AppView::Diagnostics),
+        ),
     ];
 
     let mut spans: Vec<Span> = Vec::new();
     for (i, (label, is_active)) in tabs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("    "));
+            spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(
             format!("[Tab] {label}"),
@@ -642,10 +659,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<Vec<&str>>()
             .concat();
-        assert!(
-            cell_str.contains("Conversation"),
-            "tab header should show Conversation tab"
-        );
+        assert!(cell_str.contains("Conv"), "tab header should show Conv tab");
         assert!(
             cell_str.contains("Tasks"),
             "tab header should show Tasks tab"
@@ -654,6 +668,7 @@ mod tests {
             cell_str.contains("Graph"),
             "tab header should show Graph tab"
         );
+        assert!(cell_str.contains("Diag"), "tab header should show Diag tab");
     }
 
     #[test]
@@ -2445,7 +2460,7 @@ mod tests {
             .collect::<Vec<&str>>()
             .concat();
         assert!(
-            cell_str.contains("Conversation"),
+            cell_str.contains("Conv"),
             "80x24 should render tabs: {cell_str}"
         );
         assert!(
@@ -2475,7 +2490,7 @@ mod tests {
             .collect::<Vec<&str>>()
             .concat();
         assert!(
-            cell_str.contains("Conversation"),
+            cell_str.contains("Conv"),
             "120x40 should render tabs: {cell_str}"
         );
         assert!(
@@ -2501,7 +2516,7 @@ mod tests {
             .collect::<Vec<&str>>()
             .concat();
         assert!(
-            cell_str.contains("Conversation"),
+            cell_str.contains("Conv"),
             "200x60 should render tabs: {cell_str}"
         );
         assert!(

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::events::ToolSummary;
+use crate::events::{DiagnosticLevel, ToolSummary};
 use hackpi_core::tools::ToolResult;
 
 use super::state::Severity;
@@ -34,6 +34,31 @@ pub struct ToolCallDisplay {
 pub enum ToolCallStatus {
     Running,
     Done(ToolResult),
+}
+
+/// A single diagnostics entry — a protocol-level log message (SSE parse
+/// failure, stream truncation warning, etc.) that is stored separately from
+/// the conversation viewport.
+#[derive(Debug, Clone)]
+pub struct DiagnosticsEntry {
+    /// Severity level of the diagnostic.
+    pub level: DiagnosticLevel,
+    /// The diagnostic message text.
+    pub message: String,
+    /// ISO 8601 timestamp of when this diagnostic was recorded.
+    pub timestamp: String,
+}
+
+impl DiagnosticsEntry {
+    /// Create a new diagnostics entry with an auto-generated timestamp.
+    pub fn new(level: DiagnosticLevel, message: impl Into<String>) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            level,
+            message: message.into(),
+            timestamp: now.to_rfc3339(),
+        }
+    }
 }
 
 /// Format the conversation history as a markdown text document suitable for
