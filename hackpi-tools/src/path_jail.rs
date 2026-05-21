@@ -47,7 +47,9 @@ pub fn resolve_workspace_path(
     // Reject absolute file_paths that bypass join
     if Path::new(file_path).is_absolute() {
         return Err(ToolResult::SystemError {
-            message: format!("Security Error: Absolute paths are not allowed: {file_path}"),
+            message: format!(
+                "Absolute paths are not allowed. Use a relative path relative to the workspace root (e.g. 'relative/path/to/file.txt'). Got: {file_path}"
+            ),
         });
     }
 
