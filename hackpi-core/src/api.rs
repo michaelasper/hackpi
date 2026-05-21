@@ -166,7 +166,7 @@ where
                         tx.send(ApiEvent::Event(Box::new(event))).ok();
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to parse SSE event: {e}, data: {data}");
+                        tracing::debug!("SSE event parse failure (routed to diagnostics): {e}");
                         tx.send(ApiEvent::Diagnostic(format!("SSE parse failure: {e}")))
                             .ok();
                     }
@@ -850,6 +850,65 @@ mod tests {
         assert!(
             !err.contains("SSE buffer exceeded"),
             "should NOT trigger buffer overflow for exact fit: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_stream_message_delta_without_input_tokens() {
+        // Regression test for COR-377: a message_delta frame with
+        // usage.output_tokens but missing usage.input_tokens must not
+        // produce a parse error. The #[serde(default)] on Usage fields
+        // should handle this gracefully.
+        let chunks: Vec<Result<Vec<u8>, anyhow::Error>> = vec![
+            Ok(
+                b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":273}}\n"
+                    .to_vec(),
+            ),
+            Ok(b"data: [DONE]\n".to_vec()),
+        ];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ApiEvent>();
+        process_sse_stream(stream::iter(chunks), tx)
+            .await
+            .expect("process_sse_stream should succeed");
+
+        let mut events = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut errors = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ApiEvent::Event(e) => events.push(e),
+                ApiEvent::Diagnostic(msg) => diagnostics.push(msg),
+                ApiEvent::Error(msg) => errors.push(msg),
+                ApiEvent::Done => break,
+            }
+        }
+
+        assert_eq!(
+            errors.len(),
+            0,
+            "message_delta without input_tokens should not produce an error"
+        );
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "message_delta without input_tokens should not produce a diagnostic"
+        );
+        assert_eq!(events.len(), 1, "should have received one event");
+        assert_eq!(events[0].event_type, "message_delta");
+        let usage = events[0]
+            .usage
+            .as_ref()
+            .expect("message_delta should have usage");
+        assert_eq!(usage.output_tokens, 273, "output_tokens should be 273");
+        assert_eq!(usage.input_tokens, 0, "input_tokens should default to 0");
+        assert_eq!(
+            events[0]
+                .delta
+                .as_ref()
+                .and_then(|d| d.stop_reason.as_deref()),
+            Some("tool_use"),
+            "delta.stop_reason should be tool_use"
         );
     }
 

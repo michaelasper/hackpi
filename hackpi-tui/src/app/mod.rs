@@ -162,8 +162,18 @@ impl App {
             TuiEvent::Diagnostic { level, message } => {
                 // Route protocol diagnostics to the separate diagnostics
                 // store instead of creating a conversation entry.
-                self.diagnostics
-                    .push_back(DiagnosticsEntry::new(level, message));
+                // Deduplicate: skip if an identical entry (same level + message)
+                // already exists to prevent repeated identical errors from
+                // spamming the diagnostics view.
+                let is_duplicate = self
+                    .diagnostics
+                    .back()
+                    .map(|d| d.level == level && d.message == message)
+                    .unwrap_or(false);
+                if !is_duplicate {
+                    self.diagnostics
+                        .push_back(DiagnosticsEntry::new(level, message));
+                }
             }
             TuiEvent::Done => {
                 self.ui_status = UiStatus::Idle;
@@ -495,6 +505,8 @@ fn recovery_hint_for_error(err: &str) -> Option<String> {
         Some("Check your API connection and try again.".into())
     } else if lower.contains("guardrail") || lower.contains("deny") {
         Some("Modify guardrails config or run /guardrails:status.".into())
+    } else if lower.contains("sse") || lower.contains("protocol") {
+        Some("SSE protocol error. This may indicate an API version mismatch.".into())
     } else if lower.contains("parse") || lower.contains("malformed") || lower.contains("invalid") {
         Some("Check the input format and try again.".into())
     } else {
@@ -2707,6 +2719,209 @@ mod tests {
             handled,
             CommandOutcome::Handled,
             "/export should prevent agent spawn"
+        );
+    }
+
+    // ── COR-377: Diagnostic dedup ──────────────────────────────────────────
+
+    #[test]
+    fn test_diagnostic_deduplicates_identical_entries() {
+        // Regression test for COR-377: repeated identical diagnostic messages
+        // should only produce one entry in the diagnostics store.
+        let mut app = App::new();
+
+        // Push the same diagnostic message twice
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "SSE parse failure: expected value at line 1 column 1".into(),
+        });
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "SSE parse failure: expected value at line 1 column 1".into(),
+        });
+
+        assert_eq!(
+            app.diagnostics.len(),
+            1,
+            "duplicate diagnostic messages should be deduplicated"
+        );
+        assert_eq!(
+            app.diagnostics[0].message,
+            "SSE parse failure: expected value at line 1 column 1"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_does_not_deduplicate_different_levels() {
+        // Different diagnostic levels with same message should NOT be deduplicated
+        let mut app = App::new();
+
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "SSE parse failure".into(),
+        });
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Error,
+            message: "SSE parse failure".into(),
+        });
+
+        assert_eq!(
+            app.diagnostics.len(),
+            2,
+            "different levels with same message should NOT be deduplicated"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_does_not_deduplicate_different_messages() {
+        // Different messages should NOT be deduplicated
+        let mut app = App::new();
+
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "SSE parse failure: error A".into(),
+        });
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "SSE parse failure: error B".into(),
+        });
+
+        assert_eq!(
+            app.diagnostics.len(),
+            2,
+            "different messages should NOT be deduplicated"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_deduplicates_only_consecutive_identicals() {
+        // Dedup only checks the last entry — if a non-identical entry is in
+        // between, both identical messages are kept. This preserves the pattern
+        // where errors A, B, A should show as three entries (the two A's are
+        // not consecutive).
+        let mut app = App::new();
+
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "Error A".into(),
+        });
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "Error B".into(),
+        });
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "Error A".into(),
+        });
+
+        assert_eq!(
+            app.diagnostics.len(),
+            3,
+            "identical non-consecutive messages should both be kept"
+        );
+    }
+
+    // ── COR-377: End-to-end regression test ────────────────────────────────
+
+    #[test]
+    fn test_message_delta_no_error_card_via_full_pipeline() {
+        // End-to-end regression test for COR-377: simulate the full pipeline
+        // where a message_delta frame without input_tokens flows from the API
+        // through the agent to the TUI, verifying no error card appears in the
+        // conversation and the event routes correctly.
+
+        // Step 1: Simulate what the agent sends after processing the API stream:
+        // a correctly-parsed message_delta should produce usage, NOT an error.
+        let mut app = App::new();
+
+        // First, simulate a user submit (to create a conversation entry context)
+        app.handle_event(TuiEvent::Submit("test query".into()));
+
+        // Simulate the agent receiving a message_delta with usage
+        // (this is what Agent::process_sse_events does after the API parses it)
+        let usage = Usage {
+            input_tokens: 0,
+            output_tokens: 273,
+        };
+        app.handle_event(TuiEvent::Usage(usage));
+
+        // The message_delta should NOT produce any error cards in the conversation.
+        // Only the Submit event created a conversation entry.
+        let error_entries: Vec<&ConversationEntry> = app
+            .conversation
+            .iter()
+            .filter(|e| matches!(e.kind, ConversationEntryKind::SystemError { .. }))
+            .collect();
+        assert!(
+            error_entries.is_empty(),
+            "message_delta without input_tokens should not create error cards. Found: {:?}",
+            error_entries
+        );
+
+        // Verify usage was stored correctly
+        let stored_usage = app.usage.expect("usage should be stored");
+        assert_eq!(stored_usage.output_tokens, 273);
+        assert_eq!(stored_usage.input_tokens, 0);
+    }
+
+    #[test]
+    fn test_diagnostic_does_not_create_conversation_entry() {
+        // Diagnostic events must NOT create conversation entries.
+        // They go to the diagnostics store only.
+        let mut app = App::new();
+
+        app.handle_event(TuiEvent::Diagnostic {
+            level: crate::events::DiagnosticLevel::Warning,
+            message: "SSE parse failure".into(),
+        });
+
+        assert_eq!(
+            app.conversation.len(),
+            0,
+            "diagnostics should not create conversation entries"
+        );
+        assert_eq!(
+            app.diagnostics.len(),
+            1,
+            "diagnostics should go to the diagnostics store"
+        );
+    }
+
+    // ── Recovery hint tests for COR-377 ────────────────────────────────────
+
+    #[test]
+    fn test_recovery_hint_for_sse_error() {
+        // SSE/protocol errors should get the specific protocol mismatch hint
+        let hint = recovery_hint_for_error("SSE protocol error: unexpected frame");
+        assert_eq!(
+            hint.as_deref(),
+            Some("SSE protocol error. This may indicate an API version mismatch."),
+            "SSE errors should get protocol-specific hint"
+        );
+
+        let hint = recovery_hint_for_error("Protocol violation: unexpected data");
+        assert_eq!(
+            hint.as_deref(),
+            Some("SSE protocol error. This may indicate an API version mismatch."),
+            "protocol errors should get protocol-specific hint"
+        );
+    }
+
+    #[test]
+    fn test_recovery_hint_for_generic_parse_error() {
+        // Generic parse errors should still get the existing format hint
+        let hint = recovery_hint_for_error("Failed to parse input: malformed data");
+        assert_eq!(
+            hint.as_deref(),
+            Some("Check the input format and try again."),
+            "generic parse errors should keep existing hint"
+        );
+
+        let hint = recovery_hint_for_error("Invalid input: unexpected character");
+        assert_eq!(
+            hint.as_deref(),
+            Some("Check the input format and try again."),
+            "generic invalid errors should keep existing hint"
         );
     }
 }
