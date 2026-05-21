@@ -1,0 +1,21 @@
+{
+    "name": "Slash Export saves to custom path",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "Export test content",
+            "assert": {
+                "conversation_len": 1,
+                "state": "Generating"
+            }
+        },
+        {
+            "action": "submit",
+            "text": "/export ./hackpi-export-custom.txt",
+            "assert": {
+                "render_contains": "Export complete",
+                "files_exist": ["./hackpi-export-custom.txt"]
+            }
+        }
+    ]
+}

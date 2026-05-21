@@ -1,0 +1,13 @@
+{
+    "name": "Slash Guardrails Status shows guardrails info",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "/guardrails:status",
+            "assert": {
+                "render_contains": "Guardrails Status",
+                "state": "Resting"
+            }
+        }
+    ]
+}

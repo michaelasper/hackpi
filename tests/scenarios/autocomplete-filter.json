@@ -1,0 +1,22 @@
+{
+    "name": "Typing filters autocomplete command list",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(/)",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Char(g)",
+            "assert": {
+                "render_contains": "/guardrails:status",
+                "not_render_contains": "/help",
+                "state": "Resting"
+            }
+        }
+    ]
+}

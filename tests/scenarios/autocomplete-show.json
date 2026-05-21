@@ -1,0 +1,13 @@
+{
+    "name": "Typing / shows autocomplete modal",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(/)",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        }
+    ]
+}

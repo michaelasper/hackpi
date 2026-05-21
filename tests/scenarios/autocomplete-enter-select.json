@@ -1,0 +1,23 @@
+{
+    "name": "Enter selects and submits highlighted autocomplete command",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(/)",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Enter",
+            "assert": {
+                "conversation_len": 1,
+                "render_contains": "○ me: /help",
+                "state": "Generating",
+                "not_render_contains": "Slash Commands"
+            }
+        }
+    ]
+}

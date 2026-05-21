@@ -1,0 +1,13 @@
+{
+    "name": "Slash Guardrails Onboarding writes strict config",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "/guardrails:onboarding strict",
+            "assert": {
+                "render_contains": "Wrote strict guardrails config",
+                "files_exist": [".hackpi/guardrails.json"]
+            }
+        }
+    ]
+}

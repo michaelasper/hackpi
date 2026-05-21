@@ -1,0 +1,30 @@
+{
+    "name": "Tab cycles through Conversation -> TaskBoard -> TaskGraph -> Conversation",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Tab",
+            "assert": {
+                "render_contains": "No tasks yet",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Tab",
+            "assert": {
+                "render_contains": "Task Dependencies",
+                "not_render_contains": "No tasks yet",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Tab",
+            "assert": {
+                "not_render_contains": "Task Dependencies",
+                "state": "Resting"
+            }
+        }
+    ]
+}

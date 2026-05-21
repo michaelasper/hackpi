@@ -1,0 +1,28 @@
+{
+    "name": "Slash Clear clears conversation",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "hello",
+            "assert": {
+                "conversation_len": 1,
+                "state": "Generating"
+            }
+        },
+        {
+            "action": "submit",
+            "text": "/help",
+            "assert": {
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "submit",
+            "text": "/clear",
+            "assert": {
+                "conversation_len": 0,
+                "state": "Resting"
+            }
+        }
+    ]
+}

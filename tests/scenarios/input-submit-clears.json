@@ -1,0 +1,31 @@
+{
+    "name": "Submit clears input buffer (no ghost textbox)",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(h)",
+            "assert": {
+                "render_contains": "> h",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Char(i)",
+            "assert": {
+                "render_contains": "> hi",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Enter",
+            "assert": {
+                "conversation_len": 1,
+                "render_contains": "○ me: hi",
+                "not_render_contains": "> hi",
+                "state": "Generating"
+            }
+        }
+    ]
+}
