@@ -6,6 +6,9 @@ pub mod modals;
 pub mod status;
 pub mod task_board;
 
+#[cfg(test)]
+pub(crate) mod snapshots;
+
 // ── Re-exports: public API ────────────────────────────────────────────────
 pub use input::{cursor_position_for_input, display_width_prefix, truncate_to_width};
 pub use layout::{
