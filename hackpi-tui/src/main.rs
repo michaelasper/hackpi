@@ -430,6 +430,8 @@ async fn main() -> anyhow::Result<()> {
                                                 AppView::TaskBoard | AppView::TaskDetail(_)
                                             ) {
                                                 app.begin_create_task();
+                                            } else if !app.ui_status.is_active() {
+                                                input.handle_key(key);
                                             }
                                         }
                                         KeyCode::PageUp => {
