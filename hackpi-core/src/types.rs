@@ -89,7 +89,9 @@ impl ApiConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
+    #[serde(default)]
     pub input_tokens: u32,
+    #[serde(default)]
     pub output_tokens: u32,
 }
 
@@ -209,6 +211,48 @@ mod tests {
         let delta: DeltaPayload = serde_json::from_str(json).unwrap();
         assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
         assert!(delta.partial_json.is_none());
+    }
+
+    #[test]
+    fn test_usage_deserializes_with_missing_input_tokens() {
+        // API may send usage without input_tokens — should default to 0
+        let json = r#"{"input_tokens":42}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, 42);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_usage_deserializes_with_all_fields_missing() {
+        // Both fields missing → both default to 0
+        let json = r#"{}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_stream_event_deserializes_usage_without_input_tokens() {
+        // Full stream event where usage lacks input_tokens — must not crash
+        let json = r#"{"type":"message_delta","usage":{"output_tokens":10}}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type, "message_delta");
+        let usage = event.usage.expect("should have usage");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 10);
+    }
+
+    #[test]
+    fn test_usage_round_trip() {
+        // Verify serialization still works (both directions)
+        let usage = Usage {
+            input_tokens: 5,
+            output_tokens: 10,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let deserialized: Usage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.input_tokens, 5);
+        assert_eq!(deserialized.output_tokens, 10);
     }
 
     #[test]
