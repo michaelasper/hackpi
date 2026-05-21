@@ -1,0 +1,21 @@
+{
+    "name": "Enter in empty TaskBoard is a no-op (no crash)",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Tab",
+            "assert": {
+                "render_contains": "No tasks yet",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Enter",
+            "assert": {
+                "render_contains": "No tasks yet",
+                "state": "Resting"
+            }
+        }
+    ]
+}

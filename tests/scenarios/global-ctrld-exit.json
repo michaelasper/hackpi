@@ -1,0 +1,12 @@
+{
+    "name": "Ctrl+D sets quit_requested flag",
+    "steps": [
+        {
+            "action": "key",
+            "key": "CtrlD",
+            "assert": {
+                "state": "Resting"
+            }
+        }
+    ]
+}

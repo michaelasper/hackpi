@@ -1,0 +1,9 @@
+{
+    "name": "Slash Quit requests application exit",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "/quit"
+        }
+    ]
+}

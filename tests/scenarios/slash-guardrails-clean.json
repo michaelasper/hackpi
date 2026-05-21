@@ -1,0 +1,13 @@
+{
+    "name": "Slash Guardrails Clean clears session cache",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "/guardrails:clean",
+            "assert": {
+                "render_contains": "Session cache cleared",
+                "state": "Resting"
+            }
+        }
+    ]
+}

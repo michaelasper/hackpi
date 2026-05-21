@@ -1,0 +1,13 @@
+{
+    "name": "Esc in Conversation view is a no-op (root view)",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Esc",
+            "assert": {
+                "not_render_contains": "No tasks yet",
+                "state": "Resting"
+            }
+        }
+    ]
+}

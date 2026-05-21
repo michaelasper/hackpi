@@ -1,0 +1,21 @@
+{
+    "name": "Ctrl+C during generation sets Interrupted state",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "hello",
+            "assert": {
+                "conversation_len": 1,
+                "state": "Generating"
+            }
+        },
+        {
+            "action": "key",
+            "key": "CtrlC",
+            "assert": {
+                "conversation_len": 1,
+                "state": "Interrupted"
+            }
+        }
+    ]
+}

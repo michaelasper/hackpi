@@ -1,0 +1,21 @@
+{
+    "name": "Esc in TaskBoard returns to Conversation",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Tab",
+            "assert": {
+                "render_contains": "No tasks yet",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Esc",
+            "assert": {
+                "not_render_contains": "No tasks yet",
+                "state": "Resting"
+            }
+        }
+    ]
+}

@@ -1,0 +1,21 @@
+{
+    "name": "Esc does not dismiss autocomplete when input starts with / (auto-reappears)",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(/)",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Esc",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        }
+    ]
+}

@@ -1,0 +1,13 @@
+{
+    "name": "Slash Help shows available commands",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "/help",
+            "assert": {
+                "render_contains": "Available commands",
+                "state": "Resting"
+            }
+        }
+    ]
+}

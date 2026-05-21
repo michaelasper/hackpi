@@ -1,0 +1,21 @@
+{
+    "name": "Tab selects highlighted autocomplete command and fills buffer",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(/)",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Tab",
+            "assert": {
+                "render_contains": "> /help",
+                "state": "Resting"
+            }
+        }
+    ]
+}

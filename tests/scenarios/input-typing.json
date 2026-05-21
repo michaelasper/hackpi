@@ -1,0 +1,45 @@
+{
+    "name": "Typing text shows in input buffer",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(h)",
+            "assert": {
+                "render_contains": "> h",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Char(e)",
+            "assert": {
+                "render_contains": "> he",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Char(l)",
+            "assert": {
+                "render_contains": "> hel",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Char(l)",
+            "assert": {
+                "render_contains": "> hell",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Char(o)",
+            "assert": {
+                "render_contains": "> hello",
+                "state": "Resting"
+            }
+        }
+    ]
+}

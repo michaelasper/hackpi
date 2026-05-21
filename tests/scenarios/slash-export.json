@@ -1,0 +1,21 @@
+{
+    "name": "Slash Export saves conversation to file",
+    "steps": [
+        {
+            "action": "submit",
+            "text": "Hello, world!",
+            "assert": {
+                "conversation_len": 1,
+                "state": "Generating"
+            }
+        },
+        {
+            "action": "submit",
+            "text": "/export ./hackpi-export-test1.txt",
+            "assert": {
+                "render_contains": "Export complete",
+                "files_exist": ["./hackpi-export-test1.txt"]
+            }
+        }
+    ]
+}

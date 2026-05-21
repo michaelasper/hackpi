@@ -1,0 +1,21 @@
+{
+    "name": "CJK characters render correctly in input",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(你)",
+            "assert": {
+                "render_contains": "> 你",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "Char(好)",
+            "assert": {
+                "render_contains": "好",
+                "state": "Resting"
+            }
+        }
+    ]
+}

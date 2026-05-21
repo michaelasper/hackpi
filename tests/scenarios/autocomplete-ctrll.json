@@ -1,0 +1,21 @@
+{
+    "name": "Ctrl+L clears input and dismisses autocomplete",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(/)",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "CtrlL",
+            "assert": {
+                "not_render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        }
+    ]
+}

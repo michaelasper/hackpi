@@ -1,0 +1,21 @@
+{
+    "name": "Ctrl+C is a no-op when autocomplete is visible and idle",
+    "steps": [
+        {
+            "action": "key",
+            "key": "Char(/)",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        },
+        {
+            "action": "key",
+            "key": "CtrlC",
+            "assert": {
+                "render_contains": "Slash Commands",
+                "state": "Resting"
+            }
+        }
+    ]
+}
