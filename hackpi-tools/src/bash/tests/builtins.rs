@@ -329,7 +329,7 @@ fn test_bash_tool_workdir_parameter_affects_session() {
     };
 
     // Execute with workdir=/tmp - should create a file in /tmp
-    let params = serde_json::json!({"command": "touch test.txt", "workdir": "/tmp"});
+    let params = serde_json::json!({"command": "touch /tmp/test.txt", "workdir": "/tmp"});
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(tool.execute(params, &ctx));
@@ -339,7 +339,7 @@ fn test_bash_tool_workdir_parameter_affects_session() {
     ));
 
     // Verify file was created in /tmp using session directly
-    let params = serde_json::json!({"command": "ls /tmp/test.txt"});
+    let params = serde_json::json!({"command": "cat /tmp/test.txt"});
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(tool.execute(params, &ctx));

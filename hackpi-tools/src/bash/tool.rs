@@ -97,21 +97,28 @@ impl Tool for BashTool {
             Err(_) => return ToolResult::Timeout,
         };
 
-        let mut result = String::new();
+        let mut content = String::new();
         if !output.stdout.is_empty() {
-            result.push_str(&output.stdout);
+            content.push_str(&output.stdout);
         }
         if !output.stderr.is_empty() {
-            if !result.is_empty() {
-                result.push('\n');
+            if !content.is_empty() {
+                content.push('\n');
             }
-            result.push_str(&output.stderr);
+            content.push_str(&output.stderr);
         }
-        if output.exit_code != 0 && result.is_empty() {
-            result = format!("Command exited with code {}", output.exit_code);
+        if output.exit_code != 0 && content.is_empty() {
+            content = format!("Command exited with code {}", output.exit_code);
         }
 
-        ToolResult::Success { content: result }
+        if output.exit_code != 0 {
+            ToolResult::CommandError {
+                content,
+                exit_code: output.exit_code,
+            }
+        } else {
+            ToolResult::Success { content }
+        }
     }
 }
 
@@ -151,5 +158,112 @@ mod tests {
             }
             other => panic!("expected Success, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_bash_nonzero_exit_returns_command_error() {
+        let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+        // `cat nonexistent` fails with exit code 1 in the virtual shell
+        let params = serde_json::json!({
+            "command": "cat nonexistent_file_for_testing"
+        });
+        let ctx = ToolContext {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        match result {
+            ToolResult::CommandError { content, exit_code } => {
+                assert_eq!(exit_code, 1, "cat of nonexistent should exit 1");
+                assert!(
+                    content.contains("nonexistent_file_for_testing"),
+                    "expected error message about file, got: {content}"
+                );
+            }
+            other => panic!("expected CommandError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bash_nonzero_exit_with_stdout() {
+        let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+        let params = serde_json::json!({
+            "command": "echo output_before_failure && cat nonexistent_extra_file"
+        });
+        let ctx = ToolContext {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        match result {
+            ToolResult::CommandError { content, exit_code } => {
+                assert_eq!(exit_code, 1);
+                assert!(
+                    content.contains("output_before_failure"),
+                    "expected stdout content in CommandError, got: {content}"
+                );
+            }
+            other => panic!("expected CommandError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bash_nonzero_exit_with_stderr() {
+        let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+        let params = serde_json::json!({
+            "command": "echo error_output >&2 && cat nonexistent_stderr_file"
+        });
+        let ctx = ToolContext {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        match result {
+            ToolResult::CommandError { content, exit_code } => {
+                assert_eq!(exit_code, 1);
+                assert!(
+                    content.contains("error_output"),
+                    "expected stderr content in CommandError, got: {content}"
+                );
+            }
+            other => panic!("expected CommandError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bash_command_not_found_returns_command_error() {
+        let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+        let params = serde_json::json!({
+            "command": "nonexistent_cmd_xyzzy"
+        });
+        let ctx = ToolContext {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        match result {
+            ToolResult::CommandError { exit_code, .. } => {
+                assert_eq!(exit_code, 127, "expected exit 127 for missing command");
+            }
+            other => panic!("expected CommandError for missing command, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bash_zero_exit_remains_success() {
+        let tool = BashTool::new(std::path::PathBuf::from("/tmp"));
+        // `echo ok` succeeds with exit code 0 in the virtual shell
+        let params = serde_json::json!({
+            "command": "echo ok"
+        });
+        let ctx = ToolContext {
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            signal: tokio::sync::watch::channel(false).1,
+        };
+        let result = tool.execute(params, &ctx).await;
+        assert!(
+            matches!(result, ToolResult::Success { .. }),
+            "echo should return Success, got {result:?}"
+        );
     }
 }

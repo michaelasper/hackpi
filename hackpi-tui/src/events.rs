@@ -405,6 +405,7 @@ impl TuiEvent {
                 let status = match result {
                     ToolResult::Success { .. } => "success",
                     ToolResult::SystemError { .. } => "error",
+                    ToolResult::CommandError { .. } => "command_error",
                     ToolResult::Timeout => "timeout",
                     ToolResult::Cancelled => "cancelled",
                 };
@@ -789,6 +790,19 @@ mod tests {
         };
         let json = event.to_json_line().expect("should produce JSON");
         assert!(json.contains("\"status\":\"cancelled\""));
+    }
+
+    #[test]
+    fn test_to_json_line_tool_result_command_error() {
+        let event = TuiEvent::ToolResult {
+            id: "tc-5".into(),
+            result: ToolResult::CommandError {
+                content: "npx: not found".into(),
+                exit_code: 127,
+            },
+        };
+        let json = event.to_json_line().expect("should produce JSON");
+        assert!(json.contains("\"status\":\"command_error\""));
     }
 
     #[test]

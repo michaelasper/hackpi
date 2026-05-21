@@ -181,6 +181,19 @@ pub(crate) fn render_tool_card(
                     )));
                 }
             }
+            hackpi_core::tools::ToolResult::CommandError { content, exit_code } => {
+                // Show the exit code as the first line for scanability
+                lines.push(Line::from(Span::styled(
+                    format!("│ [Exit {exit_code}]"),
+                    tool_status_s,
+                )));
+                for line_content in content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("│ {line_content}"),
+                        tool_status_s,
+                    )));
+                }
+            }
             hackpi_core::tools::ToolResult::Timeout => {
                 lines.push(Line::from(Span::styled("│ Timed out.", tool_status_s)));
             }

@@ -290,6 +290,7 @@ pub fn tool_status_label(status: &crate::app::ToolCallStatus) -> &'static str {
         crate::app::ToolCallStatus::Done(result) => match result {
             hackpi_core::tools::ToolResult::Success { .. } => "Success",
             hackpi_core::tools::ToolResult::SystemError { .. } => "Failed",
+            hackpi_core::tools::ToolResult::CommandError { .. } => "Failed",
             hackpi_core::tools::ToolResult::Timeout => "Timeout",
             hackpi_core::tools::ToolResult::Cancelled => "Cancelled",
         },
@@ -303,6 +304,7 @@ pub fn tool_status_symbol(status: &crate::app::ToolCallStatus) -> &'static str {
         crate::app::ToolCallStatus::Done(result) => match result {
             hackpi_core::tools::ToolResult::Success { .. } => "✓",
             hackpi_core::tools::ToolResult::SystemError { .. } => "✗",
+            hackpi_core::tools::ToolResult::CommandError { .. } => "✗",
             hackpi_core::tools::ToolResult::Timeout => "⚠",
             hackpi_core::tools::ToolResult::Cancelled => "⊘",
         },
@@ -316,6 +318,7 @@ pub fn tool_status_style(status: &crate::app::ToolCallStatus, theme: &Theme) -> 
         crate::app::ToolCallStatus::Done(result) => match result {
             hackpi_core::tools::ToolResult::Success { .. } => theme.status_success,
             hackpi_core::tools::ToolResult::SystemError { .. } => theme.status_error,
+            hackpi_core::tools::ToolResult::CommandError { .. } => theme.status_error,
             hackpi_core::tools::ToolResult::Timeout => theme.status_warning,
             hackpi_core::tools::ToolResult::Cancelled => theme.fg_muted,
         },
@@ -549,6 +552,38 @@ mod tests {
     fn test_tool_status_label_cancelled() {
         let status = crate::app::ToolCallStatus::Done(hackpi_core::tools::ToolResult::Cancelled);
         assert_eq!(tool_status_label(&status), "Cancelled");
+    }
+
+    #[test]
+    fn test_tool_status_label_command_error() {
+        let status =
+            crate::app::ToolCallStatus::Done(hackpi_core::tools::ToolResult::CommandError {
+                content: "cmd failed".into(),
+                exit_code: 1,
+            });
+        assert_eq!(tool_status_label(&status), "Failed");
+    }
+
+    #[test]
+    fn test_tool_status_symbol_command_error() {
+        let status =
+            crate::app::ToolCallStatus::Done(hackpi_core::tools::ToolResult::CommandError {
+                content: "cmd failed".into(),
+                exit_code: 1,
+            });
+        assert_eq!(tool_status_symbol(&status), "✗");
+    }
+
+    #[test]
+    fn test_tool_status_style_command_error() {
+        let theme = color_theme();
+        let status =
+            crate::app::ToolCallStatus::Done(hackpi_core::tools::ToolResult::CommandError {
+                content: "cmd failed".into(),
+                exit_code: 127,
+            });
+        let style = tool_status_style(&status, &theme);
+        assert_eq!(style, theme.status_error);
     }
 
     // ── format_task_state tests ──────────────────────────────────────────

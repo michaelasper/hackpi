@@ -38,8 +38,19 @@ pub struct ToolContext {
 
 #[derive(Debug, Clone)]
 pub enum ToolResult {
-    Success { content: String },
-    SystemError { message: String },
+    Success {
+        content: String,
+    },
+    SystemError {
+        message: String,
+    },
+    /// The tool completed but returned a nonzero exit code. The `content`
+    /// carries any stdout/stderr output and `exit_code` is the process exit
+    /// status (e.g. 127 for command-not-found, 1 for general failure).
+    CommandError {
+        content: String,
+        exit_code: i32,
+    },
     Timeout,
     Cancelled,
 }

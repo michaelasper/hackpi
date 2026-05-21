@@ -107,6 +107,11 @@ impl ConnectionHealth {
                         message: message.clone(),
                     }
                 }
+                ToolResult::CommandError { content, exit_code } => {
+                    *self = Self::Error {
+                        message: format!("command exited with code {exit_code}: {content}"),
+                    }
+                }
                 ToolResult::Timeout => {
                     *self = Self::Error {
                         message: "request timed out".into(),
