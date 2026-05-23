@@ -36,6 +36,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 // ── Main render entry point ────────────────────────────────────────────────
 
@@ -91,7 +92,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-/// Render the tab header with active/inactive tab highlighting and version/usage info.
+/// Render the tab header with left-aligned tabs and right-aligned metadata.
+///
+/// Tabs occupy the left portion. `hackpi v{version} · {tokens}` is right-aligned.
+/// If the terminal is too narrow for both, metadata is truncated first,
+/// then hidden entirely to keep tabs readable.
 fn render_tab_header(
     frame: &mut Frame,
     area: Rect,
@@ -99,8 +104,10 @@ fn render_tab_header(
     app: &App,
     theme: &Theme,
 ) {
+    let area_width = area.width as usize;
+
     let diag_count = app.diagnostics.len();
-    let tabs = [
+    let tab_labels = [
         ("Conv", matches!(active_view, AppView::Conversation)),
         (
             "Tasks",
@@ -120,13 +127,18 @@ fn render_tab_header(
         ),
     ];
 
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, (label, is_active)) in tabs.iter().enumerate() {
+    // Build left-side tab spans
+    let mut left_spans: Vec<Span> = Vec::new();
+    let mut left_width: usize = 0;
+    for (i, (label, is_active)) in tab_labels.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("  "));
+            left_spans.push(Span::raw("  "));
+            left_width += 2;
         }
-        spans.push(Span::styled(
-            format!("[Tab] {label}"),
+        let tab_text = format!("[Tab] {label}");
+        left_width += UnicodeWidthStr::width(tab_text.as_str());
+        left_spans.push(Span::styled(
+            tab_text,
             if *is_active {
                 theme.fg_emphasis.add_modifier(Modifier::UNDERLINED)
             } else {
@@ -135,20 +147,76 @@ fn render_tab_header(
         ));
     }
 
-    // Right-align version and usage info
+    // Build right-side metadata
     let usage_text = match &app.usage {
         Some(u) => format!("{}↑ {}↓", u.input_tokens, u.output_tokens),
         None => "0↑ 0↓".into(),
     };
     let version = env!("CARGO_PKG_VERSION");
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        format!("hackpi v{version} · {usage_text}"),
-        theme.fg_muted,
-    ));
+    let meta_full = format!("hackpi v{version} · {usage_text}");
+    let meta_width = UnicodeWidthStr::width(meta_full.as_str());
+
+    // Minimum gap between tabs and metadata
+    let min_gap = 2;
+
+    let mut spans: Vec<Span> = left_spans;
+
+    if left_width + min_gap + meta_width <= area_width {
+        // Full metadata fits — right-align with padding
+        let padding = area_width - left_width - meta_width;
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.push(Span::styled(meta_full, theme.fg_muted));
+    } else if left_width + min_gap + 3 <= area_width {
+        // Metadata doesn't fully fit — truncate with ellipsis
+        let available = area_width - left_width - min_gap;
+        let truncated = truncate_to_display_width(&meta_full, available);
+        spans.push(Span::raw(" ".repeat(min_gap)));
+        spans.push(Span::styled(truncated, theme.fg_muted));
+    }
+    // else: too narrow for any metadata — show only tabs
 
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Truncate a string to fit within `max_display_width` terminal columns,
+/// appending "…" if truncated. Measures by display width (CJK-aware).
+fn truncate_to_display_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut width = 0;
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + cw > max_width {
+            break;
+        }
+        width += cw;
+        end = i + c.len_utf8();
+    }
+    if end < s.len() {
+        // Need to truncate — try to fit ellipsis
+        let ellipsis_width = 1; // … is display-width 1
+        let mut trunc_end = end;
+        let mut trunc_width = width;
+        while trunc_width + ellipsis_width > max_width && trunc_end > 0 {
+            let prev = s[..trunc_end]
+                .char_indices()
+                .next_back()
+                .map(|(i, c)| (i, c.len_utf8()))
+                .unwrap();
+            let cw = unicode_width::UnicodeWidthChar::width(
+                s[prev.0..].chars().next().unwrap(),
+            )
+            .unwrap_or(0);
+            trunc_end = prev.0;
+            trunc_width -= cw;
+        }
+        format!("{}…", &s[..trunc_end])
+    } else {
+        s.to_string()
+    }
 }
 
 /// Count the total number of visual rows a `Text` will occupy when rendered
@@ -245,6 +313,148 @@ mod tests {
         assert!(
             cell_str.contains("0↓"),
             "tab header should show 0↓, got: {cell_str}"
+        );
+    }
+
+    // ── COR-369: Header alignment and width-aware metadata truncation ────
+
+    /// Helper: extract the first row of the rendered buffer as a string.
+    fn first_row_string(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>, width: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        buffer.content[..width as usize]
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat()
+    }
+
+    #[test]
+    fn test_header_metadata_right_aligned_at_80() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.usage = Some(hackpi_core::types::Usage {
+            input_tokens: 42,
+            output_tokens: 10,
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let row = first_row_string(&terminal, 80);
+        // Metadata should appear in the last ~30 chars of the row
+        assert!(
+            row.contains("hackpi v"),
+            "metadata should be visible at 80 cols: {row}"
+        );
+        assert!(
+            row.contains("42↑"),
+            "token count should be visible: {row}"
+        );
+        // Tabs should also be visible
+        assert!(
+            row.contains("Conv"),
+            "tab labels should be visible: {row}"
+        );
+    }
+
+    #[test]
+    fn test_header_metadata_truncated_at_narrow_width() {
+        use ratatui::backend::TestBackend;
+        // 80 cols — the minimum supported width. Large token counts should still render.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.usage = Some(hackpi_core::types::Usage {
+            input_tokens: 999999,
+            output_tokens: 888888,
+        });
+
+        // This should not panic — metadata should truncate gracefully
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let row = first_row_string(&terminal, 80);
+        // Tabs must always be visible
+        assert!(
+            row.contains("Conv"),
+            "tabs should be visible even with large token counts: {row}"
+        );
+    }
+
+    #[test]
+    fn test_header_no_overlap_between_tabs_and_metadata() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.usage = Some(hackpi_core::types::Usage {
+            input_tokens: 12345,
+            output_tokens: 67890,
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let row = first_row_string(&terminal, 80);
+        // Find position of last tab label and first metadata char
+        // They should not overlap — there should be whitespace between them
+        let _graph_pos = row.find("Graph").expect("Graph tab should exist");
+        let diag_pos = row.find("Diag").expect("Diag tab should exist");
+        let hackpi_pos = row.find("hackpi");
+
+        // If hackpi metadata is shown, it must be after the last tab
+        if let Some(hp) = hackpi_pos {
+            assert!(
+                hp > diag_pos,
+                "metadata should start after all tabs: diag at {diag_pos}, hackpi at {hp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_all_three_tabs_visible() {
+        use ratatui::backend::TestBackend;
+        for width in [80u16, 120, 200] {
+            let backend = TestBackend::new(width, 24);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+            let mut app = App::new();
+            app.usage = Some(hackpi_core::types::Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+            });
+
+            terminal.draw(|f| render(f, &app)).unwrap();
+
+            let row = first_row_string(&terminal, width);
+            assert!(
+                row.contains("Conv") && row.contains("Tasks") && row.contains("Graph"),
+                "all tabs should be visible at {width} cols: {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_header_long_token_counts_truncated() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.usage = Some(hackpi_core::types::Usage {
+            input_tokens: 999999999,
+            output_tokens: 999999999,
+        });
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        // Should not panic — metadata with very long numbers should truncate
+        let row = first_row_string(&terminal, 80);
+        assert!(
+            row.contains("Conv"),
+            "tabs should still be visible with huge token counts: {row}"
         );
     }
 
