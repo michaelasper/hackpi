@@ -1,6 +1,8 @@
 use crate::types::ToolSchema;
 use async_trait::async_trait;
-use hackpi_guardrails::{GuardEvaluator, GuardReason, GuardResult, PermissionDecision, ProfileToolAccess};
+use hackpi_guardrails::{
+    GuardEvaluator, GuardReason, GuardResult, PermissionDecision, ProfileToolAccess,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -152,10 +154,7 @@ impl ToolRegistry {
                 let guard = evaluator.read().unwrap();
                 let profile_name = self.active_profile_name.read().unwrap();
                 let profile_access = self.active_profile_access.read().unwrap();
-                match (
-                    profile_name.as_deref(),
-                    profile_access.as_ref(),
-                ) {
+                match (profile_name.as_deref(), profile_access.as_ref()) {
                     (Some(profile), Some(access)) => {
                         guard.check_tool_with_profile(name, &params, Some(profile), Some(access))
                     }

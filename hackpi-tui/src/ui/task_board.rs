@@ -154,7 +154,7 @@ pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme:
             let id_text = format!("{} ", task.id);
             let badge_text = format!("[{state_label}] ");
 
-            let prefix_display_width = UnicodeWidthStr::width(cursor.as_str())
+            let prefix_display_width = UnicodeWidthStr::width(cursor)
                 + UnicodeWidthStr::width(id_text.as_str())
                 + UnicodeWidthStr::width(badge_text.as_str());
 
@@ -203,7 +203,10 @@ pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme:
                     let full_width = UnicodeWidthStr::width(full_line.as_str());
                     let display_line = if full_width > area_width {
                         let budget = area_width.saturating_sub(blocked_prefix_width);
-                        format!("{blocked_prefix}{}", truncate_to_display_width(blocker_id, budget))
+                        format!(
+                            "{blocked_prefix}{}",
+                            truncate_to_display_width(blocker_id, budget)
+                        )
                     } else {
                         full_line
                     };
@@ -539,7 +542,7 @@ pub(crate) fn render_task_detail(frame: &mut Frame, area: Rect, app: &App, theme
         )));
     } else {
         for desc_line in task.description.lines() {
-            lines.push(Line::from(Span::raw(format!("  {desc_line}")));
+            lines.push(Line::from(Span::raw(format!("  {desc_line}"))));
         }
     }
 
