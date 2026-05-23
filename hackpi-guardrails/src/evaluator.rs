@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{FileOp, GuardReason, GuardResult, GuardType, PermissionDecision, PermissionRule, SettingsPaths};
+use crate::{
+    FileOp, GuardReason, GuardResult, GuardType, PermissionDecision, PermissionRule, SettingsPaths,
+};
 
 // ── Profile Tool Access ────────────────────────────────────────────────────
 

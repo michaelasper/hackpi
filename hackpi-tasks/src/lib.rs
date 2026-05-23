@@ -7,8 +7,8 @@ pub mod tool;
 pub mod workflow;
 
 pub use agent_profile::{
-    AgentProfile, AgentProfileTransitions, MergeStrategy, ToolAccess,
-    CODER_PROFILE_YAML, DEFAULT_PROFILE_YAML, RESEARCHER_PROFILE_YAML, REVIEWER_PROFILE_YAML,
+    AgentProfile, AgentProfileTransitions, MergeStrategy, ToolAccess, CODER_PROFILE_YAML,
+    DEFAULT_PROFILE_YAML, RESEARCHER_PROFILE_YAML, REVIEWER_PROFILE_YAML,
 };
 pub use slash::{format_task_detail, handle_task_command, parse_slash_task_command, TaskCommand};
 pub use store::{JsonTaskStore, TaskStore};

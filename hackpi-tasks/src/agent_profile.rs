@@ -621,10 +621,7 @@ system_prompt_template: "Hello"
         };
         let task = sample_task();
         let resolved = p.resolve_for_task(&task);
-        assert!(
-            resolved.contains("Task TSK-001:"),
-            "should contain task id"
-        );
+        assert!(resolved.contains("Task TSK-001:"), "should contain task id");
         assert!(
             resolved.contains("Implement feature X"),
             "should contain task title"
@@ -700,9 +697,7 @@ system_prompt_template: "Hello"
     async fn load_from_dir_nonexistent_returns_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("nonexistent");
-        let profiles = AgentProfile::load_from_dir(&missing)
-            .await
-            .expect("load");
+        let profiles = AgentProfile::load_from_dir(&missing).await.expect("load");
         assert!(profiles.is_empty());
     }
 
@@ -926,7 +921,8 @@ system_prompt_template: "Research."
     fn all_built_in_profiles_yaml_roundtrip() {
         let profiles = AgentProfile::built_in_profiles();
         for (name, profile) in &profiles {
-            let yaml = serde_yml::to_string(profile).unwrap_or_else(|e| panic!("Failed to serialize {name}: {e}"));
+            let yaml = serde_yml::to_string(profile)
+                .unwrap_or_else(|e| panic!("Failed to serialize {name}: {e}"));
             let back = AgentProfile::parse_yaml(&yaml)
                 .unwrap_or_else(|e| panic!("Failed to parse {name}: {e}"));
             assert_eq!(
@@ -942,7 +938,11 @@ system_prompt_template: "Research."
         crate::workflow::WorkflowProfile {
             name: "test".to_string(),
             description: "test".to_string(),
-            states: vec!["todo".to_string(), "in_progress".to_string(), "done".to_string()],
+            states: vec![
+                "todo".to_string(),
+                "in_progress".to_string(),
+                "done".to_string(),
+            ],
             transitions: vec![],
             agent_profile: profile_name.map(|s| s.to_string()),
         }
@@ -1334,8 +1334,7 @@ max_turns: 10
 
         // Replace strategy: result is ONLY the resolved template
         assert_eq!(
-            result,
-            "Only this: TSK-001 Implement feature X in_progress Build the new feature read",
+            result, "Only this: TSK-001 Implement feature X in_progress Build the new feature read",
             "replace strategy should return only the resolved template"
         );
         assert!(

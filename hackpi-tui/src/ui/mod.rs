@@ -2030,6 +2030,163 @@ mod tests {
         );
     }
 
+    // ── COR-373: width-aware palette tests ────────────────────────────────
+
+    #[test]
+    fn test_autocomplete_guardrails_filter_shows_commands() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/guardrails".to_string();
+        app.update_autocomplete_state();
+        assert!(app.autocomplete_visible);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        assert!(
+            cell_str.contains("/guardrails:status"),
+            "should show /guardrails:status for /guardrails filter, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("/guardrails:clean"),
+            "should show /guardrails:clean for /guardrails filter, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("/guardrails:onboarding"),
+            "should show /guardrails:onboarding for /guardrails filter, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_autocomplete_descriptions_truncated_at_narrow_width() {
+        use ratatui::backend::TestBackend;
+        // Use a narrow terminal (80x24) — descriptions must fit inside the modal.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        // Verify no row extends beyond the modal borders.
+        // Each command row should be at most modal inner_width columns.
+        // At 80-wide, modal_width = 60, inner_width = 58.
+        let buffer = terminal.backend().buffer();
+        let buf_area = buffer.area;
+
+        // Find the modal's top-left (where "Slash Commands" appears)
+        // and verify that content doesn't bleed beyond the right border.
+        let mut modal_right: Option<u16> = None;
+        for y in 0..buf_area.height {
+            let row_start = (y as usize) * (buf_area.width as usize);
+            let row_end = row_start + (buf_area.width as usize);
+            let row_str: String = buffer.content[row_start..row_end]
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<Vec<&str>>()
+                .concat();
+            if row_str.contains("Slash Commands") {
+                // Find the right border '┐' or '┤'
+                for (x, ch) in row_str.char_indices() {
+                    if ch == '┐' || ch == '┤' || ch == '┘' {
+                        modal_right = Some(x as u16);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        // If we found the modal right edge, verify no text exceeds it
+        if let Some(right_edge) = modal_right {
+            for y in 0..buf_area.height {
+                let row_start = (y as usize) * (buf_area.width as usize);
+                let row_end = row_start + (buf_area.width as usize);
+                let row: String = buffer.content[row_start..row_end]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<Vec<&str>>()
+                    .concat();
+                // Check that content between the left and right borders is
+                // non-empty (commands/descriptions are rendered) but doesn't
+                // extend past the right border.
+                let trimmed = row.trim_end();
+                if trimmed.contains("Slash Commands") || trimmed.contains("navigate") {
+                    // Title and hint lines — just verify they exist
+                    continue;
+                }
+                // For command rows, ensure the content doesn't extend past the border
+                if trimmed.contains("/help")
+                    || trimmed.contains("/clear")
+                    || trimmed.contains("/guardrails")
+                {
+                    let last_non_space = trimmed.len();
+                    assert!(
+                        last_non_space <= (right_edge + 1) as usize,
+                        "content at row {y} extends past modal right edge ({right_edge}): {trimmed:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_autocomplete_selection_has_reversed_in_monochrome() {
+        use ratatui::backend::TestBackend;
+
+        // Serialize env-var tests to avoid race conditions
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        std::env::set_var("NO_COLOR", "1");
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.input = "/".to_string();
+        app.update_autocomplete_state();
+        // Select second command (/clear)
+        app.autocomplete_selected = 1;
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // The selected row should have the REVERSED modifier on its cells.
+        let mut found_reversed = false;
+        for cell in buffer.content.iter() {
+            let sym = cell.symbol();
+            if (sym == "/" || sym == "c" || sym == "l")
+                && cell
+                    .style()
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            {
+                found_reversed = true;
+                break;
+            }
+        }
+
+        std::env::remove_var("NO_COLOR");
+
+        assert!(
+            found_reversed,
+            "selected row should have REVERSED modifier in monochrome mode"
+        );
+    }
+
     #[test]
     fn test_conversation_scroll_offset_skips_lines() {
         use ratatui::backend::TestBackend;

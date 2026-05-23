@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::interaction::app_key_context;
 use crate::theme::Theme;
-use crate::ui::modal_rect;
+use crate::ui::{modal_rect, truncate_to_width};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -9,6 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 /// Render the slash command autocomplete popover above the input area.
 pub(crate) fn render_autocomplete_modal(
@@ -22,33 +23,23 @@ pub(crate) fn render_autocomplete_modal(
         return;
     }
 
-    // Compute the widest command name and description to size columns dynamically.
-    let max_name_width = filtered
-        .iter()
-        .map(|cmd| cmd.name.chars().count())
-        .max()
-        .unwrap_or(10)
-        .max(10);
-    let max_desc_width = filtered
-        .iter()
-        .map(|cmd| cmd.description.chars().count())
-        .max()
-        .unwrap_or(20);
-
-    // Modal dimensions — wide enough for cursor + name column + gap + description + borders.
-    // 2 (cursor "▸ ") + name + 2 (gap "  ") + description + 2 (left/right border padding)
     let frame_area = frame.area();
-    let min_modal_width = (2 + max_name_width + 2 + max_desc_width + 2).max(50) as u16;
-    let modal_width = frame_area.width.min(min_modal_width);
-    let max_visible = 10; // max items to show at once
-    let item_count = filtered.len().min(max_visible);
+    let is_color = theme.fg_default.fg.is_some();
+
+    // Modal dimensions — fixed maximum width, capped by terminal width.
+    const MAX_VISIBLE: usize = 10;
+    let item_count = filtered.len().min(MAX_VISIBLE);
     // Height: top border (1) + title (1) + items + optional "more" (1) + hint (1) + bottom border (1)
     let modal_height = (item_count + 5).min(16) as u16;
 
-    // Position above the input area, indented from the left, clamped to top of screen.
+    // Position above the input area, clamped so it doesn't cover row 0 (tab header).
+    let y = input_area.y.saturating_sub(modal_height).max(1);
+
+    // Modal width: fill available width with some margin, clamped 40..60.
+    let modal_width = frame_area.width.clamp(40, 60u16);
+
     // Clamp x so the modal doesn't overflow the right edge of the terminal.
     let x = (input_area.x + 2).min(frame_area.width.saturating_sub(modal_width));
-    let y = input_area.y.saturating_sub(modal_height).max(1); // leave room for tab header
 
     let modal_area = Rect {
         x,
@@ -61,11 +52,30 @@ pub(crate) fn render_autocomplete_modal(
     frame.render_widget(Clear, modal_area);
 
     // Compute scroll offset so the selected item stays within the visible window.
-    let scroll_offset = if app.autocomplete_selected >= max_visible {
-        app.autocomplete_selected - max_visible + 1
+    let scroll_offset = if app.autocomplete_selected >= MAX_VISIBLE {
+        app.autocomplete_selected - MAX_VISIBLE + 1
     } else {
         0
     };
+
+    // Inner width excludes left/right border characters.
+    let inner_width = modal_width.saturating_sub(2) as usize;
+
+    // Column allocation from available inner width:
+    //   Cursor "▸ " = 2 columns, gap "  " = 2 columns.
+    //   Available for name + description = inner_width - 4.
+    //   Command column: sized to the widest command name (display-width),
+    //   clamped to at most 50% of available (so descriptions get space)
+    //   and at least 10 columns.
+    //   Description column: whatever remains (truncated as needed).
+    let available = inner_width.saturating_sub(4);
+    let widest_cmd = filtered
+        .iter()
+        .map(|cmd| UnicodeWidthStr::width(cmd.name))
+        .max()
+        .unwrap_or(10);
+    let cmd_width = widest_cmd.min(available / 2).max(10);
+    let desc_width = available.saturating_sub(cmd_width);
 
     // Build list lines
     let mut lines: Vec<Line> = Vec::new();
@@ -77,56 +87,101 @@ pub(crate) fn render_autocomplete_modal(
     )));
 
     // Command items — render the visible slice [scroll_offset..scroll_offset+display_count]
-    let display_count: usize = filtered.len().min(max_visible);
-    let visible_slice = filtered.iter().skip(scroll_offset).take(display_count);
-    for (i, cmd) in visible_slice.enumerate() {
+    let display_count: usize = filtered.len().min(MAX_VISIBLE);
+    for (i, cmd) in filtered
+        .iter()
+        .skip(scroll_offset)
+        .take(display_count)
+        .enumerate()
+    {
         let actual_index = scroll_offset + i;
         let is_selected = actual_index == app.autocomplete_selected;
+
         let cursor = if is_selected { "▸ " } else { "  " };
 
-        let cmd_style = if is_selected {
-            theme.fg_emphasis.bg(Color::DarkGray)
+        // Truncate and pad command name to column width
+        let display_name = truncate_to_width(cmd.name, cmd_width);
+        let name_width = UnicodeWidthStr::width(display_name.as_str());
+        let name_pad = cmd_width.saturating_sub(name_width);
+        let name_padded = if name_pad > 0 {
+            let mut s = String::with_capacity(display_name.len() + name_pad);
+            s.push_str(&display_name);
+            for _ in 0..name_pad {
+                s.push(' ');
+            }
+            s
         } else {
-            theme.fg_default
+            display_name
         };
 
-        let desc_style = if is_selected {
-            theme.fg_muted.bg(Color::DarkGray)
+        // Truncate and pad description to column width
+        let display_desc = truncate_to_width(cmd.description, desc_width);
+        let desc_width_actual = UnicodeWidthStr::width(display_desc.as_str());
+        let desc_pad = desc_width.saturating_sub(desc_width_actual);
+        let desc_padded = if desc_pad > 0 {
+            let mut s = String::with_capacity(display_desc.len() + desc_pad);
+            s.push_str(&display_desc);
+            for _ in 0..desc_pad {
+                s.push(' ');
+            }
+            s
         } else {
-            theme.fg_muted
+            display_desc
         };
 
-        // Truncate the name to the computed column width if it somehow exceeds it,
-        // then pad to ensure consistent column alignment.
-        let display_name = if cmd.name.chars().count() > max_name_width {
-            let truncated: String = cmd.name.chars().take(max_name_width - 1).collect();
-            format!("{truncated}…")
+        if is_selected {
+            if is_color {
+                // Full-row selection background in color mode
+                let cmd_style = theme.fg_emphasis.bg(Color::DarkGray);
+                let desc_style = theme.fg_muted.bg(Color::DarkGray);
+                lines.push(Line::from(vec![
+                    Span::styled(cursor.to_string(), cmd_style),
+                    Span::styled(name_padded, cmd_style),
+                    Span::styled("  ", cmd_style),
+                    Span::styled(desc_padded, desc_style),
+                ]));
+            } else {
+                // Reversed modifier for monochrome / NO_COLOR mode
+                let cmd_style = theme.fg_emphasis.add_modifier(Modifier::REVERSED);
+                let desc_style = theme.fg_muted.add_modifier(Modifier::REVERSED);
+                lines.push(Line::from(vec![
+                    Span::styled(cursor.to_string(), cmd_style),
+                    Span::styled(name_padded, cmd_style),
+                    Span::styled("  ", cmd_style),
+                    Span::styled(desc_padded, desc_style),
+                ]));
+            }
         } else {
-            format!("{:<width$}", cmd.name, width = max_name_width)
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(cursor.to_string(), cmd_style),
-            Span::styled(display_name, cmd_style),
-            Span::styled("  ".to_string(), cmd_style), // separator gap
-            Span::styled(cmd.description, desc_style),
-        ]));
+            lines.push(Line::from(vec![
+                Span::styled(cursor.to_string(), theme.fg_emphasis),
+                Span::styled(name_padded, theme.fg_emphasis),
+                Span::styled("  ", theme.fg_emphasis),
+                Span::styled(desc_padded, theme.fg_muted),
+            ]));
+        }
     }
 
     // Hint line — show when total filtered items exceed the visible window
-    if filtered.len() > max_visible {
-        let remaining = filtered.len().saturating_sub(scroll_offset + max_visible);
+    if filtered.len() > MAX_VISIBLE {
+        let remaining = filtered.len().saturating_sub(scroll_offset + MAX_VISIBLE);
         let before = scroll_offset;
         let hint = match (before, remaining) {
             (0, r) => format!("  ↓ {r} more"),
             (b, 0) => format!("  ↑ {b} above"),
             (b, r) => format!("  ↑ {b} above · ↓ {r} more"),
         };
-        lines.push(Line::from(Span::styled(hint, theme.fg_muted)));
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(&hint, inner_width),
+            theme.fg_muted,
+        )));
     }
 
+    // Navigation hint — truncated to inner width
     lines.push(Line::from(Span::styled(
-        "  ↑/↓ navigate  Tab select  Enter submit  Esc close",
+        truncate_to_width(
+            "  ↑/↓ navigate  Tab select  Enter submit  Esc close",
+            inner_width,
+        ),
         theme.fg_muted,
     )));
 

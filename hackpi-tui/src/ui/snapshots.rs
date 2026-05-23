@@ -2236,3 +2236,344 @@ fn cor371_render_does_not_panic_with_extremely_long_line() {
         let _term = render_app(&app, w, h);
     }
 }
+// ── COR-375: Task board scan-friendly rendering ────────────────────────────
+
+/// Helper: create a task board app with tasks in non-canonical state order.
+fn unsorted_task_board_app() -> App {
+    let mut app = App::new();
+    app.active_view = AppView::TaskBoard;
+    // Deliberately non-canonical order: done, todo, in_progress, todo, done
+    app.task_list_cache = vec![
+        hackpi_tasks::Task {
+            id: "TSK-100".to_string(),
+            title: "First done task".to_string(),
+            description: String::new(),
+            state: "done".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+        hackpi_tasks::Task {
+            id: "TSK-101".to_string(),
+            title: "First todo task".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+        hackpi_tasks::Task {
+            id: "TSK-102".to_string(),
+            title: "In-progress task".to_string(),
+            description: String::new(),
+            state: "in_progress".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+        hackpi_tasks::Task {
+            id: "TSK-103".to_string(),
+            title: "Second todo task".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+        hackpi_tasks::Task {
+            id: "TSK-104".to_string(),
+            title: "Second done task".to_string(),
+            description: String::new(),
+            state: "done".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+    ];
+    app
+}
+
+#[test]
+fn cor375_each_state_appears_once_despite_unsorted_input() {
+    let app = unsorted_task_board_app();
+    let term = render_app(&app, 120, 40);
+    let text = buffer_text(&term);
+
+    // "To Do" group header should appear exactly once
+    let todo_count = text.matches("To Do (2)").count();
+    assert_eq!(
+        todo_count,
+        1,
+        "To Do group should appear exactly once, got {todo_count} occurrences.\n\
+         Full buffer:\n{}",
+        dump_buffer(&term)
+    );
+
+    // "Done" group header should appear exactly once
+    let done_count = text.matches("Done (2)").count();
+    assert_eq!(
+        done_count,
+        1,
+        "Done group should appear exactly once, got {done_count} occurrences.\n\
+         Full buffer:\n{}",
+        dump_buffer(&term)
+    );
+
+    // "In Progress" group header should appear exactly once
+    let ip_count = text.matches("In Progress (1)").count();
+    assert_eq!(
+        ip_count,
+        1,
+        "In Progress group should appear exactly once, got {ip_count} occurrences.\n\
+         Full buffer:\n{}",
+        dump_buffer(&term)
+    );
+
+    // All 5 task IDs should be visible
+    assert_buffer_contains(&term, "TSK-100", "all task IDs visible: TSK-100");
+    assert_buffer_contains(&term, "TSK-101", "all task IDs visible: TSK-101");
+    assert_buffer_contains(&term, "TSK-102", "all task IDs visible: TSK-102");
+    assert_buffer_contains(&term, "TSK-103", "all task IDs visible: TSK-103");
+    assert_buffer_contains(&term, "TSK-104", "all task IDs visible: TSK-104");
+}
+
+#[test]
+fn cor375_long_title_truncated_preserves_id_and_badge() {
+    let mut app = App::new();
+    app.active_view = AppView::TaskBoard;
+    // Title that's way longer than 80 cols
+    let long_title = "A".repeat(200);
+    app.task_list_cache = vec![hackpi_tasks::Task {
+        id: "TSK-999".to_string(),
+        title: long_title,
+        description: String::new(),
+        state: "in_progress".to_string(),
+        priority: hackpi_tasks::TaskPriority::High,
+        workflow: "default".to_string(),
+        blocked_by: vec![],
+        labels: vec![],
+        assignee: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }];
+    app.selected_task_idx = 0;
+
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // ID must be visible
+    assert_buffer_contains(&term, "TSK-999", "long title: task ID visible");
+
+    // State badge must be visible
+    assert_buffer_contains(&term, "In Progress", "long title: state badge visible");
+
+    // Selection cursor must be visible (▸)
+    assert_buffer_contains(&term, "▸", "long title: selection cursor visible");
+
+    // The title should be truncated (ellipsis present)
+    assert_buffer_contains(&term, "…", "long title: truncated with ellipsis");
+}
+
+#[test]
+fn cor375_task_detail_long_description_wraps() {
+    let mut app = App::new();
+    app.active_view = AppView::TaskDetail("TSK-LD".to_string());
+    let long_desc = "This is a very long description that spans many lines and should \
+                     be rendered with proper wrapping in the task detail view without \
+                     causing any layout issues. The description should be fully visible \
+                     within the available area, wrapped naturally by the Paragraph widget.";
+    app.task_detail_cache = Some(hackpi_tasks::Task {
+        id: "TSK-LD".to_string(),
+        title: "Task with long description".to_string(),
+        description: long_desc.to_string(),
+        state: "in_progress".to_string(),
+        priority: hackpi_tasks::TaskPriority::High,
+        workflow: "default".to_string(),
+        blocked_by: vec![],
+        labels: vec![],
+        assignee: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    });
+
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // Title visible
+    assert_buffer_contains(
+        &term,
+        "Task with long description",
+        "detail long desc: title visible",
+    );
+
+    // Description fragments visible
+    assert_buffer_contains(
+        &term,
+        "very long description",
+        "detail long desc: description start",
+    );
+    assert_buffer_contains(
+        &term,
+        "Paragraph widget",
+        "detail long desc: description end",
+    );
+}
+
+#[test]
+fn cor375_task_detail_many_blocked_by_continuation_rows() {
+    let mut app = App::new();
+    app.active_view = AppView::TaskDetail("TSK-BB".to_string());
+    app.task_detail_cache = Some(hackpi_tasks::Task {
+        id: "TSK-BB".to_string(),
+        title: "Blocked by many tasks".to_string(),
+        description: String::new(),
+        state: "blocked".to_string(),
+        priority: hackpi_tasks::TaskPriority::High,
+        workflow: "default".to_string(),
+        blocked_by: vec![
+            "TSK-001".to_string(),
+            "TSK-002".to_string(),
+            "TSK-003".to_string(),
+            "TSK-004".to_string(),
+            "TSK-005".to_string(),
+            "TSK-006".to_string(),
+            "TSK-007".to_string(),
+            "TSK-008".to_string(),
+            "TSK-009".to_string(),
+            "TSK-010".to_string(),
+        ],
+        labels: vec![],
+        assignee: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    });
+    // Populate blocked_by cache
+    app.task_detail_blocked_by = (1..=10)
+        .map(|i| hackpi_tasks::Task {
+            id: format!("TSK-{i:03}"),
+            title: format!("Blocker task {i}"),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::Medium,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .collect();
+
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // All blocker IDs should be visible (they wrap onto continuation rows)
+    assert_buffer_contains(&term, "TSK-001", "detail blocked: TSK-001");
+    assert_buffer_contains(&term, "TSK-005", "detail blocked: TSK-005");
+    assert_buffer_contains(&term, "TSK-010", "detail blocked: TSK-010");
+
+    // "Blocked by" label visible
+    assert_buffer_contains(&term, "Blocked by:", "detail blocked: label visible");
+}
+
+#[test]
+fn cor375_task_detail_long_labels_truncated() {
+    let mut app = App::new();
+    app.active_view = AppView::TaskDetail("TSK-LL".to_string());
+    let long_labels: Vec<String> = (0..20)
+        .map(|i| format!("very-long-label-name-{i}"))
+        .collect();
+    app.task_detail_cache = Some(hackpi_tasks::Task {
+        id: "TSK-LL".to_string(),
+        title: "Many labels task".to_string(),
+        description: String::new(),
+        state: "todo".to_string(),
+        priority: hackpi_tasks::TaskPriority::Medium,
+        workflow: "default".to_string(),
+        blocked_by: vec![],
+        labels: long_labels,
+        assignee: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    });
+
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // "Labels:" label should be visible
+    assert_buffer_contains(&term, "Labels:", "detail long labels: label field visible");
+
+    // First label should be visible
+    assert_buffer_contains(
+        &term,
+        "very-long-label-name-0",
+        "detail long labels: first label visible",
+    );
+
+    // Should be truncated (ellipsis present)
+    assert_buffer_contains(&term, "…", "detail long labels: truncated with ellipsis");
+}
+
+#[test]
+fn cor375_task_board_state_order_is_canonical() {
+    let app = unsorted_task_board_app();
+    let term = render_app(&app, 120, 40);
+    let text = buffer_text(&term);
+
+    // "To Do" should appear before "In Progress" which should appear before "Done"
+    let todo_pos = text
+        .find("To Do (2)")
+        .expect("To Do group should be present");
+    let ip_pos = text
+        .find("In Progress (1)")
+        .expect("In Progress group should be present");
+    let done_pos = text.find("Done (2)").expect("Done group should be present");
+
+    assert!(
+        todo_pos < ip_pos,
+        "To Do should appear before In Progress: todo at {todo_pos}, ip at {ip_pos}"
+    );
+    assert!(
+        ip_pos < done_pos,
+        "In Progress should appear before Done: ip at {ip_pos}, done at {done_pos}"
+    );
+}
+
+#[test]
+fn cor375_render_does_not_panic_with_long_titles_at_all_sizes() {
+    let mut app = App::new();
+    app.active_view = AppView::TaskBoard;
+    app.task_list_cache = vec![hackpi_tasks::Task {
+        id: "TSK-LONG".to_string(),
+        title: "X".repeat(500),
+        description: String::new(),
+        state: "todo".to_string(),
+        priority: hackpi_tasks::TaskPriority::High,
+        workflow: "default".to_string(),
+        blocked_by: vec!["TSK-OTHER".to_string()],
+        labels: vec![],
+        assignee: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }];
+
+    for (w, h) in [(MIN_W, MIN_H), (MED_W, MED_H), (LGE_W, LGE_H)] {
+        let _term = render_app(&app, w, h);
+    }
+}

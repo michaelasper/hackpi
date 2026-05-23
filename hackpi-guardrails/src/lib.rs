@@ -1287,13 +1287,11 @@ mod tests {
         access.insert("bash".to_string(), ProfileToolAccess::Deny);
 
         let params = json!({ "command": "echo hello" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            Some("strict"),
-            Some(&access),
+        let result =
+            evaluator.check_tool_with_profile("bash", &params, Some("strict"), Some(&access));
+        assert!(
+            matches!(result, GuardResult::Deny(ref msg) if msg.contains("denied by agent profile"))
         );
-        assert!(matches!(result, GuardResult::Deny(ref msg) if msg.contains("denied by agent profile")));
     }
 
     #[test]
@@ -1306,13 +1304,11 @@ mod tests {
         access.insert("bash".to_string(), ProfileToolAccess::Ask);
 
         let params = json!({ "command": "echo hello" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            Some("cautious"),
-            Some(&access),
+        let result =
+            evaluator.check_tool_with_profile("bash", &params, Some("cautious"), Some(&access));
+        assert!(
+            matches!(result, GuardResult::Ask(ref reason) if reason.guard == GuardType::AgentProfile)
         );
-        assert!(matches!(result, GuardResult::Ask(ref reason) if reason.guard == GuardType::AgentProfile));
     }
 
     #[test]
@@ -1326,12 +1322,8 @@ mod tests {
 
         // No guardrail rules loaded, so bash should be allowed
         let params = json!({ "command": "echo hello" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            Some("default"),
-            Some(&access),
-        );
+        let result =
+            evaluator.check_tool_with_profile("bash", &params, Some("default"), Some(&access));
         assert_eq!(result, GuardResult::Allow);
     }
 
@@ -1342,12 +1334,7 @@ mod tests {
         let evaluator = GuardEvaluator::new(false, paths);
 
         let params = json!({ "command": "echo hello" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            None,
-            None,
-        );
+        let result = evaluator.check_tool_with_profile("bash", &params, None, None);
         assert_eq!(result, GuardResult::Allow);
     }
 
@@ -1364,13 +1351,13 @@ mod tests {
         let inside_path = dir.path().join("test.txt");
         std::fs::write(&inside_path, "content").expect("write test file");
         let params = json!({ "path": inside_path.to_str().unwrap() });
-        let result = evaluator.check_tool_with_profile(
-            "read",
-            &params,
-            Some("strict"),
-            Some(&access),
+        let result =
+            evaluator.check_tool_with_profile("read", &params, Some("strict"), Some(&access));
+        assert_eq!(
+            result,
+            GuardResult::Allow,
+            "read is not in profile deny list"
         );
-        assert_eq!(result, GuardResult::Allow, "read is not in profile deny list");
     }
 
     #[test]
@@ -1385,12 +1372,8 @@ mod tests {
         let inside_path = dir.path().join("test.txt");
         std::fs::write(&inside_path, "content").expect("write test file");
         let params = json!({ "path": inside_path.to_str().unwrap() });
-        let result = evaluator.check_tool_with_profile(
-            "write",
-            &params,
-            Some("readonly"),
-            Some(&access),
-        );
+        let result =
+            evaluator.check_tool_with_profile("write", &params, Some("readonly"), Some(&access));
         assert!(matches!(result, GuardResult::Deny(_)));
     }
 
@@ -1404,12 +1387,8 @@ mod tests {
         access.insert("bash".to_string(), ProfileToolAccess::Deny);
 
         let params = json!({ "command": "rm -rf /" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            Some("strict"),
-            Some(&access),
-        );
+        let result =
+            evaluator.check_tool_with_profile("bash", &params, Some("strict"), Some(&access));
         assert_eq!(result, GuardResult::Allow, "god mode bypasses profile deny");
     }
 
@@ -1435,12 +1414,8 @@ mod tests {
         access.insert("bash".to_string(), ProfileToolAccess::Allow);
 
         let params = json!({ "command": "rm -rf /" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            Some("permissive"),
-            Some(&access),
-        );
+        let result =
+            evaluator.check_tool_with_profile("bash", &params, Some("permissive"), Some(&access));
 
         // Profile Allow passes through → guardrails command_gate denies
         match result {
@@ -1474,12 +1449,8 @@ mod tests {
         access.insert("bash".to_string(), ProfileToolAccess::Deny);
 
         let params = json!({ "command": "rm -rf /" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            Some("strict"),
-            Some(&access),
-        );
+        let result =
+            evaluator.check_tool_with_profile("bash", &params, Some("strict"), Some(&access));
 
         // Profile deny short-circuits before guardrails
         match result {
@@ -1513,18 +1484,15 @@ mod tests {
         access.insert("bash".to_string(), ProfileToolAccess::Ask);
 
         let params = json!({ "command": "rm -rf /" });
-        let result = evaluator.check_tool_with_profile(
-            "bash",
-            &params,
-            Some("cautious"),
-            Some(&access),
-        );
+        let result =
+            evaluator.check_tool_with_profile("bash", &params, Some("cautious"), Some(&access));
 
         // Profile Ask fires before guardrails
         match result {
             GuardResult::Ask(reason) => {
                 assert_eq!(
-                    reason.guard, GuardType::AgentProfile,
+                    reason.guard,
+                    GuardType::AgentProfile,
                     "ask should come from profile, got {:?}",
                     reason.guard
                 );
@@ -1568,12 +1536,8 @@ mod tests {
         access.insert("write".to_string(), ProfileToolAccess::Deny);
 
         let params = json!({ "path": ".env" });
-        let result = evaluator.check_tool_with_profile(
-            "write",
-            &params,
-            Some("readonly"),
-            Some(&access),
-        );
+        let result =
+            evaluator.check_tool_with_profile("write", &params, Some("readonly"), Some(&access));
 
         match result {
             GuardResult::Deny(msg) => {

@@ -46,12 +46,7 @@ impl Agent {
 
             let send_result = self
                 .api
-                .send_messages(
-                    conversation,
-                    &self.tools.all_schemas(),
-                    &prompt,
-                    api_tx,
-                )
+                .send_messages(conversation, &self.tools.all_schemas(), &prompt, api_tx)
                 .await;
 
             if let Err(e) = send_result {
