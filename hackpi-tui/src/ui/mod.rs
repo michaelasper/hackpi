@@ -10,7 +10,10 @@ pub mod task_board;
 pub(crate) mod snapshots;
 
 // ── Re-exports: public API ────────────────────────────────────────────────
-pub use input::{cursor_position_for_input, display_width_prefix, truncate_to_width};
+pub use input::{
+    cursor_position_for_input, display_width_prefix, input_block_height, input_content_rows,
+    truncate_to_width,
+};
 pub use layout::{
     centered_rect, is_too_small, modal_rect, render_too_small, split_root, RootLayout,
     MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
@@ -50,7 +53,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let theme = current_theme();
-    let root = split_root(area);
+
+    // Compute dynamic input block height: 1 border + 1–5 content rows.
+    let mut input_h = input::input_content_rows(&app.input, area.width) + 1;
+    // Task creation overlay needs at least 3 rows (label + input + hint).
+    if app.creating_task {
+        input_h = input_h.max(3);
+    }
+    let root = split_root(area, input_h);
 
     render_tab_header(frame, root.header, &app.active_view, app, &theme);
 
@@ -206,10 +216,8 @@ fn truncate_to_display_width(s: &str, max_width: usize) -> String {
                 .next_back()
                 .map(|(i, c)| (i, c.len_utf8()))
                 .unwrap();
-            let cw = unicode_width::UnicodeWidthChar::width(
-                s[prev.0..].chars().next().unwrap(),
-            )
-            .unwrap_or(0);
+            let cw = unicode_width::UnicodeWidthChar::width(s[prev.0..].chars().next().unwrap())
+                .unwrap_or(0);
             trunc_end = prev.0;
             trunc_width -= cw;
         }
@@ -319,7 +327,10 @@ mod tests {
     // ── COR-369: Header alignment and width-aware metadata truncation ────
 
     /// Helper: extract the first row of the rendered buffer as a string.
-    fn first_row_string(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>, width: u16) -> String {
+    fn first_row_string(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        width: u16,
+    ) -> String {
         let buffer = terminal.backend().buffer();
         buffer.content[..width as usize]
             .iter()
@@ -348,15 +359,9 @@ mod tests {
             row.contains("hackpi v"),
             "metadata should be visible at 80 cols: {row}"
         );
-        assert!(
-            row.contains("42↑"),
-            "token count should be visible: {row}"
-        );
+        assert!(row.contains("42↑"), "token count should be visible: {row}");
         // Tabs should also be visible
-        assert!(
-            row.contains("Conv"),
-            "tab labels should be visible: {row}"
-        );
+        assert!(row.contains("Conv"), "tab labels should be visible: {row}");
     }
 
     #[test]
@@ -2561,8 +2566,8 @@ mod tests {
         // Cursor should be positioned at:
         //   x = input_area.x + prefix_len ("> " = 2) + cursor_offset (3) = 5
         //   y = input_area.y (first row of input inner area)
-        // Layout: row 0 = tab header, rows 1-19 = content, rows 20-22 = input block.
-        // input_block has Borders::TOP, so inner area starts at row 21.
+        // Layout: row 0 = tab header, rows 1-20 = content, rows 21-22 = input block (2 rows).
+        // input_block has Borders::TOP, so inner area starts at row 22.
         let pos = terminal.get_cursor_position().unwrap();
         assert_eq!(
             pos.x, 5,
@@ -2570,8 +2575,8 @@ mod tests {
             pos.x
         );
         assert_eq!(
-            pos.y, 21,
-            "cursor y should be at input inner area row 21, got {}",
+            pos.y, 22,
+            "cursor y should be at input inner area row 22, got {}",
             pos.y
         );
     }
@@ -2596,8 +2601,8 @@ mod tests {
             pos.x
         );
         assert_eq!(
-            pos.y, 21,
-            "cursor y should be at input inner area row 21, got {}",
+            pos.y, 22,
+            "cursor y should be at input inner area row 22, got {}",
             pos.y
         );
     }
@@ -2959,7 +2964,7 @@ mod tests {
     #[test]
     fn test_split_root_returns_correct_regions() {
         let area = Rect::new(0, 0, 80, 24);
-        let root = split_root(area);
+        let root = split_root(area, 2); // empty input: border(1) + content(1)
 
         // Header should be 1 row
         assert_eq!(root.header.height, 1);
@@ -2970,11 +2975,11 @@ mod tests {
         assert_eq!(root.status.height, 1);
         assert_eq!(root.status.y, 23);
 
-        // Input should be 3 rows
-        assert_eq!(root.input.height, 3);
+        // Input should be 2 rows (dynamic, empty input)
+        assert_eq!(root.input.height, 2);
 
-        // Main should fill remaining (24 - 1 - 3 - 1 = 19)
-        assert_eq!(root.main.height, 19);
+        // Main should fill remaining (24 - 1 - 2 - 1 = 20)
+        assert_eq!(root.main.height, 20);
 
         // All regions should have the full width
         assert_eq!(root.header.width, 80);

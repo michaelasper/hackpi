@@ -128,6 +128,48 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     result
 }
 
+/// Compute how many content rows (excluding the top border) the input
+/// composer needs. Returns 1–5.
+///
+/// * Empty input → 1 row (prompt line)
+/// * Content that wraps or has newlines → up to 5 rows
+/// * Content exceeding 5 rows is capped (the composer scrolls)
+pub fn input_content_rows(input: &str, area_width: u16) -> u16 {
+    const MAX_ROWS: u16 = 5;
+    let area_w = area_width as usize;
+    if area_w == 0 || input.is_empty() {
+        return 1;
+    }
+
+    // Build display text: first logical line gets "> " prefix.
+    let mut total_rows: u16 = 0;
+    let mut first = true;
+    for line in input.split('\n') {
+        let line_display_width = if first {
+            first = false;
+            2 + UnicodeWidthStr::width(line) // "> " prefix + content
+        } else {
+            UnicodeWidthStr::width(line)
+        };
+        let rows = if line_display_width == 0 {
+            1u16
+        } else {
+            line_display_width.div_ceil(area_w) as u16
+        };
+        total_rows = total_rows.saturating_add(rows);
+        if total_rows >= MAX_ROWS {
+            return MAX_ROWS;
+        }
+    }
+    total_rows.max(1)
+}
+
+/// Compute the total input block height (border + content rows).
+/// Use this as the `input_height` parameter for [`split_root`].
+pub fn input_block_height(input: &str, area_width: u16) -> u16 {
+    input_content_rows(input, area_width) + 1 // +1 for top border
+}
+
 pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let input_block = Block::default()
         .borders(Borders::TOP)
@@ -147,23 +189,35 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &The
         format!("{prefix}{}", app.input)
     };
 
-    let paragraph = Paragraph::new(display).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, input_area);
-
-    // Show the terminal cursor at the current typing position.
-    // Only when the focus target is ConversationInput.
-    if matches!(
+    // Compute cursor position and scroll offset to keep cursor visible.
+    let show_cursor = matches!(
         app.focus_target(),
         crate::interaction::FocusTarget::ConversationInput
-    ) && !app.help_visible
-    {
+    ) && !app.help_visible;
+
+    let (cursor_row_offset, cursor_col_offset, scroll_y) = if show_cursor {
         let prefix_width: u16 = UnicodeWidthStr::width(prefix) as u16;
-        let (cursor_row_offset, cursor_col_offset) =
+        let (row, col) =
             cursor_position_for_input(&app.input, app.input_cursor, input_area.width, prefix_width);
+        let visible = input_area.height;
+        let scroll = if row >= visible { row - visible + 1 } else { 0 };
+        (row, col, scroll)
+    } else {
+        (0, 0, 0)
+    };
+
+    let paragraph = Paragraph::new(display)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y, 0));
+    frame.render_widget(paragraph, input_area);
+
+    if show_cursor {
+        let adjusted_row = cursor_row_offset.saturating_sub(scroll_y);
         let cursor_col = input_area.x + cursor_col_offset;
-        let cursor_row = input_area.y + cursor_row_offset;
+        let cursor_row = input_area.y + adjusted_row;
         // Clamp cursor to the input area bounds to avoid panics on narrow terminals.
         let clamped_col = cursor_col.min(input_area.right().saturating_sub(1));
-        frame.set_cursor_position((clamped_col, cursor_row));
+        let clamped_row = cursor_row.min(input_area.bottom().saturating_sub(1));
+        frame.set_cursor_position((clamped_col, clamped_row));
     }
 }

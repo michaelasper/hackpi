@@ -17,6 +17,7 @@ impl Agent {
     /// When `max_turns` is `None`, falls back to the built-in `MAX_TURNS`.
     /// When `system_prompt` is `None`, falls back to the agent's configured
     /// `system_prompt` field.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_with_profile(
         &self,
         user_message: &str,

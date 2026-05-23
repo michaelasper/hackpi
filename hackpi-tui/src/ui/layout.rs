@@ -46,7 +46,7 @@ pub struct RootLayout {
     pub header: Rect,
     /// Main content area (fills remaining vertical space).
     pub main: Rect,
-    /// Input area (height 3).
+    /// Input area (2–6 rows, depending on content).
     pub input: Rect,
     /// Status bar row (height 1).
     pub status: Rect,
@@ -57,16 +57,20 @@ pub struct RootLayout {
 /// Layout (top to bottom):
 /// 1. Tab header (1 line)
 /// 2. Main content (fills remaining)
-/// 3. Input area (3 lines)
+/// 3. Input area (`input_height` lines, clamped to 2–6)
 /// 4. Status bar (1 line)
-pub fn split_root(area: Rect) -> RootLayout {
+///
+/// `input_height` is the total block height including the top border.
+/// Minimum 2 (1 border + 1 content), maximum 6 (1 border + 5 content).
+pub fn split_root(area: Rect, input_height: u16) -> RootLayout {
+    let input_h = input_height.clamp(2, 6);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // tab header
-            Constraint::Min(1),    // main content
-            Constraint::Length(3), // input
-            Constraint::Length(1), // status bar
+            Constraint::Length(1),       // tab header
+            Constraint::Min(1),          // main content
+            Constraint::Length(input_h), // input
+            Constraint::Length(1),       // status bar
         ])
         .split(area);
 

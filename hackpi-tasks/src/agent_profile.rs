@@ -19,19 +19,14 @@ pub type ToolAccess = ProfileToolAccess;
 // ── MergeStrategy ───────────────────────────────────────────────────────────
 
 /// How a profile's system prompt template combines with the base system prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MergeStrategy {
     /// Prepend the profile template before the base system prompt.
+    #[default]
     Append,
     /// Use only the profile template; discard the base system prompt.
     Replace,
-}
-
-impl Default for MergeStrategy {
-    fn default() -> Self {
-        Self::Append
-    }
 }
 
 // ── AgentProfileTransitions ─────────────────────────────────────────────────

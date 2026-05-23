@@ -44,8 +44,8 @@ const LGE_H: u16 = 60;
 // ── Entry points ───────────────────────────────────────────────────────────
 
 /// Helper: parse a [`RootLayout`] for the given buffer dimensions.
-fn root_for(width: u16, height: u16) -> RootLayout {
-    crate::ui::split_root(Rect::new(0, 0, width, height))
+fn root_for(width: u16, height: u16, input_height: u16) -> RootLayout {
+    crate::ui::split_root(Rect::new(0, 0, width, height), input_height)
 }
 
 /// Helper: compute the status-bar y coordinate from the total height.
@@ -54,10 +54,9 @@ fn status_y(height: u16) -> u16 {
 }
 
 /// Helper: compute the input block top row (where the border line starts).
-fn input_top(height: u16) -> u16 {
-    // Layout: header(1) + main(fill) + input(3) + status(1)
-    // At standard sizes: height=24 → input at row 20
-    height.saturating_sub(4)
+fn input_top(height: u16, input_height: u16) -> u16 {
+    // Layout: header(1) + main(fill) + input(input_height) + status(1)
+    height.saturating_sub(input_height).saturating_sub(1) // -1 for status bar
 }
 
 /// Extract the full buffer content as a single flat string.
@@ -199,18 +198,19 @@ fn assert_buffer_not_contains(terminal: &Terminal<TestBackend>, not_expected: &s
     );
 }
 
-/// Assert that the input area (last ~3 rows before status bar) contains a
-/// substring.  The input block occupies 3 rows starting at `input_top(height)`.
+/// Assert that the input area contains a substring.
+/// `input_height` is the total block height (border + content rows).
 fn assert_input_contains(
     terminal: &Terminal<TestBackend>,
     width: u16,
     height: u16,
+    input_height: u16,
     expected: &str,
     msg: &str,
 ) {
-    let start_row = input_top(height);
+    let start_row = input_top(height, input_height);
     let mut combined = String::new();
-    for r in start_row..start_row + 3 {
+    for r in start_row..start_row + input_height {
         combined.push_str(&row_text(terminal, r, width));
     }
     assert!(
@@ -218,7 +218,7 @@ fn assert_input_contains(
         "{msg}: expected input area to contain \"{expected}\".\n\
          Input rows {start_row}–{}:\n{combined}\n\
          Full buffer:\n{}",
-        start_row + 2,
+        start_row + input_height - 1,
         dump_buffer(terminal)
     );
 }
@@ -336,8 +336,13 @@ fn assert_block_borders_closed(terminal: &Terminal<TestBackend>, area: Rect, lab
 /// Helper: assert that the input area's top border line is present.
 /// The input widget uses `Borders::TOP` which draws `─` across the full width
 /// without corner characters (since there are no side borders to connect).
-fn assert_input_border_present(terminal: &Terminal<TestBackend>, width: u16, height: u16) {
-    let input_border_row = input_top(height);
+fn assert_input_border_present(
+    terminal: &Terminal<TestBackend>,
+    width: u16,
+    height: u16,
+    input_height: u16,
+) {
+    let input_border_row = input_top(height, input_height);
     let text = row_text(terminal, input_border_row, width);
     assert!(
         text.contains(BORDER_HORIZONTAL),
@@ -353,6 +358,9 @@ fn assert_input_border_present(terminal: &Terminal<TestBackend>, width: u16, hei
         "Input border should span most of the width ({width}), got {dash_count} dashes"
     );
 }
+
+/// Default input block height for apps with empty input (1 border + 1 content).
+const EMPTY_INPUT_HEIGHT: u16 = 2;
 
 // ── App factory helpers ────────────────────────────────────────────────────
 
@@ -642,12 +650,13 @@ fn snapshot_conversation_idle_80x24() {
         &term,
         MIN_W,
         MIN_H,
+        EMPTY_INPUT_HEIGHT,
         "Type a message",
         "idle 80x24: input placeholder",
     );
 
     // Input border present
-    assert_input_border_present(&term, MIN_W, MIN_H);
+    assert_input_border_present(&term, MIN_W, MIN_H, EMPTY_INPUT_HEIGHT);
 
     // Status bar shows global bindings
     assert_status_contains(
@@ -689,6 +698,7 @@ fn snapshot_conversation_idle_120x40() {
         &term,
         MED_W,
         MED_H,
+        EMPTY_INPUT_HEIGHT,
         "Type a message",
         "idle 120x40: input placeholder",
     );
@@ -716,6 +726,7 @@ fn snapshot_conversation_idle_200x60() {
         &term,
         LGE_W,
         LGE_H,
+        EMPTY_INPUT_HEIGHT,
         "Type a message",
         "idle 200x60: input placeholder",
     );
@@ -1413,24 +1424,31 @@ fn assert_root_regions_fit(root: &RootLayout, width: u16, height: u16) {
 /// at every supported viewport size.
 #[test]
 fn snapshot_structural_layout_80x24() {
-    let root = root_for(MIN_W, MIN_H);
+    let root = root_for(MIN_W, MIN_H, EMPTY_INPUT_HEIGHT);
     assert_root_regions_non_overlapping(&root);
     assert_root_regions_fit(&root, MIN_W, MIN_H);
 
     // Specific checks for minimum size
     assert_eq!(root.header.height, 1, "header should be 1 row");
     assert_eq!(root.status.height, 1, "status should be 1 row");
-    assert_eq!(root.input.height, 3, "input should be 3 rows");
-    assert_eq!(root.main.height, 19, "main should fill remaining 19 rows");
+    assert_eq!(
+        root.input.height, EMPTY_INPUT_HEIGHT,
+        "input should be EMPTY_INPUT_HEIGHT rows"
+    );
+    assert_eq!(
+        root.main.height,
+        MIN_H - 1 - EMPTY_INPUT_HEIGHT - 1,
+        "main should fill remaining rows"
+    );
 }
 
 #[test]
 fn snapshot_structural_layout_120x40() {
-    let root = root_for(MED_W, MED_H);
+    let root = root_for(MED_W, MED_H, EMPTY_INPUT_HEIGHT);
     assert_root_regions_non_overlapping(&root);
     assert_root_regions_fit(&root, MED_W, MED_H);
 
-    let main_expected = MED_H - 1 - 3 - 1; // header(1) + input(3) + status(1)
+    let main_expected = MED_H - 1 - EMPTY_INPUT_HEIGHT - 1; // header(1) + input + status(1)
     assert_eq!(
         root.main.height, main_expected,
         "main should fill remaining space"
@@ -1439,11 +1457,11 @@ fn snapshot_structural_layout_120x40() {
 
 #[test]
 fn snapshot_structural_layout_200x60() {
-    let root = root_for(LGE_W, LGE_H);
+    let root = root_for(LGE_W, LGE_H, EMPTY_INPUT_HEIGHT);
     assert_root_regions_non_overlapping(&root);
     assert_root_regions_fit(&root, LGE_W, LGE_H);
 
-    let main_expected = LGE_H - 1 - 3 - 1;
+    let main_expected = LGE_H - 1 - EMPTY_INPUT_HEIGHT - 1;
     assert_eq!(
         root.main.height, main_expected,
         "main should fill remaining space"
@@ -1500,7 +1518,7 @@ fn snapshot_status_bar_clean_200x60() {
 fn snapshot_content_in_correct_regions() {
     let app = conversation_with_messages_app();
     let term = render_app(&app, MIN_W, MIN_H);
-    let root = root_for(MIN_W, MIN_H);
+    let root = root_for(MIN_W, MIN_H, EMPTY_INPUT_HEIGHT);
 
     // Main area: first user message should be in main area (starts at y=1)
     assert_row_contains(&term, root.main.y, MIN_W, "○ me:", "msg in main area");
@@ -1515,10 +1533,17 @@ fn snapshot_content_in_correct_regions() {
     );
 
     // Input area: should NOT contain submitted text (regression check for COR-158)
-    assert_input_contains(&term, MIN_W, MIN_H, "> ", "input area shows prompt");
+    assert_input_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        EMPTY_INPUT_HEIGHT,
+        "> ",
+        "input area shows prompt",
+    );
     // The first user message text should not be in the input area
-    let input_start = input_top(MIN_H);
-    for r in input_start..input_start + 3 {
+    let input_start = input_top(MIN_H, EMPTY_INPUT_HEIGHT);
+    for r in input_start..input_start + EMPTY_INPUT_HEIGHT {
         // Input rows should contain "> " prompt, not message text
         let text = row_text(&term, r, MIN_W);
         assert!(
@@ -1830,5 +1855,378 @@ fn snapshot_render_does_not_panic_with_theme_applied() {
             // Must not panic
             let _term = render_app(app, w, h);
         }
+    }
+}
+
+// ── COR-371: Multiline composer height, wrapping, and cursor placement ──────
+
+/// Helper: create an app with typed input and cursor position set.
+fn app_with_input(input: &str, cursor: usize) -> App {
+    let mut app = App::new();
+    app.input = input.to_string();
+    app.input_cursor = cursor;
+    app
+}
+
+#[test]
+fn cor371_long_ascii_wraps_inside_composer() {
+    // 78 'a' chars + "> " prefix = 80 cols, exactly filling one row.
+    // Adding one more character should push into a second visual row.
+    let long_input = "a".repeat(79); // 79 chars, with "> " = 81 display cols → wraps
+    let app = app_with_input(&long_input, long_input.len());
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // Compute expected input height: 1 border + 2 content rows (81 cols / 80 = 2 rows)
+    let content_rows = crate::ui::input_content_rows(&long_input, MIN_W);
+    assert_eq!(
+        content_rows, 2,
+        "79-char input + '> ' prefix (81 cols) should need 2 content rows"
+    );
+    let block_h = content_rows + 1;
+
+    // Input area should contain the text (it wraps within the composer)
+    assert_input_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        block_h,
+        "aaaa",
+        "long ASCII input should be visible in input area",
+    );
+
+    // Status bar must be intact — show standard bindings
+    assert_status_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        "Exit",
+        "long ASCII input: status bar must be intact",
+    );
+    assert_status_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        "Interrupt generation",
+        "long ASCII input: status bar interrupt hint",
+    );
+
+    // Status bar row must NOT contain input text
+    assert_row_not_contains(
+        &term,
+        status_y(MIN_H),
+        MIN_W,
+        "aaaa",
+        "long ASCII input must not bleed into status bar",
+    );
+}
+
+#[test]
+fn cor371_cjk_wraps_inside_composer() {
+    // CJK chars are width 2 each. With "> " (2 cols) + 39 CJK chars (78 cols) = 80 cols, one row.
+    // 40 CJK chars: 2 + 80 = 82 cols → wraps to 2 rows.
+    let cjk_input = "中".repeat(40);
+    let app = app_with_input(&cjk_input, cjk_input.len());
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    let content_rows = crate::ui::input_content_rows(&cjk_input, MIN_W);
+    assert!(
+        content_rows >= 2,
+        "40 CJK chars + '> ' prefix should need at least 2 content rows, got {content_rows}"
+    );
+    let block_h = content_rows + 1;
+
+    // Input area should contain the CJK text
+    assert_input_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        block_h,
+        "中",
+        "CJK input should be visible in input area",
+    );
+
+    // Status bar must not contain CJK text
+    assert_row_not_contains(
+        &term,
+        status_y(MIN_H),
+        MIN_W,
+        "中",
+        "CJK input must not bleed into status bar",
+    );
+
+    // Status bar must still show standard bindings
+    assert_status_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        "Exit",
+        "CJK input: status bar must be intact",
+    );
+}
+
+#[test]
+fn cor371_multiline_newlines_cursor_placement() {
+    // Three lines via Shift+Enter, cursor at end of second line
+    let input = "line one\nline two\nline three";
+    let cursor = "line one\nline two".len(); // cursor at end of "line two"
+    let app = app_with_input(input, cursor);
+    let mut term = render_app(&app, MIN_W, MIN_H);
+
+    let content_rows = crate::ui::input_content_rows(input, MIN_W);
+    assert!(
+        content_rows >= 3,
+        "three logical lines should need at least 3 content rows, got {content_rows}"
+    );
+    let block_h = content_rows + 1;
+
+    // All three lines should be visible in the input area
+    assert_input_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        block_h,
+        "line one",
+        "multiline: first line visible",
+    );
+    assert_input_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        block_h,
+        "line two",
+        "multiline: second line visible",
+    );
+    assert_input_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        block_h,
+        "line three",
+        "multiline: third line visible",
+    );
+
+    // Cursor should be positioned within the input area, not in the status bar
+    let pos = term.get_cursor_position().unwrap();
+    let input_border_row = input_top(MIN_H, block_h);
+    assert!(
+        pos.y > input_border_row && pos.y < input_border_row + block_h,
+        "cursor y ({}) should be within input inner area (rows {}–{})",
+        pos.y,
+        input_border_row + 1,
+        input_border_row + block_h - 1,
+    );
+
+    // Status bar must be intact
+    assert_status_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        "Exit",
+        "multiline input: status bar intact",
+    );
+}
+
+#[test]
+fn cor371_dynamic_height_grows_and_shrinks() {
+    // Verify that input_content_rows scales correctly with content length.
+
+    // Empty → 1 row
+    assert_eq!(crate::ui::input_content_rows("", MIN_W), 1);
+
+    // Short text that fits in one line → 1 row
+    assert_eq!(crate::ui::input_content_rows("hello", MIN_W), 1);
+
+    // Text + prefix that fills exactly one line (78 chars + "> " = 80) → 1 row
+    assert_eq!(crate::ui::input_content_rows(&"a".repeat(78), MIN_W), 1);
+
+    // Text + prefix that overflows (79 chars + "> " = 81) → 2 rows
+    assert_eq!(crate::ui::input_content_rows(&"a".repeat(79), MIN_W), 2);
+
+    // Two newlines → 3 rows
+    assert_eq!(crate::ui::input_content_rows("a\nb\nc", MIN_W), 3);
+
+    // Five newlines → 6 rows, but capped at MAX_ROWS=5
+    assert_eq!(crate::ui::input_content_rows("a\nb\nc\nd\ne\nf", MIN_W), 5);
+
+    // Very long single line that would need many rows, capped at 5
+    let very_long = "a".repeat(500);
+    assert_eq!(crate::ui::input_content_rows(&very_long, MIN_W), 5);
+
+    // input_block_height = content_rows + 1 (border)
+    assert_eq!(crate::ui::input_block_height("hello", MIN_W), 2);
+    assert_eq!(crate::ui::input_block_height(&"a".repeat(79), MIN_W), 3);
+}
+
+#[test]
+fn cor371_status_bar_never_overwritten_with_max_content() {
+    // Fill input with enough content to max out at 5 content rows.
+    // Status bar must remain untouched.
+    let max_input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        "a".repeat(100),
+        "b".repeat(100),
+        "c".repeat(100),
+        "d".repeat(100),
+        "e".repeat(100),
+        "f".repeat(100)
+    );
+    let app = app_with_input(&max_input, max_input.len());
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    let block_h = crate::ui::input_block_height(&max_input, MIN_W);
+    assert_eq!(
+        block_h, 6,
+        "max content should produce block height 6 (5 content + 1 border)"
+    );
+
+    // Status bar must show standard content
+    assert_status_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        "Exit",
+        "max content: status bar must show Exit",
+    );
+    assert_status_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        "Interrupt generation",
+        "max content: status bar must show interrupt hint",
+    );
+
+    // Input text must not appear in status row
+    assert_row_not_contains(
+        &term,
+        status_y(MIN_H),
+        MIN_W,
+        "aaaa",
+        "max content must not bleed into status bar",
+    );
+    assert_row_not_contains(
+        &term,
+        status_y(MIN_H),
+        MIN_W,
+        "ffff",
+        "max content last line must not bleed into status bar",
+    );
+}
+
+#[test]
+fn cor371_placeholder_shown_when_empty_not_when_typed() {
+    // Empty input → shows "Type a message…" placeholder
+    let empty_app = App::new();
+    let empty_term = render_app(&empty_app, MIN_W, MIN_H);
+    assert_input_contains(
+        &empty_term,
+        MIN_W,
+        MIN_H,
+        EMPTY_INPUT_HEIGHT,
+        "Type a message",
+        "empty input: should show placeholder",
+    );
+
+    // Typed input → no placeholder, shows actual text
+    let typed_app = app_with_input("my message", 10);
+    let typed_term = render_app(&typed_app, MIN_W, MIN_H);
+    assert_input_contains(
+        &typed_term,
+        MIN_W,
+        MIN_H,
+        EMPTY_INPUT_HEIGHT,
+        "my message",
+        "typed input: should show actual text",
+    );
+    // The buffer should NOT contain placeholder text when actual text is entered
+    assert_buffer_not_contains(
+        &typed_term,
+        "Type a message",
+        "typed input: should NOT show placeholder",
+    );
+}
+
+#[test]
+fn cor371_cursor_row_clamped_to_composer_area() {
+    // Cursor at the end of max-content input: verify it stays within the
+    // input block and never touches the status bar.
+    let lines: Vec<String> = (0..10)
+        .map(|i| format!("line {} content here", i))
+        .collect();
+    let input = lines.join("\n");
+    let app = app_with_input(&input, input.len());
+    let mut term = render_app(&app, MIN_W, MIN_H);
+
+    let block_h = crate::ui::input_block_height(&input, MIN_W);
+    let pos = term.get_cursor_position().unwrap();
+
+    // Cursor must be within the input block (below header, above status)
+    let input_border_row = input_top(MIN_H, block_h);
+    assert!(
+        pos.y >= input_border_row && pos.y < input_border_row + block_h,
+        "cursor y ({}) must be within input block (rows {}–{})",
+        pos.y,
+        input_border_row,
+        input_border_row + block_h - 1,
+    );
+
+    // Cursor must not be on the status bar row
+    assert!(
+        pos.y < status_y(MIN_H),
+        "cursor y ({}) must not be on status bar row ({})",
+        pos.y,
+        status_y(MIN_H),
+    );
+}
+
+#[test]
+fn cor371_split_root_clamps_input_height() {
+    // split_root clamps input_height to [2, 6]
+    let root_lo = crate::ui::split_root(Rect::new(0, 0, MIN_W, MIN_H), 1);
+    assert_eq!(
+        root_lo.input.height, 2,
+        "input height should clamp to minimum 2"
+    );
+
+    let root_hi = crate::ui::split_root(Rect::new(0, 0, MIN_W, MIN_H), 100);
+    assert_eq!(
+        root_hi.input.height, 6,
+        "input height should clamp to maximum 6"
+    );
+
+    // Status bar must always be 1 row regardless of input height
+    assert_eq!(
+        root_lo.status.height, 1,
+        "status bar must be 1 row with min input"
+    );
+    assert_eq!(
+        root_hi.status.height, 1,
+        "status bar must be 1 row with max input"
+    );
+
+    // Regions must not overlap
+    assert_root_regions_non_overlapping(&root_lo);
+    assert_root_regions_non_overlapping(&root_hi);
+    assert_root_regions_fit(&root_lo, MIN_W, MIN_H);
+    assert_root_regions_fit(&root_hi, MIN_W, MIN_H);
+}
+
+#[test]
+fn cor371_render_does_not_panic_with_multiline_input_at_all_sizes() {
+    let multiline = "first line\nsecond line\nthird line\nfourth line\nfifth line";
+    let app = app_with_input(multiline, multiline.len());
+
+    for (w, h) in [(MIN_W, MIN_H), (MED_W, MED_H), (LGE_W, LGE_H)] {
+        let _term = render_app(&app, w, h);
+    }
+}
+
+#[test]
+fn cor371_render_does_not_panic_with_extremely_long_line() {
+    // Single line of 2000 characters — should not panic or overflow
+    let long = "x".repeat(2000);
+    let app = app_with_input(&long, long.len());
+
+    for (w, h) in [(MIN_W, MIN_H), (MED_W, MED_H), (LGE_W, LGE_H)] {
+        let _term = render_app(&app, w, h);
     }
 }
