@@ -3458,4 +3458,310 @@ mod tests {
         assert_eq!(truncate_to_width("a🔥b", 3), "a🔥"); // 1+2=3, b would make 4
         assert_eq!(truncate_to_width("a🔥b", 2), "a…");
     }
+
+    // ── COR-375: Scan-friendly task board/detail tests ─────────────────────
+
+    #[test]
+    fn test_task_board_long_title_truncated_preserves_id_and_badge() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let long_title = "A".repeat(200);
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        app.task_list_cache = vec![hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: long_title.clone(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::High,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+        app.selected_task_idx = 0;
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // ID must be visible
+        assert!(
+            cell_str.contains("TSK-001"),
+            "task board should show task ID even with long title, got: {cell_str}"
+        );
+        // State badge must be visible
+        assert!(
+            cell_str.contains("[To Do]"),
+            "task board should show state badge even with long title, got: {cell_str}"
+        );
+        // Selection cursor must be visible
+        assert!(
+            cell_str.contains("▸"),
+            "selected task should show cursor indicator, got: {cell_str}"
+        );
+        // The full 200-char title must NOT be present (it should be truncated)
+        assert!(
+            !cell_str.contains(&long_title),
+            "200-char title should be truncated, not rendered in full"
+        );
+        // But the start of the title should be present (truncated with ellipsis)
+        assert!(
+            cell_str.contains("AAAAA"),
+            "beginning of title should be visible, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_task_board_unsorted_states_grouped_once_in_canonical_order() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskBoard;
+        // Intentionally interleaved: todo, in_progress, todo, done, in_progress
+        app.task_list_cache = vec![
+            hackpi_tasks::Task {
+                id: "TSK-001".to_string(),
+                title: "Task A".to_string(),
+                description: String::new(),
+                state: "todo".to_string(),
+                priority: hackpi_tasks::TaskPriority::None,
+                workflow: "default".to_string(),
+                blocked_by: vec![],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            hackpi_tasks::Task {
+                id: "TSK-002".to_string(),
+                title: "Task B".to_string(),
+                description: String::new(),
+                state: "in_progress".to_string(),
+                priority: hackpi_tasks::TaskPriority::None,
+                workflow: "default".to_string(),
+                blocked_by: vec![],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            hackpi_tasks::Task {
+                id: "TSK-003".to_string(),
+                title: "Task C".to_string(),
+                description: String::new(),
+                state: "todo".to_string(),
+                priority: hackpi_tasks::TaskPriority::None,
+                workflow: "default".to_string(),
+                blocked_by: vec![],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            hackpi_tasks::Task {
+                id: "TSK-004".to_string(),
+                title: "Task D".to_string(),
+                description: String::new(),
+                state: "done".to_string(),
+                priority: hackpi_tasks::TaskPriority::None,
+                workflow: "default".to_string(),
+                blocked_by: vec![],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            hackpi_tasks::Task {
+                id: "TSK-005".to_string(),
+                title: "Task E".to_string(),
+                description: String::new(),
+                state: "in_progress".to_string(),
+                priority: hackpi_tasks::TaskPriority::None,
+                workflow: "default".to_string(),
+                blocked_by: vec![],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        ];
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // Each state should appear exactly once as a section header
+        assert!(
+            cell_str.contains("To Do (2)"),
+            "todo group should have count 2, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("In Progress (2)"),
+            "in_progress group should have count 2, got: {cell_str}"
+        );
+        assert!(
+            cell_str.contains("Done (1)"),
+            "done group should have count 1, got: {cell_str}"
+        );
+
+        // Verify canonical order: "To Do" appears before "In Progress" which appears before "Done"
+        let todo_pos = cell_str
+            .find("To Do (2)")
+            .expect("To Do header should exist");
+        let ip_pos = cell_str
+            .find("In Progress (2)")
+            .expect("In Progress header should exist");
+        let done_pos = cell_str.find("Done (1)").expect("Done header should exist");
+        assert!(
+            todo_pos < ip_pos,
+            "To Do should appear before In Progress: todo at {todo_pos}, ip at {ip_pos}"
+        );
+        assert!(
+            ip_pos < done_pos,
+            "In Progress should appear before Done: ip at {ip_pos}, done at {done_pos}"
+        );
+    }
+
+    #[test]
+    fn test_task_detail_long_blocked_by_list_no_spill() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let task = hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: "Blocked task".to_string(),
+            description: String::new(),
+            state: "blocked".to_string(),
+            priority: hackpi_tasks::TaskPriority::High,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: vec![],
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+        // Many blocked_by entries
+        app.task_detail_blocked_by = (1..=15)
+            .map(|i| hackpi_tasks::Task {
+                id: format!("TSK-{i:03}"),
+                title: format!("Blocker {i}"),
+                description: String::new(),
+                state: "in_progress".to_string(),
+                priority: hackpi_tasks::TaskPriority::Medium,
+                workflow: "default".to_string(),
+                blocked_by: vec![],
+                labels: vec![],
+                assignee: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .collect();
+
+        // Should not panic
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // Some blocked_by IDs should be visible
+        assert!(
+            cell_str.contains("TSK-001"),
+            "blocked by IDs should be visible, got: {cell_str}"
+        );
+        // The label prefix should be visible
+        assert!(
+            cell_str.contains("Blocked by"),
+            "Blocked by label should be visible, got: {cell_str}"
+        );
+        // Verify that continuation rows work: the blocked_by content spans multiple lines
+        // and the continuation indent should be present
+        assert!(
+            cell_str.contains("TSK-002"),
+            "second blocked_by ID should be visible, got: {cell_str}"
+        );
+    }
+
+    #[test]
+    fn test_task_detail_long_labels_truncated_to_fit() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let long_labels: Vec<String> = (1..=10)
+            .map(|i| format!("very-long-label-name-{i:03}"))
+            .collect();
+        let task = hackpi_tasks::Task {
+            id: "TSK-001".to_string(),
+            title: "Task with labels".to_string(),
+            description: String::new(),
+            state: "todo".to_string(),
+            priority: hackpi_tasks::TaskPriority::None,
+            workflow: "default".to_string(),
+            blocked_by: vec![],
+            labels: long_labels.clone(),
+            assignee: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut app = App::new();
+        app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
+        app.task_detail_cache = Some(task);
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell_str: String = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<&str>>()
+            .concat();
+
+        // First label should be visible
+        assert!(
+            cell_str.contains("very-long-label-name-001"),
+            "first label should be visible, got: {cell_str}"
+        );
+        // The labels line should show truncation (the full joined string is ~230 chars)
+        // which far exceeds 80 - 15 = 65 chars available.
+        let full_labels = long_labels.join(", ");
+        assert!(
+            !cell_str.contains(&full_labels),
+            "full labels string ({} chars) should be truncated, not rendered in full",
+            full_labels.len()
+        );
+        // Labels label should be visible
+        assert!(
+            cell_str.contains("Labels"),
+            "Labels field label should be visible, got: {cell_str}"
+        );
+    }
 }
