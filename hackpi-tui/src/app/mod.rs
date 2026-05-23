@@ -2948,13 +2948,23 @@ mod tests {
         handle_slash_command("/agent profiles", &mut app, &tx, &ge, &make_tool_registry()).await;
 
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
-        assert!(chunks.iter().any(|s| s.contains("No agent profiles loaded")),
-            "should report no profiles loaded: {chunks:?}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            chunks
+                .iter()
+                .any(|s| s.contains("No agent profiles loaded")),
+            "should report no profiles loaded: {chunks:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 
     #[tokio::test]
@@ -2967,18 +2977,32 @@ mod tests {
         handle_slash_command("/agent profiles", &mut app, &tx, &ge, &make_tool_registry()).await;
 
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         let text = chunks.join("");
-        assert!(text.contains("Available agent profiles"),
-            "should list profiles header: {text}");
+        assert!(
+            text.contains("Available agent profiles"),
+            "should list profiles header: {text}"
+        );
         assert!(text.contains("default"), "should contain 'default': {text}");
-        assert!(text.contains("researcher"), "should contain 'researcher': {text}");
+        assert!(
+            text.contains("researcher"),
+            "should contain 'researcher': {text}"
+        );
         assert!(text.contains("coder"), "should contain 'coder': {text}");
-        assert!(text.contains("reviewer"), "should contain 'reviewer': {text}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        assert!(
+            text.contains("reviewer"),
+            "should contain 'reviewer': {text}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 
     #[tokio::test]
@@ -2991,13 +3015,22 @@ mod tests {
         handle_slash_command("/agent profile", &mut app, &tx, &ge, &make_tool_registry()).await;
 
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         let text = chunks.join("");
-        assert!(text.contains("No profile set"), "should say no profile set: {text}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        assert!(
+            text.contains("No profile set"),
+            "should say no profile set: {text}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 
     #[tokio::test]
@@ -3011,13 +3044,22 @@ mod tests {
         handle_slash_command("/agent profile", &mut app, &tx, &ge, &make_tool_registry()).await;
 
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         let text = chunks.join("");
-        assert!(text.contains("Active profile: \"default\""), "should show active profile: {text}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        assert!(
+            text.contains("Active profile: \"default\""),
+            "should show active profile: {text}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 
     #[tokio::test]
@@ -3031,13 +3073,22 @@ mod tests {
         handle_slash_command("/agent profile", &mut app, &tx, &ge, &make_tool_registry()).await;
 
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         let text = chunks.join("");
-        assert!(text.contains("no longer available"), "should warn profile is missing: {text}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        assert!(
+            text.contains("no longer available"),
+            "should warn profile is missing: {text}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 
     #[tokio::test]
@@ -3048,19 +3099,41 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (ge, _dir) = make_guard_evaluator();
         let ge = Arc::new(RwLock::new(ge));
-        handle_slash_command("/agent profile researcher", &mut app, &tx, &ge, &make_tool_registry()).await;
+        handle_slash_command(
+            "/agent profile researcher",
+            &mut app,
+            &tx,
+            &ge,
+            &make_tool_registry(),
+        )
+        .await;
 
-        assert_eq!(app.active_profile, Some("researcher".to_string()),
-            "active_profile should be set to researcher");
+        assert_eq!(
+            app.active_profile,
+            Some("researcher".to_string()),
+            "active_profile should be set to researcher"
+        );
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         let text = chunks.join("");
-        assert!(text.contains("Active profile set to"), "should confirm profile set: {text}");
-        assert!(text.contains("researcher"), "should mention profile name: {text}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        assert!(
+            text.contains("Active profile set to"),
+            "should confirm profile set: {text}"
+        );
+        assert!(
+            text.contains("researcher"),
+            "should mention profile name: {text}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 
     #[tokio::test]
@@ -3071,20 +3144,41 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (ge, _dir) = make_guard_evaluator();
         let ge = Arc::new(RwLock::new(ge));
-        handle_slash_command("/agent profile default", &mut app, &tx, &ge, &make_tool_registry()).await;
+        handle_slash_command(
+            "/agent profile default",
+            &mut app,
+            &tx,
+            &ge,
+            &make_tool_registry(),
+        )
+        .await;
 
-        assert_eq!(app.active_profile, Some("default".to_string()),
-            "active_profile should be set to default");
-        assert!(app.agent_profiles.contains_key("default"),
-            "default profile should be inserted into agent_profiles");
+        assert_eq!(
+            app.active_profile,
+            Some("default".to_string()),
+            "active_profile should be set to default"
+        );
+        assert!(
+            app.agent_profiles.contains_key("default"),
+            "default profile should be inserted into agent_profiles"
+        );
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         let text = chunks.join("");
-        assert!(text.contains("Active profile set to"), "should confirm profile set: {text}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        assert!(
+            text.contains("Active profile set to"),
+            "should confirm profile set: {text}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 
     #[tokio::test]
@@ -3093,16 +3187,31 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (ge, _dir) = make_guard_evaluator();
         let ge = Arc::new(RwLock::new(ge));
-        handle_slash_command("/agent profile nonexistent", &mut app, &tx, &ge, &make_tool_registry()).await;
+        handle_slash_command(
+            "/agent profile nonexistent",
+            &mut app,
+            &tx,
+            &ge,
+            &make_tool_registry(),
+        )
+        .await;
 
-        assert!(app.active_profile.is_none(), "active_profile should remain None");
+        assert!(
+            app.active_profile.is_none(),
+            "active_profile should remain None"
+        );
         let events = collect_events(&mut rx);
-        let errors: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::Error(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
-        assert!(errors.iter().any(|s| s.contains("Unknown profile")),
-            "should show unknown profile error: {errors:?}");
+        let errors: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::Error(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            errors.iter().any(|s| s.contains("Unknown profile")),
+            "should show unknown profile error: {errors:?}"
+        );
     }
 
     #[tokio::test]
@@ -3114,12 +3223,17 @@ mod tests {
         handle_slash_command("/agent", &mut app, &tx, &ge, &make_tool_registry()).await;
 
         let events = collect_events(&mut rx);
-        let errors: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::Error(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
-        assert!(errors.iter().any(|s| s.contains("Usage: /agent")),
-            "should show usage error: {errors:?}");
+        let errors: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::Error(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            errors.iter().any(|s| s.contains("Usage: /agent")),
+            "should show usage error: {errors:?}"
+        );
     }
 
     #[tokio::test]
@@ -3131,12 +3245,19 @@ mod tests {
         handle_slash_command("/agent xyz", &mut app, &tx, &ge, &make_tool_registry()).await;
 
         let events = collect_events(&mut rx);
-        let errors: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::Error(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
-        assert!(errors.iter().any(|s| s.contains("Unknown /agent subcommand")),
-            "should show unknown subcommand error: {errors:?}");
+        let errors: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::Error(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            errors
+                .iter()
+                .any(|s| s.contains("Unknown /agent subcommand")),
+            "should show unknown subcommand error: {errors:?}"
+        );
     }
 
     #[tokio::test]
@@ -3151,14 +3272,20 @@ mod tests {
 
         handle_slash_command("/agent profile coder", &mut app, &tx, &ge, &registry).await;
 
-        assert_eq!(app.active_profile, Some("coder".to_string()),
-            "active_profile should be set to coder");
+        assert_eq!(
+            app.active_profile,
+            Some("coder".to_string()),
+            "active_profile should be set to coder"
+        );
 
         // Verify the profile's tool access map was wired into the registry
         // by checking that dispatch consults the profile.
         // The coder profile has specific tool_access entries;
         // we verify by reading the profile's access map directly.
-        let coder_profile = app.agent_profiles.get("coder").expect("coder profile exists");
+        let coder_profile = app
+            .agent_profiles
+            .get("coder")
+            .expect("coder profile exists");
         let access_map = coder_profile.as_profile_access_map();
 
         // The handle_slash_command should have called tool_registry.set_active_profile
@@ -3166,16 +3293,27 @@ mod tests {
         // denies — if the profile was wired, it will be blocked.
         // Since we can't inspect private fields directly, we verify through behavior:
         // the access map should be non-empty for the coder profile.
-        assert!(!access_map.is_empty(),
-            "coder profile should have tool access entries");
+        assert!(
+            !access_map.is_empty(),
+            "coder profile should have tool access entries"
+        );
 
         let events = collect_events(&mut rx);
-        let chunks: Vec<&str> = events.iter().filter_map(|e| match e {
-            TuiEvent::StreamChunk(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                TuiEvent::StreamChunk(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         let text = chunks.join("");
-        assert!(text.contains("Active profile set to \"coder\""), "should confirm coder set: {text}");
-        assert!(events.iter().any(|e| matches!(e, TuiEvent::Done)), "should emit Done");
+        assert!(
+            text.contains("Active profile set to \"coder\""),
+            "should confirm coder set: {text}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, TuiEvent::Done)),
+            "should emit Done"
+        );
     }
 }

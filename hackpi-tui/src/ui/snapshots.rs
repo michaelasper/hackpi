@@ -677,8 +677,8 @@ fn snapshot_conversation_idle_80x24() {
         &term,
         MIN_W,
         MIN_H,
-        "Exit",
-        "idle 80x24: status shows exit hint",
+        "API:",
+        "idle 80x24: status shows health indicator",
     );
 
     // No resize message
@@ -770,7 +770,13 @@ fn snapshot_conversation_with_messages_80x24() {
         "Clear conversation",
         "msgs 80x24: status shows clear",
     );
-    assert_status_contains(&term, MIN_W, MIN_H, "Exit", "msgs 80x24: status shows exit");
+    assert_status_contains(
+        &term,
+        MIN_W,
+        MIN_H,
+        "API:",
+        "msgs 80x24: status shows health",
+    );
 }
 
 #[test]
@@ -1161,7 +1167,7 @@ fn snapshot_autocomplete_80x24() {
         &term,
         MIN_W,
         MIN_H,
-        "Exit",
+        "API:",
         "ac 80x24: status still visible",
     );
 }
@@ -1210,8 +1216,8 @@ fn snapshot_task_board_80x24() {
         &term,
         MIN_W,
         MIN_H,
-        "Exit",
-        "board 80x24: exit hint visible",
+        "Navigate tasks",
+        "board 80x24: shows task board shortcuts",
     );
 }
 
@@ -1899,7 +1905,7 @@ fn cor371_long_ascii_wraps_inside_composer() {
         &term,
         MIN_W,
         MIN_H,
-        "Exit",
+        "API:",
         "long ASCII input: status bar must be intact",
     );
     assert_status_contains(
@@ -1959,7 +1965,7 @@ fn cor371_cjk_wraps_inside_composer() {
         &term,
         MIN_W,
         MIN_H,
-        "Exit",
+        "API:",
         "CJK input: status bar must be intact",
     );
 }
@@ -2021,7 +2027,7 @@ fn cor371_multiline_newlines_cursor_placement() {
         &term,
         MIN_W,
         MIN_H,
-        "Exit",
+        "API:",
         "multiline input: status bar intact",
     );
 }
@@ -2084,8 +2090,8 @@ fn cor371_status_bar_never_overwritten_with_max_content() {
         &term,
         MIN_W,
         MIN_H,
-        "Exit",
-        "max content: status bar must show Exit",
+        "API:",
+        "max content: status bar must show health",
     );
     assert_status_contains(
         &term,

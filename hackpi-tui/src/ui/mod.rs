@@ -264,7 +264,8 @@ mod tests {
     use crate::app::{ConnectionHealth, Severity, UiStatus};
     use crate::events::TuiEvent;
     use crate::ui::conversation::{assistant_prefix, user_prefix};
-    use crate::ui::status::status_bar_text;
+    use crate::ui::input::truncate_to_width;
+    use crate::ui::status::activity_label;
 
     #[test]
     fn test_tab_header_shows_version_and_usage() {
@@ -478,30 +479,30 @@ mod tests {
     #[test]
     fn test_status_bar_resting_shows_bindings() {
         let app = App::new();
-        let text = status_bar_text(&app);
+        // Idle state has no activity label; shortcuts come from footer_shortcuts
+        let shortcuts = crate::ui::status::footer_shortcuts(&app);
         assert!(
-            text.contains("Interrupt generation"),
-            "status should show Interrupt generation: {text}"
+            shortcuts.contains("Interrupt generation"),
+            "status should show Interrupt generation: {shortcuts}"
         );
         assert!(
-            text.contains("Clear conversation"),
-            "status should show Clear conversation: {text}"
+            shortcuts.contains("Clear conversation"),
+            "status should show Clear conversation: {shortcuts}"
         );
-        assert!(text.contains("Exit"), "status should show Exit: {text}");
+        assert!(
+            shortcuts.contains("Exit"),
+            "status should show Exit: {shortcuts}"
+        );
     }
 
     #[test]
     fn test_status_bar_generating_shows_interrupt_hint() {
         let mut app = App::new();
         app.ui_status = UiStatus::Generating;
-        let text = status_bar_text(&app);
+        let label = activity_label(&app.ui_status, app.loading_frame, 80);
         assert!(
-            text.contains("Generating"),
-            "status should show Generating: {text}"
-        );
-        assert!(
-            text.contains("Interrupt generation"),
-            "should show interrupt hint via context bindings: {text}"
+            label.contains("Generating"),
+            "status should show Generating: {label}"
         );
     }
 
@@ -512,11 +513,14 @@ mod tests {
             message: "API timeout".into(),
             severity: Severity::Error,
         };
-        let text = status_bar_text(&app);
-        assert!(text.contains("ERR"), "status should show ERR tag: {text}");
+        let label = activity_label(&app.ui_status, app.loading_frame, 80);
         assert!(
-            text.contains("API timeout"),
-            "status should show error message: {text}"
+            label.contains("[ERR]"),
+            "status should show ERR tag: {label}"
+        );
+        assert!(
+            label.contains("API timeout"),
+            "status should show error message: {label}"
         );
     }
 
@@ -526,10 +530,10 @@ mod tests {
         app.ui_status = UiStatus::RunningTool {
             name: "bash".into(),
         };
-        let text = status_bar_text(&app);
+        let label = activity_label(&app.ui_status, app.loading_frame, 80);
         assert!(
-            text.contains("Running bash"),
-            "status should show running tool name: {text}"
+            label.contains("bash"),
+            "status should show running tool name: {label}"
         );
     }
 
@@ -537,20 +541,20 @@ mod tests {
     fn test_status_bar_loading_tasks_shows_spinner() {
         let mut app = App::new();
         app.ui_status = UiStatus::LoadingTasks;
-        let text = status_bar_text(&app);
+        let label = activity_label(&app.ui_status, app.loading_frame, 80);
         assert!(
-            text.contains("Loading tasks"),
-            "status should show loading: {text}"
+            label.contains("Loading tasks"),
+            "status should show loading: {label}"
         );
     }
 
     #[test]
     fn test_status_bar_includes_connection_indicator() {
         let app = App::new();
-        let text = status_bar_text(&app);
-        assert!(
-            text.contains("unknown"),
-            "status bar should show 'unknown' health by default, got: {text}"
+        assert_eq!(
+            app.connection_health.label(),
+            "API: unknown",
+            "default health should be 'API: unknown'"
         );
     }
 
@@ -1266,6 +1270,10 @@ mod tests {
 
     #[test]
     fn test_render_task_detail_shows_task_id_in_status() {
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
         let mut app = App::new();
         app.active_view = crate::app::AppView::TaskDetail("TSK-001".to_string());
         app.task_detail_cache = Some(hackpi_tasks::Task {
@@ -1281,14 +1289,22 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         });
-        let text = status_bar_text(&app);
+
+        terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row_start = 23 * 80;
+        let status_row: String = buffer.content[row_start..row_start + 80]
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(
-            text.contains("TSK-001"),
-            "status bar should show task ID in detail view: {text}"
+            status_row.contains("TSK-001"),
+            "status bar should show task ID in detail view, got: {status_row}"
         );
         assert!(
-            text.contains("API: unknown"),
-            "status bar should include connection indicator text: {text}"
+            status_row.contains("API: unknown"),
+            "status bar should include connection indicator, got: {status_row}"
         );
     }
 
