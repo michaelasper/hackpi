@@ -647,6 +647,7 @@ dependencies = [
  "chrono",
  "fs2",
  "hackpi-core",
+ "hackpi-guardrails",
  "serde",
  "serde_json",
  "serde_yml",

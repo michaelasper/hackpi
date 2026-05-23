@@ -11,20 +11,31 @@ use crate::types::{ContentBlock, Message, Role};
 use state::MAX_TURNS;
 
 impl Agent {
-    pub async fn run(
+    /// Run the agent loop with per-profile overrides for `max_turns` and
+    /// `system_prompt`.
+    ///
+    /// When `max_turns` is `None`, falls back to the built-in `MAX_TURNS`.
+    /// When `system_prompt` is `None`, falls back to the agent's configured
+    /// `system_prompt` field.
+    pub async fn run_with_profile(
         &self,
         user_message: &str,
         conversation: &mut Vec<Message>,
         tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         signal: tokio::sync::watch::Receiver<bool>,
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        max_turns: Option<u32>,
+        system_prompt: Option<String>,
     ) {
+        let turns = max_turns.unwrap_or(MAX_TURNS);
+        let prompt = system_prompt.unwrap_or_else(|| self.system_prompt.clone());
+
         conversation.push(Message {
             role: Role::User,
             content: vec![ContentBlock::text(user_message)],
         });
 
-        for _turn in 0..MAX_TURNS {
+        for _turn in 0..turns {
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 tx.send(AgentEvent::Done).ok();
                 return;
@@ -37,7 +48,7 @@ impl Agent {
                 .send_messages(
                     conversation,
                     &self.tools.all_schemas(),
-                    &self.system_prompt,
+                    &prompt,
                     api_tx,
                 )
                 .await;
@@ -97,6 +108,26 @@ impl Agent {
         ))
         .ok();
         tx.send(AgentEvent::Done).ok();
+    }
+
+    pub async fn run(
+        &self,
+        user_message: &str,
+        conversation: &mut Vec<Message>,
+        tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        signal: tokio::sync::watch::Receiver<bool>,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.run_with_profile(
+            user_message,
+            conversation,
+            tx,
+            signal,
+            cancelled,
+            None,
+            None,
+        )
+        .await
     }
 }
 

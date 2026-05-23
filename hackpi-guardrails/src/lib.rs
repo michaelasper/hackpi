@@ -8,7 +8,7 @@ pub mod path_guard;
 pub mod pattern;
 pub mod vcs_operation_gate;
 
-pub use evaluator::GuardEvaluator;
+pub use evaluator::{GuardEvaluator, ProfileToolAccess};
 pub use interceptor::append_to_permissions;
 
 use std::path::PathBuf;
@@ -44,6 +44,7 @@ pub enum GuardType {
     CommandGate,
     FileProtection,
     GitWriteOperation,
+    AgentProfile,
 }
 
 impl std::fmt::Display for GuardType {
@@ -53,6 +54,7 @@ impl std::fmt::Display for GuardType {
             GuardType::CommandGate => write!(f, "CommandGate"),
             GuardType::FileProtection => write!(f, "FileProtection"),
             GuardType::GitWriteOperation => write!(f, "GitWriteOperation"),
+            GuardType::AgentProfile => write!(f, "AgentProfile"),
         }
     }
 }
@@ -965,6 +967,7 @@ mod tests {
             GuardType::GitWriteOperation.to_string(),
             "GitWriteOperation"
         );
+        assert_eq!(GuardType::AgentProfile.to_string(), "AgentProfile");
     }
 
     // ── append_to_permissions Tests ──────────────────────────────────────
@@ -1270,5 +1273,321 @@ mod tests {
             .expect("should have deny array");
         assert_eq!(deny.len(), 1, "deny should have one entry");
         assert_eq!(deny[0].as_str(), Some("Write(./.env)"), "deny entry added");
+    }
+
+    // ── Profile Tool Access Integration Tests ─────────────────────────────
+
+    #[test]
+    fn profile_deny_short_circuits_before_guardrails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Deny);
+
+        let params = json!({ "command": "echo hello" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            Some("strict"),
+            Some(&access),
+        );
+        assert!(matches!(result, GuardResult::Deny(ref msg) if msg.contains("denied by agent profile")));
+    }
+
+    #[test]
+    fn profile_ask_escalates_even_when_guardrails_allow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Ask);
+
+        let params = json!({ "command": "echo hello" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            Some("cautious"),
+            Some(&access),
+        );
+        assert!(matches!(result, GuardResult::Ask(ref reason) if reason.guard == GuardType::AgentProfile));
+    }
+
+    #[test]
+    fn profile_allow_passes_through_to_guardrails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Allow);
+
+        // No guardrail rules loaded, so bash should be allowed
+        let params = json!({ "command": "echo hello" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            Some("default"),
+            Some(&access),
+        );
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn profile_none_falls_back_to_normal_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let params = json!({ "command": "echo hello" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            None,
+            None,
+        );
+        assert_eq!(result, GuardResult::Allow);
+    }
+
+    #[test]
+    fn profile_access_for_unlisted_tool_passes_through() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        // Profile only mentions "bash", but we're checking "read"
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Deny);
+
+        let inside_path = dir.path().join("test.txt");
+        std::fs::write(&inside_path, "content").expect("write test file");
+        let params = json!({ "path": inside_path.to_str().unwrap() });
+        let result = evaluator.check_tool_with_profile(
+            "read",
+            &params,
+            Some("strict"),
+            Some(&access),
+        );
+        assert_eq!(result, GuardResult::Allow, "read is not in profile deny list");
+    }
+
+    #[test]
+    fn profile_deny_wins_over_god_mode_false() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(false, paths);
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("write".to_string(), ProfileToolAccess::Deny);
+
+        let inside_path = dir.path().join("test.txt");
+        std::fs::write(&inside_path, "content").expect("write test file");
+        let params = json!({ "path": inside_path.to_str().unwrap() });
+        let result = evaluator.check_tool_with_profile(
+            "write",
+            &params,
+            Some("readonly"),
+            Some(&access),
+        );
+        assert!(matches!(result, GuardResult::Deny(_)));
+    }
+
+    #[test]
+    fn profile_check_god_mode_bypasses_everything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = GuardEvaluator::new(true, paths);
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Deny);
+
+        let params = json!({ "command": "rm -rf /" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            Some("strict"),
+            Some(&access),
+        );
+        assert_eq!(result, GuardResult::Allow, "god mode bypasses profile deny");
+    }
+
+    // ── Profile + Guardrails Interaction Edge Cases ─────────────────────
+
+    #[test]
+    fn profile_allow_guardrails_deny_results_in_deny() {
+        // Profile says Allow for bash, but command_gate denies "rm -rf".
+        // Profile Allow passes through, then guardrails deny fires.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create dir");
+        let config = json!({ "command_gate": { "patterns": { "rm -rf": "deny" } } });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .expect("write");
+        let mut evaluator = GuardEvaluator::new(false, SettingsPaths::new(dir.path()));
+        evaluator.load_rules().expect("load");
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Allow);
+
+        let params = json!({ "command": "rm -rf /" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            Some("permissive"),
+            Some(&access),
+        );
+
+        // Profile Allow passes through → guardrails command_gate denies
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("rm -rf"),
+                    "deny should come from command_gate, got: {msg}"
+                );
+            }
+            other => panic!("expected Deny from guardrails, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_deny_guardrails_deny_both_deny() {
+        // Profile says Deny for bash, command_gate also denies "rm -rf".
+        // Profile deny short-circuits first — message should say "denied by agent profile".
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create dir");
+        let config = json!({ "command_gate": { "patterns": { "rm -rf": "deny" } } });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .expect("write");
+        let mut evaluator = GuardEvaluator::new(false, SettingsPaths::new(dir.path()));
+        evaluator.load_rules().expect("load");
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Deny);
+
+        let params = json!({ "command": "rm -rf /" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            Some("strict"),
+            Some(&access),
+        );
+
+        // Profile deny short-circuits before guardrails
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("denied by agent profile"),
+                    "profile deny should win, got: {msg}"
+                );
+            }
+            other => panic!("expected Deny from profile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_ask_guardrails_deny_results_in_ask() {
+        // Profile says Ask for bash, command_gate would deny "rm -rf".
+        // Profile Ask fires before guardrails check, so result is Ask.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create dir");
+        let config = json!({ "command_gate": { "patterns": { "rm -rf": "deny" } } });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .expect("write");
+        let mut evaluator = GuardEvaluator::new(false, SettingsPaths::new(dir.path()));
+        evaluator.load_rules().expect("load");
+
+        let mut access = std::collections::HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Ask);
+
+        let params = json!({ "command": "rm -rf /" });
+        let result = evaluator.check_tool_with_profile(
+            "bash",
+            &params,
+            Some("cautious"),
+            Some(&access),
+        );
+
+        // Profile Ask fires before guardrails
+        match result {
+            GuardResult::Ask(reason) => {
+                assert_eq!(
+                    reason.guard, GuardType::AgentProfile,
+                    "ask should come from profile, got {:?}",
+                    reason.guard
+                );
+                assert!(
+                    reason.details.contains("cautious"),
+                    "ask should reference profile name, got: {}",
+                    reason.details
+                );
+            }
+            other => panic!("expected Ask from profile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_deny_with_loaded_rules_still_short_circuits() {
+        // Load full guardrails config with path_access, command_gate, file_protection.
+        // Profile denies "write". Verify profile deny short-circuits before any
+        // path guard or file protection checks fire.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create dir");
+        let config = json!({
+            "command_gate": {
+                "patterns": { "rm -rf": "deny" }
+            },
+            "permissions": {
+                "deny": ["Write(./.env)", "Write(./secrets/**)"],
+                "allow": []
+            }
+        });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .expect("write");
+        let mut evaluator = GuardEvaluator::new(false, SettingsPaths::new(dir.path()));
+        evaluator.load_rules().expect("load");
+
+        // Profile denies write — should short-circuit before file_protection checks .env
+        let mut access = std::collections::HashMap::new();
+        access.insert("write".to_string(), ProfileToolAccess::Deny);
+
+        let params = json!({ "path": ".env" });
+        let result = evaluator.check_tool_with_profile(
+            "write",
+            &params,
+            Some("readonly"),
+            Some(&access),
+        );
+
+        match result {
+            GuardResult::Deny(msg) => {
+                assert!(
+                    msg.contains("denied by agent profile"),
+                    "profile deny should short-circuit, got: {msg}"
+                );
+                // Must NOT contain guardrails-level deny language
+                assert!(
+                    !msg.contains("file_protection") && !msg.contains("path_guard"),
+                    "should not mention guardrails components: {msg}"
+                );
+            }
+            other => panic!("expected Deny from profile short-circuit, got {other:?}"),
+        }
     }
 }

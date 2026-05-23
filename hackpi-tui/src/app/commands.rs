@@ -77,6 +77,14 @@ pub const SLASH_COMMANDS: &[CommandInfo] = &[
         name: "/export",
         description: "Export conversation to text file",
     },
+    CommandInfo {
+        name: "/agent profile",
+        description: "Set or show the active agent profile",
+    },
+    CommandInfo {
+        name: "/agent profiles",
+        description: "List available agent profiles",
+    },
 ];
 
 /// Generate the `/help` output text from the canonical SLASH_COMMANDS source.
@@ -412,6 +420,92 @@ Export complete:
                 }
             }
             CommandOutcome::Handled
+        }
+        "/agent" => {
+            // `/agent <subcommand>` dispatch — `command` is "/agent" (first token),
+            // `parts[1]` contains the subcommand + args.
+            let agent_input = parts.get(1).copied().unwrap_or("").trim();
+            let agent_parts: Vec<&str> = agent_input.splitn(2, char::is_whitespace).collect();
+            let subcmd = agent_parts[0];
+
+            match subcmd {
+                "profiles" => {
+                    if app.agent_profiles.is_empty() {
+                        tui_tx.send(TuiEvent::StreamChunk("No agent profiles loaded. Create .hackpi/agents/*.yaml files.".to_string())).ok();
+                    } else {
+                        let mut lines = String::from("Available agent profiles:\n");
+                        let mut names: Vec<&str> = app.agent_profiles.keys().map(|s| s.as_str()).collect();
+                        names.sort();
+                        for name in names {
+                            let p = &app.agent_profiles[name];
+                            let states = p.transitions.display_states();
+                            lines.push_str(&format!("  {name:<12} — {} (states: {states}, max_turns: {})\n", p.description, p.max_turns));
+                        }
+                        tui_tx.send(TuiEvent::StreamChunk(lines)).ok();
+                    }
+                    tui_tx.send(TuiEvent::Done).ok();
+                    CommandOutcome::Handled
+                }
+                "profile" => {
+                    let profile_name = agent_parts.get(1).copied().unwrap_or("").trim();
+                    if profile_name.is_empty() {
+                        // Show current profile
+                        match &app.active_profile {
+                            Some(name) => {
+                                if let Some(p) = app.agent_profiles.get(name) {
+                                    let states = p.transitions.display_states();
+                                    let msg = format!("Active profile: \"{name}\" (states: {states}, max_turns: {})", p.max_turns);
+                                    tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
+                                } else {
+                                    let msg = format!("Active profile \"{name}\" is no longer available.");
+                                    tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
+                                }
+                            }
+                            None => {
+                                tui_tx.send(TuiEvent::StreamChunk("No profile set. Default profile will be used.".to_string())).ok();
+                            }
+                        }
+                    } else {
+                        // Set profile
+                        if profile_name == "default" || app.agent_profiles.contains_key(profile_name) {
+                            let profile = app.agent_profiles.get(profile_name).cloned().unwrap_or_else(hackpi_tasks::AgentProfile::default_profile);
+                            if !app.agent_profiles.contains_key(profile_name) && profile_name == "default" {
+                                app.agent_profiles.insert("default".to_string(), profile.clone());
+                            }
+                            let states = profile.transitions.display_states();
+                            app.active_profile = Some(profile_name.to_string());
+
+                            // Wire the profile's tool access into the guard evaluator
+                            // so dispatch() applies profile-level Deny/Ask rules.
+                            tool_registry.set_active_profile(
+                                Some(profile_name.to_string()),
+                                Some(profile.as_profile_access_map()),
+                            );
+
+                            let msg = format!("Active profile set to \"{profile_name}\" (states: {states}, max_turns: {})", profile.max_turns);
+                            tui_tx.send(TuiEvent::StreamChunk(msg)).ok();
+                        } else {
+                            let mut available: Vec<&str> = app.agent_profiles.keys().map(|s| s.as_str()).collect();
+                            available.sort();
+                            let available = if available.is_empty() { "(none loaded)".to_string() } else { available.join(", ") };
+                            let err = format!("Unknown profile \"{profile_name}\". Available: {available}");
+                            tui_tx.send(TuiEvent::Error(err)).ok();
+                        }
+                    }
+                    tui_tx.send(TuiEvent::Done).ok();
+                    CommandOutcome::Handled
+                }
+                "" => {
+                    let err = "Usage: /agent <profile|profiles>. Type /help for available commands.";
+                    tui_tx.send(TuiEvent::Error(err.to_string())).ok();
+                    CommandOutcome::Handled
+                }
+                _ => {
+                    let err = format!("Unknown /agent subcommand: {subcmd}. Use /agent profile <name> or /agent profiles.");
+                    tui_tx.send(TuiEvent::Error(err)).ok();
+                    CommandOutcome::Handled
+                }
+            }
         }
         _ => {
             let err = format!("Unknown command: {command}. Type /help for available commands.");

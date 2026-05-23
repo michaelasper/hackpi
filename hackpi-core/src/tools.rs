@@ -1,6 +1,6 @@
 use crate::types::ToolSchema;
 use async_trait::async_trait;
-use hackpi_guardrails::{GuardEvaluator, GuardReason, GuardResult, PermissionDecision};
+use hackpi_guardrails::{GuardEvaluator, GuardReason, GuardResult, PermissionDecision, ProfileToolAccess};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,6 +68,11 @@ pub struct ToolRegistry {
     guard_evaluator: Option<Arc<RwLock<GuardEvaluator>>>,
     permission_tx: Option<mpsc::UnboundedSender<PermissionRequest>>,
     permission_timeout: Duration,
+    /// Active agent profile name for guard evaluation (interior mutability
+    /// so callers sharing an `Arc<ToolRegistry>` can update the profile).
+    active_profile_name: RwLock<Option<String>>,
+    /// Active agent profile tool access map for guard evaluation.
+    active_profile_access: RwLock<Option<HashMap<String, ProfileToolAccess>>>,
 }
 
 impl Default for ToolRegistry {
@@ -83,6 +88,8 @@ impl ToolRegistry {
             guard_evaluator: None,
             permission_tx: None,
             permission_timeout: Duration::from_secs(120),
+            active_profile_name: RwLock::new(None),
+            active_profile_access: RwLock::new(None),
         }
     }
 
@@ -97,6 +104,20 @@ impl ToolRegistry {
 
     pub fn set_permission_tx(&mut self, tx: mpsc::UnboundedSender<PermissionRequest>) {
         self.permission_tx = Some(tx);
+    }
+
+    /// Set the active agent profile for guard evaluation.
+    ///
+    /// When set, `dispatch` uses `check_tool_with_profile` instead of
+    /// `check_tool`, applying profile-level Deny/Ask rules before normal
+    /// guardrail checks.
+    pub fn set_active_profile(
+        &self,
+        name: Option<String>,
+        access: Option<HashMap<String, ProfileToolAccess>>,
+    ) {
+        *self.active_profile_name.write().unwrap() = name;
+        *self.active_profile_access.write().unwrap() = access;
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
@@ -129,7 +150,17 @@ impl ToolRegistry {
         if let Some(evaluator) = &self.guard_evaluator {
             let result = {
                 let guard = evaluator.read().unwrap();
-                guard.check_tool(name, &params)
+                let profile_name = self.active_profile_name.read().unwrap();
+                let profile_access = self.active_profile_access.read().unwrap();
+                match (
+                    profile_name.as_deref(),
+                    profile_access.as_ref(),
+                ) {
+                    (Some(profile), Some(access)) => {
+                        guard.check_tool_with_profile(name, &params, Some(profile), Some(access))
+                    }
+                    _ => guard.check_tool(name, &params),
+                }
             }; // guard dropped here, before any await points
 
             match result {
@@ -550,5 +581,171 @@ mod tests {
             matches!(result, Some(ToolResult::Cancelled)),
             "Expected Cancelled after mid-wait cancellation, got: {result:?}"
         );
+    }
+
+    // ── set_active_profile + dispatch integration tests ─────────────────
+
+    #[tokio::test]
+    async fn test_dispatch_with_profile_deny_blocks_tool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = Arc::new(RwLock::new(GuardEvaluator::new(false, paths)));
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+
+        // Set profile that denies "bash"
+        let mut access = HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Deny);
+        registry.set_active_profile(Some("strict".to_string()), Some(access));
+
+        let result = registry
+            .dispatch("bash", json!({"command": "rm -rf /"}), &test_ctx())
+            .await;
+
+        match result {
+            Some(ToolResult::SystemError { message }) => {
+                assert!(
+                    message.contains("denied by agent profile"),
+                    "Expected profile deny message, got: {message}"
+                );
+            }
+            other => panic!("Expected SystemError from profile deny, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_profile_ask_prompts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = Arc::new(RwLock::new(GuardEvaluator::new(false, paths)));
+
+        let (perm_tx, mut perm_rx): (mpsc::UnboundedSender<PermissionRequest>, _) =
+            mpsc::unbounded_channel();
+
+        // Spawn a task that receives the permission request and responds AllowOnce
+        tokio::spawn(async move {
+            if let Some((_id, _reason, resp_tx)) = perm_rx.recv().await {
+                let _ = resp_tx.send(PermissionDecision::AllowOnce);
+            }
+        });
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+        registry.set_permission_tx(perm_tx);
+
+        // Set profile that asks for "echo"
+        let mut access = HashMap::new();
+        access.insert("echo".to_string(), ProfileToolAccess::Ask);
+        registry.set_active_profile(Some("cautious".to_string()), Some(access));
+
+        let result = registry.dispatch("echo", json!({}), &test_ctx()).await;
+
+        assert!(
+            matches!(result, Some(ToolResult::Success { .. })),
+            "Expected Success after AllowOnce for profile Ask, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_profile_allow_passes_through() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = Arc::new(RwLock::new(GuardEvaluator::new(false, paths)));
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+
+        // Set profile that allows "echo" — no guardrail rules loaded → Allow
+        let mut access = HashMap::new();
+        access.insert("echo".to_string(), ProfileToolAccess::Allow);
+        registry.set_active_profile(Some("permissive".to_string()), Some(access));
+
+        let result = registry.dispatch("echo", json!({}), &test_ctx()).await;
+
+        assert!(
+            matches!(result, Some(ToolResult::Success { .. })),
+            "Expected Success with profile Allow, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_clears_profile_when_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = SettingsPaths::new(dir.path());
+        let evaluator = Arc::new(RwLock::new(GuardEvaluator::new(false, paths)));
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+
+        // Set profile that denies "echo"
+        let mut access = HashMap::new();
+        access.insert("echo".to_string(), ProfileToolAccess::Deny);
+        registry.set_active_profile(Some("strict".to_string()), Some(access));
+
+        // Verify deny is active
+        let result = registry.dispatch("echo", json!({}), &test_ctx()).await;
+        assert!(
+            matches!(result, Some(ToolResult::SystemError { .. })),
+            "Expected deny before clear, got: {result:?}"
+        );
+
+        // Clear the profile
+        registry.set_active_profile(None, None);
+
+        // Now dispatch should succeed — no profile rules, no guardrails
+        let result = registry.dispatch("echo", json!({}), &test_ctx()).await;
+        assert!(
+            matches!(result, Some(ToolResult::Success { .. })),
+            "Expected Success after clearing profile, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_profile_deny_overrides_guardrail_allow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Create guardrails config that allows bash via permissions.allow
+        let hackpi_dir = dir.path().join(".hackpi");
+        std::fs::create_dir_all(&hackpi_dir).expect("create .hackpi dir");
+        let guardrails_config = json!({
+            "permissions": {
+                "allow": ["Bash(echo hello)"]
+            }
+        });
+        std::fs::write(
+            hackpi_dir.join("guardrails.json"),
+            serde_json::to_string_pretty(&guardrails_config).unwrap(),
+        )
+        .expect("write guardrails config");
+
+        let paths = SettingsPaths::new(dir.path());
+        let mut evaluator = GuardEvaluator::new(false, paths);
+        evaluator.load_rules().expect("load rules");
+        let evaluator = Arc::new(RwLock::new(evaluator));
+
+        let mut registry = make_registry();
+        registry.set_guard_evaluator(evaluator);
+
+        // Set profile that denies "bash" — overrides guardrail allow
+        let mut access = HashMap::new();
+        access.insert("bash".to_string(), ProfileToolAccess::Deny);
+        registry.set_active_profile(Some("strict".to_string()), Some(access));
+
+        let result = registry
+            .dispatch("bash", json!({"command": "echo hello"}), &test_ctx())
+            .await;
+
+        match result {
+            Some(ToolResult::SystemError { message }) => {
+                assert!(
+                    message.contains("denied by agent profile"),
+                    "Expected profile deny to override guardrail allow, got: {message}"
+                );
+            }
+            other => panic!(
+                "Expected SystemError from profile deny overriding guardrail, got: {other:?}"
+            ),
+        }
     }
 }

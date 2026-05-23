@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::events::TuiEvent;
@@ -180,4 +181,8 @@ pub struct App {
     pub input_cursor: usize,
     /// Whether the contextual help overlay is visible (? key).
     pub help_visible: bool,
+    /// Currently active agent profile name (set via /agent profile <name>).
+    pub active_profile: Option<String>,
+    /// Loaded agent profiles from .hackpi/agents/.
+    pub agent_profiles: HashMap<String, hackpi_tasks::AgentProfile>,
 }

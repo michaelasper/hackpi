@@ -1,7 +1,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{FileOp, GuardResult, PermissionDecision, PermissionRule, SettingsPaths};
+use crate::{FileOp, GuardReason, GuardResult, GuardType, PermissionDecision, PermissionRule, SettingsPaths};
+
+// ── Profile Tool Access ────────────────────────────────────────────────────
+
+/// Per-tool access rule that an agent profile can specify.
+///
+/// This is defined in the guardrails crate (rather than in hackpi-tasks)
+/// to avoid circular dependencies. The tasks crate provides a `From` impl
+/// to convert its own `ToolAccess` enum into this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileToolAccess {
+    Allow,
+    Deny,
+    Ask,
+}
 
 /// The main guard evaluation engine.
 ///
@@ -64,6 +79,55 @@ impl GuardEvaluator {
                 serde_json::to_string(params).unwrap_or_default()
             )
         }
+    }
+
+    /// Check whether a tool call is allowed, with optional profile-based
+    /// tool access rules prepended before normal guardrail evaluation.
+    ///
+    /// Profile rules are additive:
+    /// - Profile `Deny` always short-circuits (wins over guardrails).
+    /// - Profile `Ask` escalates to a prompt (guardrails can still deny later).
+    /// - Profile `Allow` passes through to normal guardrail checks.
+    ///
+    /// When `profile_access` is `None`, behaves identically to `check_tool`.
+    pub fn check_tool_with_profile(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+        profile_name: Option<&str>,
+        profile_access: Option<&HashMap<String, ProfileToolAccess>>,
+    ) -> GuardResult {
+        if self.god_mode {
+            return GuardResult::Allow;
+        }
+
+        // Profile tool access check (prepended before all other guards)
+        if let (Some(access_map), Some(name)) = (profile_access, profile_name) {
+            if let Some(access) = access_map.get(tool_name) {
+                match access {
+                    ProfileToolAccess::Deny => {
+                        return GuardResult::Deny(format!(
+                            "Tool '{tool_name}' denied by agent profile '{name}'"
+                        ));
+                    }
+                    ProfileToolAccess::Ask => {
+                        return GuardResult::Ask(GuardReason {
+                            guard: GuardType::AgentProfile,
+                            tool: tool_name.to_string(),
+                            details: format!(
+                                "Profile '{name}' requires confirmation for '{tool_name}'"
+                            ),
+                        });
+                    }
+                    ProfileToolAccess::Allow => {
+                        // Allow passes through to normal guardrail checks
+                    }
+                }
+            }
+        }
+
+        // Fall through to normal guard checks
+        self.check_tool(tool_name, params)
     }
 
     /// Check whether a tool call is allowed.

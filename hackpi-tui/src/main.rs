@@ -103,6 +103,21 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+    // Load agent profiles from .hackpi/agents/ directory.
+    // Start with built-in profiles, then merge disk profiles (disk wins on overlap).
+    let agents_dir = workspace_root.join(".hackpi").join("agents");
+    let mut all_profiles = hackpi_tasks::AgentProfile::built_in_profiles();
+    match hackpi_tasks::AgentProfile::load_from_dir(&agents_dir).await {
+        Ok(disk_profiles) => {
+            all_profiles.extend(disk_profiles);
+            tracing::info!("Loaded {} agent profiles", all_profiles.len());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load agent profiles: {e}. Using built-in profiles.");
+        }
+    }
+    app.agent_profiles = all_profiles;
+
     let tools = Arc::new(tool_registry);
 
     // TODO: Spawn hot reload thread in a future phase.
