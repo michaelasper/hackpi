@@ -893,6 +893,182 @@ fn snapshot_tool_command_error_120x40() {
     assert_buffer_contains(&term, "mismatched types", "cmd err 120x40: error content");
 }
 
+// ── Snapshot: Tool card long content wrapping ──────────────────────────────
+
+fn tool_long_json_app() -> App {
+    let mut app = App::new();
+    app.handle_event(TuiEvent::Submit("Fetch the API response.".into()));
+    app.handle_event(TuiEvent::ToolCall {
+        id: "tc1".into(),
+        name: "read".into(),
+        input: Some(serde_json::json!({"path": "data.json"})),
+    });
+    app.handle_event(TuiEvent::ToolResult {
+        id: "tc1".into(),
+        result: ToolResult::Success {
+            content: serde_json::to_string_pretty(&serde_json::json!({
+                "repository": "hackpi",
+                "url": "https://github.com/example/hackpi/tree/main/src/components/very/deeply/nested/module",
+                "description": "A very long JSON field value that exceeds the typical terminal width of 80 characters and should wrap onto the next line",
+                "metadata": {
+                    "key1": "value1",
+                    "key2": "value2",
+                    "nested": {
+                        "deeply": "this is a deeply nested value that makes the line extremely long when serialized into pretty-printed JSON output"
+                    }
+                }
+            }))
+            .unwrap_or_default(),
+        },
+    });
+    app.handle_event(TuiEvent::Done);
+    app
+}
+
+fn tool_long_path_app() -> App {
+    let mut app = App::new();
+    app.handle_event(TuiEvent::Submit("Read the config file.".into()));
+    app.handle_event(TuiEvent::ToolCall {
+        id: "tc1".into(),
+        name: "read".into(),
+        input: Some(serde_json::json!({"path": "config.yml"})),
+    });
+    app.handle_event(TuiEvent::ToolResult {
+        id: "tc1".into(),
+        result: ToolResult::Success {
+            content: "/Users/developer/projects/hackpi/.worktrees/feature-branch/src/components/very/deeply/nested/directory/structure/config.yml".into(),
+        },
+    });
+    app.handle_event(TuiEvent::Done);
+    app
+}
+
+fn tool_hashline_app() -> App {
+    let mut app = App::new();
+    app.handle_event(TuiEvent::Submit("Search for patterns.".into()));
+    app.handle_event(TuiEvent::ToolCall {
+        id: "tc1".into(),
+        name: "search".into(),
+        input: Some(serde_json::json!({"pattern": "fn main"})),
+    });
+    app.handle_event(TuiEvent::ToolResult {
+        id: "tc1".into(),
+        result: ToolResult::Success {
+            content: "src/main.rs:10:5: fn main() -> Result<(), Box<dyn std::error::Error>> {\nsrc/lib.rs:42:1: fn main() {\ntests/integration_test.rs:150:10: fn main() -> Result<(), anyhow::Error> {\n  |\n10 |     let result = some_function_call(with, many, arguments);\n  |         ^^^^^^ this is a very long diagnostic line that will absolutely overflow the 80 column terminal width".into(),
+        },
+    });
+    app.handle_event(TuiEvent::Done);
+    app
+}
+
+#[test]
+fn snapshot_tool_long_json_80x24() {
+    let app = tool_long_json_app();
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // Tool call name visible
+    assert_buffer_contains(&term, "read", "long json 80x24: tool name");
+    // Success indicator
+    assert_buffer_contains(&term, "✓", "long json 80x24: success checkmark");
+    // Long JSON content that wraps: verify start and end of wrapped content
+    assert_buffer_contains(
+        &term,
+        "deeply nested",
+        "long json 80x24: wrapped content visible",
+    );
+    // Make sure the bottom border is present and intact
+    assert_buffer_contains(&term, "└", "long json 80x24: bottom border present");
+    assert_buffer_contains(&term, "┘", "long json 80x24: bottom border corner present");
+}
+
+#[test]
+fn snapshot_tool_long_path_80x24() {
+    let app = tool_long_path_app();
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // Long path wrapped: both start and end of path visible
+    assert_buffer_contains(
+        &term,
+        "/Users/developer",
+        "long path 80x24: path start visible",
+    );
+    assert_buffer_contains(
+        &term,
+        "config.yml",
+        "long path 80x24: path filename visible",
+    );
+    // Bottom border intact
+    assert_buffer_contains(&term, "└───", "long path 80x24: bottom border");
+}
+
+#[test]
+fn snapshot_tool_hashline_wrapping_80x24() {
+    let app = tool_hashline_app();
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // Hashline source references visible
+    assert_buffer_contains(&term, "src/main.rs", "hashline 80x24: source line visible");
+    // Long diagnostic line should wrap (check for overflow content)
+    assert_buffer_contains(
+        &term,
+        "some_function_call",
+        "hashline 80x24: long line content visible after wrapping",
+    );
+    assert_buffer_contains(
+        &term,
+        "terminal width",
+        "hashline 80x24: long line tail visible after wrapping",
+    );
+    // Bottom border intact
+    assert_buffer_contains(&term, "└───", "hashline 80x24: bottom border");
+}
+
+#[test]
+fn snapshot_tool_system_error_long_80x24() {
+    let mut app = App::new();
+    app.handle_event(TuiEvent::Submit("Run risky operation.".into()));
+    app.handle_event(TuiEvent::ToolCall {
+        id: "tc1".into(),
+        name: "bash".into(),
+        input: Some(serde_json::json!({"command": "deploy"})),
+    });
+    app.handle_event(TuiEvent::ToolResult {
+        id: "tc1".into(),
+        result: ToolResult::SystemError {
+            message: "FATAL: The deployment script encountered an unrecoverable error \
+                      while attempting to synchronize the remote state with the local \
+                      configuration. This typically indicates a network partition or a \
+                      stale lock file from a previous interrupted operation."
+                .into(),
+        },
+    });
+    app.handle_event(TuiEvent::Done);
+    let term = render_app(&app, MIN_W, MIN_H);
+
+    // Error status visible
+    assert_buffer_contains(&term, "bash", "sys err 80x24: tool name");
+    // Long error message wrapped (across multiple display lines)
+    assert_buffer_contains(
+        &term,
+        "unrecoverable error",
+        "sys err 80x24: error message start visible",
+    );
+    // The long message wraps across lines; check fragments that appear on
+    // individual buffer rows rather than the full unwrapped phrase.
+    assert_buffer_contains(
+        &term,
+        "previous interrupt",
+        "sys err 80x24: wrapped error middle visible",
+    );
+    assert_buffer_contains(
+        &term,
+        "ed operation",
+        "sys err 80x24: wrapped error tail visible",
+    );
+    // Bottom border intact
+    assert_buffer_contains(&term, "└───", "sys err 80x24: bottom border");
+}
+
 // ── Snapshot: Permission modal ─────────────────────────────────────────────
 
 #[test]
