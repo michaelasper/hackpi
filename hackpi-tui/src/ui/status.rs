@@ -102,13 +102,6 @@ fn build_shortcuts_impl(app: &App, max_width: usize) -> String {
 /// normal key-context-derived bindings.
 fn view_shortcuts(app: &App) -> Option<String> {
     match &app.active_view {
-        AppView::TaskDetail(_) => {
-            let mut parts = vec!["[Up/Down] Navigate fields".to_string()];
-            if let Some(task) = &app.task_detail_cache {
-                parts.push(format!("Task: {}", task.id));
-            }
-            Some(parts.join(REGION_SEP))
-        }
         AppView::TaskBoard => Some(format!(
             "[Up/Down] Navigate tasks{REGION_SEP}[Enter] View detail{REGION_SEP}[n] Create task"
         )),
