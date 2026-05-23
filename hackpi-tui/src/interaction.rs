@@ -17,6 +17,8 @@ pub enum FocusTarget {
     TaskBoard,
     /// Task detail field navigation.
     TaskDetail,
+    /// Task dependency graph navigation.
+    TaskGraph,
 }
 
 /// Transient overlay that traps focus.
@@ -48,6 +50,8 @@ pub enum KeyContext {
     TaskBoard,
     /// Task detail view is focused (up/down to navigate fields).
     TaskDetail,
+    /// Task dependency graph is focused (up/down to navigate tasks, Esc to go back).
+    TaskGraph,
     /// Slash-command autocomplete popover is open.
     SlashCommandPalette,
     /// Permission prompt modal is open.
@@ -179,6 +183,25 @@ pub const KEY_BINDINGS: &[KeyBinding] = &[
         action: "Go back",
         footer: true,
     },
+    // ── TaskGraph ──────────────────────────────────────────────────────
+    KeyBinding {
+        context: KeyContext::TaskGraph,
+        key: "Up/Down",
+        action: "Navigate tasks",
+        footer: true,
+    },
+    KeyBinding {
+        context: KeyContext::TaskGraph,
+        key: "Enter",
+        action: "View task detail",
+        footer: true,
+    },
+    KeyBinding {
+        context: KeyContext::TaskGraph,
+        key: "Esc",
+        action: "Go back",
+        footer: true,
+    },
     // ── HelpOverlay ─────────────────────────────────────────────────────
     KeyBinding {
         context: KeyContext::HelpOverlay,
@@ -295,6 +318,7 @@ pub fn app_key_context(app: &App) -> KeyContext {
         FocusTarget::ConversationScrollback => KeyContext::Conversation,
         FocusTarget::TaskBoard => KeyContext::TaskBoard,
         FocusTarget::TaskDetail => KeyContext::TaskDetail,
+        FocusTarget::TaskGraph => KeyContext::TaskGraph,
     }
 }
 
@@ -314,7 +338,7 @@ pub fn focus_target(app: &App) -> FocusTarget {
         }
         crate::app::AppView::TaskBoard => FocusTarget::TaskBoard,
         crate::app::AppView::TaskDetail(_) => FocusTarget::TaskDetail,
-        crate::app::AppView::TaskGraph => FocusTarget::ConversationInput,
+        crate::app::AppView::TaskGraph => FocusTarget::TaskGraph,
         crate::app::AppView::Diagnostics => FocusTarget::ConversationScrollback,
     }
 }
@@ -400,13 +424,13 @@ mod tests {
     }
 
     #[test]
-    fn test_focus_target_task_graph_falls_back_to_input() {
+    fn test_focus_target_task_graph_is_task_graph() {
         let mut app = App::new();
         app.active_view = AppView::TaskGraph;
         assert_eq!(
             focus_target(&app),
-            FocusTarget::ConversationInput,
-            "graph placeholder should fall back to input focus"
+            FocusTarget::TaskGraph,
+            "graph view should focus TaskGraph"
         );
     }
 
@@ -630,6 +654,79 @@ mod tests {
         assert!(
             keys.contains(&"Esc"),
             "HelpOverlay bindings should include Esc: {keys:?}"
+        );
+    }
+
+    // ── TaskGraph context tests ────────────────────────────────────────
+
+    #[test]
+    fn test_app_key_context_task_graph() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskGraph;
+        assert_eq!(
+            app_key_context(&app),
+            KeyContext::TaskGraph,
+            "task graph view should use TaskGraph context"
+        );
+    }
+
+    #[test]
+    fn test_footer_bindings_task_graph_includes_graph_keys() {
+        let bindings = footer_bindings(KeyContext::TaskGraph);
+        let keys: Vec<&str> = bindings.iter().map(|b| b.key).collect();
+        assert!(
+            keys.contains(&"Up/Down"),
+            "Up/Down should be in task graph footer: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"Enter"),
+            "Enter should be in task graph footer: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"Esc"),
+            "Esc should be in task graph footer: {keys:?}"
+        );
+        // Should also include global bindings
+        assert!(
+            keys.contains(&"Ctrl+C"),
+            "global Ctrl+C should be in task graph footer: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn test_help_bindings_task_graph_includes_all() {
+        let bindings = help_bindings(KeyContext::TaskGraph);
+        let keys: Vec<&str> = bindings.iter().map(|b| b.key).collect();
+        assert!(
+            keys.contains(&"Up/Down"),
+            "should include graph Up/Down: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"Enter"),
+            "should include graph Enter: {keys:?}"
+        );
+        assert!(keys.contains(&"Esc"), "should include graph Esc: {keys:?}");
+        assert!(
+            keys.contains(&"Ctrl+L"),
+            "should include global Ctrl+L: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"?"),
+            "should include global '?' binding: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn test_footer_bindings_task_graph_excludes_composer() {
+        let bindings = footer_bindings(KeyContext::TaskGraph);
+        let actions: Vec<&str> = bindings.iter().map(|b| b.action).collect();
+        assert!(
+            !actions.contains(&"Submit message"),
+            "task graph footer should not include composer 'Submit message': {actions:?}"
+        );
+        assert!(
+            !actions.contains(&"Clear input"),
+            "task graph footer should not include composer 'Clear input': {actions:?}"
         );
     }
 }

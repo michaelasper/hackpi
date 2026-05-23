@@ -364,12 +364,30 @@ pub(crate) fn render_task_graph(frame: &mut Frame, area: Rect, app: &App, theme:
         }
     } else if app.task_list_cache.is_empty() {
         lines.push(Line::from(Span::styled(
-            " No tasks loaded. Create or refresh tasks to view dependencies.",
+            " No tasks loaded yet.",
+            theme.fg_muted,
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Press Tab to go to Tasks, then 'n' to create one.",
+            theme.fg_muted,
+        )));
+        lines.push(Line::from(Span::styled(
+            " Or type /task create <title> in the conversation.",
             theme.fg_muted,
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            " Select a task from the task board to view its dependencies.",
+            " No task selected.",
+            theme.fg_muted,
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Use Up/Down to select a task, then Enter to view dependencies.",
+            theme.fg_muted,
+        )));
+        lines.push(Line::from(Span::styled(
+            " Press Tab to switch to the task board.",
             theme.fg_muted,
         )));
     }

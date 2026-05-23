@@ -105,7 +105,6 @@ fn view_shortcuts(app: &App) -> Option<String> {
         AppView::TaskBoard => Some(format!(
             "[Up/Down] Navigate tasks{REGION_SEP}[Enter] View detail{REGION_SEP}[n] Create task"
         )),
-        AppView::TaskGraph => Some(format!("[Esc] Back{REGION_SEP}[Ctrl+C] Interrupt")),
         AppView::Diagnostics => Some(format!("[Esc] Back{REGION_SEP}[Ctrl+L] Clear")),
         _ => None,
     }
@@ -490,5 +489,44 @@ mod tests {
         let row = render_status_row(&app, 80, 24);
         assert!(!row.contains('\n'));
         assert!(row.contains("API: unknown"));
+    }
+
+    #[test]
+    fn test_task_graph_footer_no_composer_hints() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskGraph;
+        let row = render_status_row(&app, 120, 40);
+        // Should show graph-relevant shortcuts, not composer hints
+        assert!(
+            !row.contains("Submit message"),
+            "graph footer should not show composer 'Submit message': {row}"
+        );
+        assert!(
+            !row.contains("Clear input"),
+            "graph footer should not show composer 'Clear input': {row}"
+        );
+    }
+
+    #[test]
+    fn test_task_graph_footer_shows_graph_bindings() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskGraph;
+        let row = render_status_row(&app, 120, 40);
+        // Should show graph-specific navigation shortcuts
+        assert!(
+            row.contains("Navigate tasks") || row.contains("Up/Down"),
+            "graph footer should show navigation hint: {row}"
+        );
+    }
+
+    #[test]
+    fn test_task_graph_footer_includes_global() {
+        let mut app = App::new();
+        app.active_view = AppView::TaskGraph;
+        let row = render_status_row(&app, 120, 40);
+        assert!(
+            row.contains("Interrupt generation"),
+            "graph footer should include global Ctrl+C: {row}"
+        );
     }
 }
