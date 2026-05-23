@@ -7,6 +7,68 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
+
+/// Canonical ordering for task states in the board.
+/// States not in this list sort last, preserving their string order.
+const STATE_ORDER: &[&str] = &[
+    "backlog",
+    "todo",
+    "in_progress",
+    "in_review",
+    "staged",
+    "ready",
+    "blocked",
+    "done",
+    "cancelled",
+];
+
+/// Return the sort rank for a task state key.
+/// Known states get their index; unknown states sort after all known ones.
+fn state_rank(state: &str) -> usize {
+    STATE_ORDER
+        .iter()
+        .position(|&s| s == state)
+        .unwrap_or(STATE_ORDER.len())
+}
+
+/// Truncate a string to fit within `max_display_width` terminal columns,
+/// appending "…" if truncated. Measures by display width (CJK-aware).
+fn truncate_to_display_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut width = 0;
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + cw > max_width {
+            break;
+        }
+        width += cw;
+        end = i + c.len_utf8();
+    }
+    if end < s.len() {
+        // Need to truncate — try to fit ellipsis (width 1)
+        let ellipsis_width = 1;
+        let mut trunc_end = end;
+        let mut trunc_width = width;
+        while trunc_width + ellipsis_width > max_width && trunc_end > 0 {
+            let prev = s[..trunc_end]
+                .char_indices()
+                .next_back()
+                .map(|(i, c)| (i, c.len_utf8()))
+                .unwrap();
+            let cw = unicode_width::UnicodeWidthChar::width(s[prev.0..].chars().next().unwrap())
+                .unwrap_or(0);
+            trunc_end = prev.0;
+            trunc_width -= cw;
+        }
+        format!("{}…", &s[..trunc_end])
+    } else {
+        s.to_string()
+    }
+}
 
 /// Format a DateTime<Utc> as a local time string (YYYY-MM-DD HH:MM).
 pub(crate) fn format_timestamp(dt: &chrono::DateTime<chrono::Utc>) -> String {
@@ -14,7 +76,7 @@ pub(crate) fn format_timestamp(dt: &chrono::DateTime<chrono::Utc>) -> String {
     local.format("%Y-%m-%d %H:%M").to_string()
 }
 
-/// Render the task board list view, grouped by state with counts.
+/// Render the task board list view, grouped by state in canonical order.
 pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut items: Vec<ListItem> = Vec::new();
 
@@ -32,22 +94,36 @@ pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme:
         return;
     }
 
-    // Build state groups preserving the original task order.
+    // Sort tasks by canonical state order, then by original position.
+    // Build an index-orderable list: (sort_key, original_idx, &Task)
+    let mut indexed_tasks: Vec<(usize, usize, &hackpi_tasks::Task)> = app
+        .task_list_cache
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (state_rank(&t.state), i, t))
+        .collect();
+    indexed_tasks.sort_by_key(|(rank, idx, _)| (*rank, *idx));
+
+    // Build state groups from the sorted list.
     // Each group is (state_key, [(task_index, &Task)]).
     let mut groups: Vec<(String, Vec<(usize, &hackpi_tasks::Task)>)> = Vec::new();
-    for (i, task) in app.task_list_cache.iter().enumerate() {
+    for (_rank, original_idx, task) in &indexed_tasks {
         let state_key = &task.state;
         if let Some(last) = groups.last_mut() {
             if last.0 == *state_key {
-                last.1.push((i, task));
+                last.1.push((*original_idx, *task));
                 continue;
             }
         }
-        groups.push((state_key.clone(), vec![(i, task)]));
+        groups.push((state_key.clone(), vec![(*original_idx, *task)]));
     }
 
-    // Compute available width for header filler
-    let area_width = area.width.saturating_sub(2) as usize;
+    // Compute available width for header filler and row truncation
+    let area_width = area.width as usize;
+
+    // Fixed-width prefix per row: "  " (cursor) + ID + " " + "[State] " + " "
+    // We compute the actual prefix width per task to truncate the title.
+    // Minimum budget for title: we always show cursor + ID + badge, truncate title.
 
     // Render each group
     for (group_idx, (state_key, group_tasks)) in groups.iter().enumerate() {
@@ -73,6 +149,20 @@ pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme:
             let state_style = task_state_style(&task.state, theme);
             let cursor = if is_selected { "▸ " } else { "  " };
 
+            // Compute the fixed prefix width: cursor + ID + space + [badge] + space
+            let state_label = format_task_state(&task.state);
+            let id_text = format!("{} ", task.id);
+            let badge_text = format!("[{state_label}] ");
+
+            let prefix_display_width = UnicodeWidthStr::width(cursor.as_str())
+                + UnicodeWidthStr::width(id_text.as_str())
+                + UnicodeWidthStr::width(badge_text.as_str());
+
+            // Title budget: area_width minus prefix minus 1 trailing space margin
+            let title_budget = area_width.saturating_sub(prefix_display_width);
+
+            let truncated_title = truncate_to_display_width(&task.title, title_budget);
+
             // Main task line
             let mut line_spans: Vec<Span> = Vec::new();
 
@@ -87,15 +177,14 @@ pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme:
             ));
 
             // Task ID
-            line_spans.push(Span::styled(format!("{} ", task.id), theme.fg_emphasis));
+            line_spans.push(Span::styled(id_text, theme.fg_emphasis));
 
             // State badge (human-readable)
-            let state_label = format_task_state(&task.state);
-            line_spans.push(Span::styled(format!("[{state_label}] "), state_style));
+            line_spans.push(Span::styled(badge_text, state_style));
 
-            // Title
+            // Title (truncated to fit)
             line_spans.push(Span::styled(
-                task.title.clone(),
+                truncated_title,
                 if is_selected {
                     theme.fg_emphasis
                 } else {
@@ -105,11 +194,21 @@ pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme:
 
             items.push(ListItem::new(Line::from(line_spans)));
 
-            // Show blocked_by as indented sub-entries
+            // Show blocked_by as indented sub-entries, truncating long lines
             if !task.blocked_by.is_empty() {
+                let blocked_prefix = "      ⬑ blocked by ";
+                let blocked_prefix_width = UnicodeWidthStr::width(blocked_prefix);
                 for blocker_id in &task.blocked_by {
+                    let full_line = format!("{blocked_prefix}{blocker_id}");
+                    let full_width = UnicodeWidthStr::width(full_line.as_str());
+                    let display_line = if full_width > area_width {
+                        let budget = area_width.saturating_sub(blocked_prefix_width);
+                        format!("{blocked_prefix}{}", truncate_to_display_width(blocker_id, budget))
+                    } else {
+                        full_line
+                    };
                     items.push(ListItem::new(Line::from(Span::styled(
-                        format!("      ⬑ blocked by {}", blocker_id),
+                        display_line,
                         theme.status_error,
                     ))));
                 }
@@ -139,6 +238,8 @@ pub(crate) fn render_task_board(frame: &mut Frame, area: Rect, app: &App, theme:
 pub(crate) fn render_task_graph(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
 
+    let area_width = area.width as usize;
+
     // Title
     lines.push(Line::from(Span::styled(
         " Task Dependencies",
@@ -149,16 +250,23 @@ pub(crate) fn render_task_graph(frame: &mut Frame, area: Rect, app: &App, theme:
     let selected_task = app.task_list_cache.get(app.selected_task_idx);
 
     if let Some(selected) = selected_task {
-        // Show the selected task as the focal point
+        // Show the selected task as the focal point — truncate title if needed
         let state_label = format_task_state(&selected.state);
+        let sel_prefix = " Selected: ";
+        let sel_prefix_w = UnicodeWidthStr::width(sel_prefix)
+            + UnicodeWidthStr::width(format!("{} ", selected.id).as_str())
+            + UnicodeWidthStr::width(format!("[{}] ", state_label).as_str());
+        let title_budget = area_width.saturating_sub(sel_prefix_w);
+        let display_title = truncate_to_display_width(&selected.title, title_budget);
+
         lines.push(Line::from(vec![
-            Span::styled(" Selected: ", theme.fg_muted),
+            Span::styled(sel_prefix, theme.fg_muted),
             Span::styled(format!("{} ", selected.id), theme.fg_emphasis),
             Span::styled(
                 format!("[{}] ", state_label),
                 task_state_style(&selected.state, theme),
             ),
-            Span::styled(selected.title.clone(), theme.fg_default),
+            Span::styled(display_title, theme.fg_default),
         ]));
         lines.push(Line::from(""));
 
@@ -174,14 +282,21 @@ pub(crate) fn render_task_graph(frame: &mut Frame, area: Rect, app: &App, theme:
                 match blocker_info {
                     Some(bt) => {
                         let bt_label = format_task_state(&bt.state);
+                        let bt_prefix = "   ⬑ ";
+                        let bt_prefix_w = UnicodeWidthStr::width(bt_prefix)
+                            + UnicodeWidthStr::width(format!("{} ", bt.id).as_str())
+                            + UnicodeWidthStr::width(format!("[{}] ", bt_label).as_str());
+                        let bt_budget = area_width.saturating_sub(bt_prefix_w);
+                        let bt_title = truncate_to_display_width(&bt.title, bt_budget);
+
                         lines.push(Line::from(vec![
-                            Span::styled("   ⬑ ", theme.status_error),
+                            Span::styled(bt_prefix, theme.status_error),
                             Span::styled(format!("{} ", bt.id), theme.fg_emphasis),
                             Span::styled(
                                 format!("[{}] ", bt_label),
                                 task_state_style(&bt.state, theme),
                             ),
-                            Span::styled(bt.title.clone(), theme.fg_default),
+                            Span::styled(bt_title, theme.fg_default),
                         ]));
                     }
                     None => {
@@ -216,14 +331,21 @@ pub(crate) fn render_task_graph(frame: &mut Frame, area: Rect, app: &App, theme:
                 match bt {
                     Some(bt) => {
                         let bt_label = format_task_state(&bt.state);
+                        let bt_prefix = "   ⤳ ";
+                        let bt_prefix_w = UnicodeWidthStr::width(bt_prefix)
+                            + UnicodeWidthStr::width(format!("{} ", bt.id).as_str())
+                            + UnicodeWidthStr::width(format!("[{}] ", bt_label).as_str());
+                        let bt_budget = area_width.saturating_sub(bt_prefix_w);
+                        let bt_title = truncate_to_display_width(&bt.title, bt_budget);
+
                         lines.push(Line::from(vec![
-                            Span::styled("   ⤳ ", theme.status_info),
+                            Span::styled(bt_prefix, theme.status_info),
                             Span::styled(format!("{} ", bt.id), theme.fg_emphasis),
                             Span::styled(
                                 format!("[{}] ", bt_label),
                                 task_state_style(&bt.state, theme),
                             ),
-                            Span::styled(bt.title.clone(), theme.fg_default),
+                            Span::styled(bt_title, theme.fg_default),
                         ]));
                     }
                     None => {
@@ -282,6 +404,8 @@ pub(crate) fn render_task_detail(frame: &mut Frame, area: Rect, app: &App, theme
 
     let em_dash = "—";
 
+    let area_width = area.width as usize;
+
     // Build the detail lines
     let mut lines: Vec<Line> = Vec::new();
 
@@ -339,64 +463,74 @@ pub(crate) fn render_task_detail(frame: &mut Frame, area: Rect, app: &App, theme
         Span::styled(assignee_display.to_string(), theme.fg_default),
     ]));
 
-    // Labels field
+    // Labels field — truncation to area width
+    let label_prefix = "  Labels:      ";
+    let label_prefix_w = UnicodeWidthStr::width(label_prefix);
     let labels_display = if task.labels.is_empty() {
         em_dash.to_string()
     } else {
         task.labels.join(", ")
     };
+    let labels_budget = area_width.saturating_sub(label_prefix_w);
+    let labels_text = truncate_to_display_width(&labels_display, labels_budget);
     lines.push(Line::from(vec![
-        Span::styled("  Labels:      ", theme.fg_muted),
-        Span::styled(labels_display, theme.fg_default),
+        Span::styled(label_prefix, theme.fg_muted),
+        Span::styled(labels_text, theme.fg_default),
     ]));
 
-    // Blocked by field
-    let blocked_by_display = if app.task_detail_blocked_by.is_empty() {
-        em_dash.to_string()
+    // Blocked by field — continuation rows if needed
+    let blocked_by_prefix = "  Blocked by:  ";
+    let blocked_by_cont = "                "; // 16 chars continuation indent
+    if app.task_detail_blocked_by.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(blocked_by_prefix, theme.fg_muted),
+            Span::styled(em_dash.to_string(), theme.fg_muted),
+        ]));
     } else {
-        app.task_detail_blocked_by
+        let ids: Vec<&str> = app
+            .task_detail_blocked_by
             .iter()
-            .map(|t| t.id.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    lines.push(Line::from(vec![
-        Span::styled("  Blocked by:  ", theme.fg_muted),
-        Span::styled(
-            blocked_by_display,
-            if app.task_detail_blocked_by.is_empty() {
-                theme.fg_muted
-            } else {
-                theme.status_error
-            },
-        ),
-    ]));
+            .map(|t| t.id.as_str())
+            .collect();
+        render_continuation_list(
+            &mut lines,
+            blocked_by_prefix,
+            blocked_by_cont,
+            &ids,
+            theme.fg_muted,
+            theme.status_error,
+            area_width,
+        );
+    }
 
-    // Blocking field
-    let blocking_display = if app.task_detail_blocking.is_empty() {
-        em_dash.to_string()
+    // Blocking field — continuation rows if needed
+    let blocking_prefix = "  Blocking:    ";
+    let blocking_cont = "                ";
+    if app.task_detail_blocking.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(blocking_prefix, theme.fg_muted),
+            Span::styled(em_dash.to_string(), theme.fg_muted),
+        ]));
     } else {
-        app.task_detail_blocking
+        let ids: Vec<&str> = app
+            .task_detail_blocking
             .iter()
-            .map(|t| t.id.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    lines.push(Line::from(vec![
-        Span::styled("  Blocking:    ", theme.fg_muted),
-        Span::styled(
-            blocking_display,
-            if app.task_detail_blocking.is_empty() {
-                theme.fg_muted
-            } else {
-                theme.status_warning
-            },
-        ),
-    ]));
+            .map(|t| t.id.as_str())
+            .collect();
+        render_continuation_list(
+            &mut lines,
+            blocking_prefix,
+            blocking_cont,
+            &ids,
+            theme.fg_muted,
+            theme.status_warning,
+            area_width,
+        );
+    }
 
     lines.push(Line::from(""));
 
-    // Description section
+    // Description section — wrap with Paragraph
     lines.push(Line::from(Span::styled("  Description:", theme.fg_muted)));
     if task.description.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -405,7 +539,7 @@ pub(crate) fn render_task_detail(frame: &mut Frame, area: Rect, app: &App, theme
         )));
     } else {
         for desc_line in task.description.lines() {
-            lines.push(Line::from(Span::raw(format!("  {desc_line}"))));
+            lines.push(Line::from(Span::raw(format!("  {desc_line}")));
         }
     }
 
@@ -424,4 +558,95 @@ pub(crate) fn render_task_detail(frame: &mut Frame, area: Rect, app: &App, theme
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
+}
+
+/// Render a comma-separated list of IDs across continuation rows.
+/// First line uses `prefix`, subsequent lines use `cont_indent`.
+/// Values are comma-separated, wrapping to `area_width`.
+fn render_continuation_list(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &'static str,
+    cont_indent: &'static str,
+    ids: &[&str],
+    prefix_style: Style,
+    value_style: Style,
+    area_width: usize,
+) {
+    let prefix_w = UnicodeWidthStr::width(prefix);
+    let cont_w = UnicodeWidthStr::width(cont_indent);
+
+    // Build comma-separated string and see if it fits on one line
+    let joined = ids.join(", ");
+    let joined_w = UnicodeWidthStr::width(joined.as_str());
+
+    if prefix_w + joined_w <= area_width {
+        // Fits on one line
+        lines.push(Line::from(vec![
+            Span::styled(prefix, prefix_style),
+            Span::styled(joined, value_style),
+        ]));
+        return;
+    }
+
+    // Need continuation rows. Emit items one at a time, wrapping as needed.
+    let mut first_line = true;
+    let mut current_line_ids: Vec<&str> = Vec::new();
+    let mut current_line_w: usize = 0;
+
+    let indent_w = if first_line { prefix_w } else { cont_w };
+    let available = area_width.saturating_sub(indent_w);
+
+    for id in ids {
+        let id_w = UnicodeWidthStr::width(*id);
+        let separator_w = if current_line_ids.is_empty() {
+            0
+        } else {
+            2 // ", "
+        };
+
+        if !current_line_ids.is_empty() && current_line_w + separator_w + id_w > available {
+            // Flush current line
+            let text = current_line_ids.join(", ");
+            if first_line {
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, prefix_style),
+                    Span::styled(text, value_style),
+                ]));
+                first_line = false;
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(cont_indent, prefix_style),
+                    Span::styled(text, value_style),
+                ]));
+            }
+            current_line_ids.clear();
+            current_line_w = 0;
+
+            // Recompute available for continuation lines
+            // (cont_indent is constant for non-first lines)
+        }
+
+        current_line_w += if current_line_ids.is_empty() {
+            id_w
+        } else {
+            separator_w + id_w
+        };
+        current_line_ids.push(id);
+    }
+
+    // Flush remaining
+    if !current_line_ids.is_empty() {
+        let text = current_line_ids.join(", ");
+        if first_line {
+            lines.push(Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::styled(text, value_style),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(cont_indent, prefix_style),
+                Span::styled(text, value_style),
+            ]));
+        }
+    }
 }
