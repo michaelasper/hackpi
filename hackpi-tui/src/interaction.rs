@@ -705,10 +705,7 @@ mod tests {
             keys.contains(&"Enter"),
             "should include graph Enter: {keys:?}"
         );
-        assert!(
-            keys.contains(&"Esc"),
-            "should include graph Esc: {keys:?}"
-        );
+        assert!(keys.contains(&"Esc"), "should include graph Esc: {keys:?}");
         assert!(
             keys.contains(&"Ctrl+L"),
             "should include global Ctrl+L: {keys:?}"
