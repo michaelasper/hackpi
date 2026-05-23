@@ -4,3 +4,4 @@ opencode.json
 .opencode/
 .worktrees/
 hackpi-tui/
+.hackpi/
